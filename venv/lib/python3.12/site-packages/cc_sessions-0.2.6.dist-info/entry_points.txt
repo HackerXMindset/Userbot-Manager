@@ -1,3 +1,0 @@
-[console_scripts]
-cc-sessions = cc_sessions.install:main
-cc-sessions-install = cc_sessions.install:main

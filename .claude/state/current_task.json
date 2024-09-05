@@ -1,6 +1,6 @@
 {
-  "task": h-first-task.md",
-  "branch": root/callbot_copy/app,
-  "services": [],
-  "updated": "2025-08-31"
+  "task": "m-implement-solana-forwarding-userbot",
+  "branch": "feature/userbot-manager-improvements", 
+  "services": ["app/ui"],
+  "updated": "2025-09-04"
 }

@@ -2,6 +2,7 @@ from aiogram import types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from typing import List
 import logging
+import time
 
 from app.ui.keyboards import Keyboards
 from app.models import AlertModel
@@ -15,36 +16,65 @@ class AlertsHandler:
         self.db = db
         self.keyboards = keyboards
         self.alert_model = AlertModel(db)
+        self.cache = {}
+        self.cache_time = {}
+    
+    def is_fresh(self, key, seconds=300):
+        """Check if cache entry is fresh (default 5 minutes)"""
+        return key in self.cache_time and time.time() - self.cache_time[key] < seconds
+    
+    async def get_cached_alert_settings(self):
+        """Get alert settings using caching"""
+        if self.is_fresh("alert_settings"):
+            return self.cache["alert_settings"]
+        
+        import json
+        gains = await self.db.fetchval(
+            "SELECT value FROM settings WHERE key = 'gain_multipliers'"
+        )
+        drop = await self.db.fetchval(
+            "SELECT value FROM settings WHERE key = 'drop_percentage'"
+        )
+        alerts_today = await self.db.fetchval("""
+            SELECT COUNT(*) FROM alerts 
+            WHERE triggered_at > CURRENT_DATE
+        """)
+        
+        settings = {
+            'gains': gains,
+            'drop': drop,
+            'alerts_today': alerts_today or 0
+        }
+        
+        self.cache["alert_settings"] = settings
+        self.cache_time["alert_settings"] = time.time()
+        return settings
+    
+    def clear_cache(self):
+        """Clear all cached data"""
+        self.cache.clear()
+        self.cache_time.clear()
     
     async def show_alerts_menu(self, query: types.CallbackQuery):
         """Display alerts configuration"""
         try:
-            # Get current settings
-            gains = await self.db.fetchval(
-                "SELECT value FROM settings WHERE key = 'gain_multipliers'"
-            )
-            drop = await self.db.fetchval(
-                "SELECT value FROM settings WHERE key = 'drop_percentage'"
-            )
+            # Get current settings using cache
+            cached_settings = await self.get_cached_alert_settings()
             
             import json
-            if gains:
+            if cached_settings['gains']:
                 try:
-                    current_gains = json.loads(gains) if isinstance(gains, str) else gains
+                    current_gains = json.loads(cached_settings['gains']) if isinstance(cached_settings['gains'], str) else cached_settings['gains']
                 except:
                     current_gains = [5, 10, 15]
             else:
                 current_gains = [5, 10, 15]
             try:
-                drop_pct = float(drop) if drop else 0.70
+                drop_pct = float(cached_settings['drop']) if cached_settings['drop'] else 0.70
             except (ValueError, TypeError):
                 drop_pct = 0.70
             
-            # Get alert stats
-            alerts_today = await self.db.fetchval("""
-                SELECT COUNT(*) FROM alerts 
-                WHERE triggered_at > CURRENT_DATE
-            """)
+            alerts_today = cached_settings['alerts_today']
             
             text = (
                 f"<b>🚨 Alerts Configuration</b>\n\n"
@@ -431,7 +461,7 @@ class AlertsHandler:
             
             keyboard_rows = []
             for group in groups[:5]:
-                title = group['title'] or f"ID: {group['tg_chat_id']}"
+                title = group['display_name'] or group['title'] or f"ID: {group['tg_chat_id']}"
                 keyboard_rows.append([
                     InlineKeyboardButton(
                         text=f"⚙️ {title}",

@@ -22,7 +22,7 @@ from app.management_bot import ManagementBot
 from app.scheduler import Scheduler
 from app.alerts import AlertSystem
 from app.events import EventRouter
-from app.dex import DexScreenerService
+from app.dex import get_dex_service
 from app.userbot_worker import UserbotManager
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ class SystemManager:
             self.components['event_router'] = EventRouter()
             
             # DexScreener service
-            self.components['dex_service'] = DexScreenerService()
+            self.components['dex_service'] = get_dex_service()
             
             # Alert system
             self.components['alert_system'] = AlertSystem()

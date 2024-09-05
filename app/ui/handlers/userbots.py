@@ -11,6 +11,7 @@ from telethon.errors import (
 )
 import asyncio
 import logging
+import time
 
 from app.ui.keyboards import Keyboards
 from app.ui.states import ManagementStates
@@ -26,11 +27,42 @@ class UserbotsHandler:
         self.db = db
         self.keyboards = keyboards
         self.bot_model = BotModel(db)
+        self.cache = {}
+        self.cache_time = {}
+    
+    def is_fresh(self, key, seconds=300):
+        """Check if cache entry is fresh (default 5 minutes)"""
+        return key in self.cache_time and time.time() - self.cache_time[key] < seconds
+    
+    async def get_cached_userbots_with_assignments(self):
+        """Get userbots with assignments using caching"""
+        if self.is_fresh("userbots_with_assignments"):
+            return self.cache["userbots_with_assignments"]
+        
+        userbots = await self.bot_model.get_userbots_with_assignments()
+        self.cache["userbots_with_assignments"] = userbots
+        self.cache_time["userbots_with_assignments"] = time.time()
+        return userbots
+    
+    async def get_cached_active_userbots(self):
+        """Get active userbots using caching"""
+        if self.is_fresh("active_userbots"):
+            return self.cache["active_userbots"]
+        
+        userbots = await self.bot_model.get_active_userbots()
+        self.cache["active_userbots"] = userbots
+        self.cache_time["active_userbots"] = time.time()
+        return userbots
+    
+    def clear_cache(self):
+        """Clear all cached data"""
+        self.cache.clear()
+        self.cache_time.clear()
     
     async def show_userbots_menu(self, query: types.CallbackQuery):
         """Display userbots management menu"""
         try:
-            userbots = await self.bot_model.get_userbots_with_assignments()
+            userbots = await self.get_cached_userbots_with_assignments()
             
             text = "<b>🤖 Userbots Management</b>\n\n"
             
@@ -470,6 +502,10 @@ class UserbotsHandler:
                 'last_name': me.last_name,
                 'display_name': display_name
             })
+            
+            # Clear cache since we created new userbot
+            self.clear_cache()
+            
             logger.info(f"Successfully saved userbot: {session_name} ({me.id})")
         except Exception as e:
             logger.error(f"Failed to save userbot to database: {e}")
@@ -527,7 +563,7 @@ class UserbotsHandler:
     async def check_userbots_health(self, query: types.CallbackQuery):
         """Check health of all userbots"""
         try:
-            userbots = await self.bot_model.get_active_userbots()
+            userbots = await self.get_cached_active_userbots()
             
             if not userbots:
                 await query.answer("No userbots to check")
@@ -564,7 +600,7 @@ class UserbotsHandler:
             temp_manager = UserbotManager()
             
             # Get all active userbots from database
-            userbots = await self.bot_model.get_active_userbots()
+            userbots = await self.get_cached_active_userbots()
             
             if not userbots:
                 await query.answer("❌ No active userbots found")
@@ -756,6 +792,9 @@ class UserbotsHandler:
             
             # Delete the userbot from database
             success = await self.bot_model.delete(userbot_id)
+            
+            # Clear cache since we deleted userbot
+            self.clear_cache()
             
             if success:
                 text = (

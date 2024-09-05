@@ -59,26 +59,33 @@ class TokenMonitor:
     async def _add_token_to_tracking(self, address: str, target_groups: List[Dict[str, Any]]) -> Optional[int]:
         """Add token to tracking database"""
         try:
-            # Add to DexScreener service for tracking
-            from app.dex import DexScreenerService
-            dex_service = DexScreenerService()
-            await dex_service.add_token(address)
+            # Add to DexScreener service for tracking - this sets initial market cap
+            from app.dex import get_dex_service
+            dex_service = get_dex_service()
+            result = await dex_service.add_token(address)
+            
+            if not result['success']:
+                logger.error(f"Failed to add token {address[:8]}... to DexScreener: {result.get('error', 'Unknown error')}")
+                return None
             
             # Use first target group as primary source group for alerts
             source_group_id = target_groups[0]['id'] if target_groups else None
             
-            # Insert or update token record
+            # Update the existing record with source group info (DexScreener already created it)
             token_record = await db.fetchrow("""
-                INSERT INTO tokens_tracked (address, source_group_id, created_at, last_checked_at) 
-                VALUES ($1, $2, NOW(), NOW()) 
-                ON CONFLICT (address) DO UPDATE SET 
-                    last_checked_at = NOW(),
-                    source_group_id = COALESCE(tokens_tracked.source_group_id, $2)
+                UPDATE tokens_tracked 
+                SET source_group_id = COALESCE(source_group_id, $2),
+                    last_checked_at = NOW()
+                WHERE address = $1
                 RETURNING id
             """, address, source_group_id)
             
-            logger.debug(f"Token {address[:8]}... added to tracking (ID: {token_record['id']}, Group: {source_group_id})")
-            return token_record['id']
+            if token_record:
+                logger.debug(f"Token {address[:8]}... updated in tracking (ID: {token_record['id']}, Group: {source_group_id})")
+                return token_record['id']
+            else:
+                logger.error(f"Token {address[:8]}... not found after DexScreener add")
+                return None
             
         except Exception as e:
             logger.error(f"Error adding token to tracking: {e}")

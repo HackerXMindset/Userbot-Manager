@@ -3,6 +3,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from typing import Dict, Any
 import logging
+import time
 
 from app.ui.keyboards import Keyboards
 from app.ui.states import ManagementStates
@@ -19,11 +20,43 @@ class GroupsHandler:
         self.keyboards = keyboards
         self.group_model = GroupModel(db)
         self.bot_model = BotModel(db)
+        self.cache = {}
+        self.cache_time = {}
+    
+    def is_fresh(self, key, seconds=300):
+        """Check if cache entry is fresh (default 5 minutes)"""
+        return key in self.cache_time and time.time() - self.cache_time[key] < seconds
+    
+    async def get_cached_groups_with_stats(self):
+        """Get groups with stats using caching"""
+        if self.is_fresh("groups_with_stats"):
+            return self.cache["groups_with_stats"]
+        
+        groups = await self.group_model.get_groups_with_stats()
+        self.cache["groups_with_stats"] = groups
+        self.cache_time["groups_with_stats"] = time.time()
+        return groups
+    
+    async def get_cached_group_targets(self, group_id):
+        """Get group targets with caching"""
+        key = f"targets_{group_id}"
+        if self.is_fresh(key):
+            return self.cache[key]
+        
+        targets = await self.group_model.get_targets(group_id)
+        self.cache[key] = targets
+        self.cache_time[key] = time.time()
+        return targets
+    
+    def clear_cache(self):
+        """Clear all cached data"""
+        self.cache.clear()
+        self.cache_time.clear()
     
     async def show_groups_menu(self, query: types.CallbackQuery):
         """Display groups management menu"""
         try:
-            groups_list = await self.group_model.get_groups_with_stats()
+            groups_list = await self.get_cached_groups_with_stats()
             
             text = "<b>👥 Groups Management</b>\n\n"
             
@@ -133,6 +166,9 @@ class GroupsHandler:
                     'cooldown_minutes': 0
                 })
             
+            # Clear cache since we created new group
+            self.clear_cache()
+            
             # Auto-create target for this group
             target_chat_id = chat_id if chat_id else 0  # Use 0 for username-based groups until resolved
             await self.db.execute(
@@ -206,6 +242,10 @@ class GroupsHandler:
         """Toggle group enabled status"""
         try:
             new_status = await self.group_model.toggle_enabled(group_id)
+            
+            # Clear cache since we modified group status
+            self.clear_cache()
+            
             await self.show_group_details(query, group_id)
             await query.answer(f"Group {'enabled' if new_status else 'disabled'}!")
         except Exception as e:

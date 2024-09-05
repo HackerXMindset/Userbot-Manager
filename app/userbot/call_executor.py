@@ -182,25 +182,30 @@ class CallExecutor:
         try:
             # Get or create token record first
             token_record = await db.fetchrow("""
-                INSERT INTO tokens_tracked (address) 
-                VALUES ($1) 
-                ON CONFLICT (address) DO UPDATE SET last_checked_at = NOW()
-                RETURNING id
-            """, token_address)
+                INSERT INTO tokens_tracked (address, source_group_id) 
+                VALUES ($1, $2) 
+                ON CONFLICT (address) DO UPDATE SET 
+                    last_checked_at = NOW(),
+                    source_group_id = COALESCE(tokens_tracked.source_group_id, $2)
+                RETURNING id, source_group_id
+            """, token_address, group_id)
             
-            # Get target record
+            # Get target record  
             target_record = await db.fetchrow("""
-                SELECT id FROM targets WHERE group_id = $1 AND dest_chat_id = $2
+                SELECT id, group_id FROM targets WHERE group_id = $1 AND dest_chat_id = $2
             """, group_id, target_chat_id)
+            
+            if not target_record:
+                logger.warning(f"No target record found for group {group_id} and chat {target_chat_id}")
+                return
             
             # Log successful call
             await db.execute("""
                 INSERT INTO calls (group_id, token_id, target_id, userbot_id, 
                                  scheduled_at, sent_at, status, message_id)
                 VALUES ($1, $2, $3, $4, NOW(), NOW(), 'sent', $5)
-            """, group_id, token_record['id'], 
-                target_record['id'] if target_record else None, 
-                self.userbot_id, message_id)
+            """, target_record['group_id'], token_record['id'], 
+                target_record['id'], self.userbot_id, message_id)
             
         except Exception as e:
             logger.error(f"Error logging successful call: {e}")

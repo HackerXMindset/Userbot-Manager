@@ -40,7 +40,9 @@ class TokenModel(BaseModel):
         """Update token's market cap"""
         query = """
             UPDATE tokens_tracked 
-            SET last_mc = $1, last_checked_at = NOW()
+            SET last_mc = $1, 
+                first_seen_mc = COALESCE(first_seen_mc, $1),
+                last_checked_at = NOW()
             WHERE id = $2
             RETURNING *
         """

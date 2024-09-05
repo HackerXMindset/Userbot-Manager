@@ -245,3 +245,4 @@ class Scheduler:
         except Exception as e:
             logger.error(f"Error getting scheduler statistics: {e}")
             return {}
+    

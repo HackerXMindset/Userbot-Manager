@@ -2,6 +2,7 @@ from aiogram import types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 import logging
+import time
 
 from app.ui.keyboards import Keyboards
 from app.ui.states import ManagementStates
@@ -18,12 +19,43 @@ class SourcesHandler:
         self.keyboards = keyboards
         self.group_model = GroupModel(db)
         self.source_model = SourceChatModel(db)
+        self.cache = {}
+        self.cache_time = {}
+    
+    def is_fresh(self, key, seconds=300):
+        """Check if cache entry is fresh (default 5 minutes)"""
+        return key in self.cache_time and time.time() - self.cache_time[key] < seconds
+    
+    async def get_cached_sources(self):
+        """Get sources with caching"""
+        if self.is_fresh("sources"):
+            return self.cache["sources"]
+        
+        sources = await self.source_model.get_all_sources()
+        self.cache["sources"] = sources
+        self.cache_time["sources"] = time.time()
+        return sources
+    
+    async def get_cached_groups(self):
+        """Get groups with caching"""
+        if self.is_fresh("groups"):
+            return self.cache["groups"]
+        
+        groups = await self.group_model.get_groups_with_stats()
+        self.cache["groups"] = groups
+        self.cache_time["groups"] = time.time()
+        return groups
+    
+    def clear_cache(self):
+        """Clear all cached data"""
+        self.cache.clear()
+        self.cache_time.clear()
     
     async def show_sources_menu(self, query: types.CallbackQuery):
         """Show global sources overview"""
         try:
-            # Get all sources globally
-            sources = await self.source_model.get_all_sources()
+            # Get all sources globally (with caching)
+            sources = await self.get_cached_sources()
             
             text = "<b>📡 Global Sources</b>\n\n"
             text += "Source chats monitor for token addresses and route them to targets.\n\n"
@@ -55,6 +87,7 @@ class SourcesHandler:
             
             keyboard_rows.extend([
                 [InlineKeyboardButton(text="🔄 Refresh", callback_data="menu:sources")],
+                [InlineKeyboardButton(text="🗑️ Clear Cache", callback_data="sources:clear_cache")],
                 [InlineKeyboardButton(text="🔙 Back", callback_data="menu:main")]
             ])
             
@@ -116,6 +149,10 @@ class SourcesHandler:
         elif action == 'set_name':
             source_id = int(parts[2])
             await self.start_set_source_name(query, source_id, state)
+        elif action == 'clear_cache':
+            self.clear_cache()
+            await query.answer("✅ Cache cleared!")
+            await self.show_sources_menu(query)
         else:
             await self.show_sources_menu(query)
     
@@ -152,7 +189,7 @@ class SourcesHandler:
     async def show_manage_global_sources(self, query: types.CallbackQuery):
         """Show all sources for management"""
         try:
-            sources = await self.source_model.get_all_sources()
+            sources = await self.get_cached_sources()
             
             text = "<b>📋 Manage Global Sources</b>\n\n"
             
@@ -166,7 +203,7 @@ class SourcesHandler:
                 type_emojis = {'channel': '📢', 'group': '👥', 'dm': '💬'}
                 status = "✅" if source['enabled'] else "❌"
                 type_emoji = type_emojis.get(source['source_type'], '📡')
-                name = source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
+                name = source.get('display_name') or source.get('group_display_name') or source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
                 
                 keyboard_rows.append([
                     InlineKeyboardButton(
@@ -193,13 +230,13 @@ class SourcesHandler:
             text += "Manage how sources route to target groups.\n\n"
             text += "Select a source to manage its routing:"
             
-            sources = await self.source_model.get_all_sources()
+            sources = await self.get_cached_sources()
             keyboard_rows = []
             
             for source in sources:
                 type_emojis = {'channel': '📢', 'group': '👥', 'dm': '💬'}
                 type_emoji = type_emojis.get(source['source_type'], '📡')
-                name = source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
+                name = source.get('display_name') or source.get('group_display_name') or source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
                 route_count = source['route_count'] or 0
                 
                 keyboard_rows.append([
@@ -307,8 +344,8 @@ class SourcesHandler:
                 await query.answer("❌ Source not found")
                 return
             
-            # Get all groups
-            groups = await self.group_model.get_groups_with_stats()
+            # Get all groups (with caching)
+            groups = await self.get_cached_groups()
             
             # Get existing routing rules to exclude them
             existing_routes = await self.source_model.get_routing_rules(source_id)
@@ -330,7 +367,7 @@ class SourcesHandler:
                 keyboard_rows = []
                 
                 for group in available_groups:
-                    group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+                    group_name = group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}"
                     status_icon = "✅" if group['enabled'] else "❌"
                     
                     keyboard_rows.append([
@@ -365,8 +402,11 @@ class SourcesHandler:
             # Create the routing rule
             route = await self.source_model.add_routing_rule(source_id, group_id)
             
+            # Clear cache since we added new routing rule
+            self.clear_cache()
+            
             source_name = source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
-            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+            group_name = group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}"
             
             text = f"✅ <b>Routing Rule Created</b>\n\n"
             text += f"<b>Source:</b> {source_name}\n"
@@ -403,8 +443,11 @@ class SourcesHandler:
             # Remove the routing rule
             success = await self.source_model.remove_routing_rule(source_id, group_id)
             
+            # Clear cache since we removed routing rule
+            self.clear_cache()
+            
             source_name = source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
-            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+            group_name = group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}"
             
             if success:
                 text = f"✅ <b>Routing Rule Removed</b>\n\n"
@@ -436,6 +479,9 @@ class SourcesHandler:
         """Toggle source enabled/disabled status"""
         try:
             new_status = await self.source_model.toggle_enabled(source_id)
+            
+            # Clear cache since we modified source status
+            self.clear_cache()
             
             status_text = "enabled" if new_status else "disabled"
             await query.answer(f"✅ Source {status_text}")
@@ -475,7 +521,7 @@ class SourcesHandler:
     async def start_add_source(self, query: types.CallbackQuery):
         """Start adding a source - select group"""
         try:
-            groups = await self.group_model.get_groups_with_stats()
+            groups = await self.get_cached_groups()
             
             if not groups:
                 await query.answer("❌ No groups available. Add groups first.")
@@ -486,7 +532,7 @@ class SourcesHandler:
             
             keyboard_rows = []
             for group in groups:
-                group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+                group_name = group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}"
                 keyboard_rows.append([
                     InlineKeyboardButton(
                         text=group_name,
@@ -509,7 +555,7 @@ class SourcesHandler:
     async def show_manage_sources(self, query: types.CallbackQuery):
         """Show source management - select group"""
         try:
-            groups = await self.group_model.get_groups_with_stats()
+            groups = await self.get_cached_groups()
             
             text = "<b>📋 Manage Sources</b>\n\n"
             text += "Select group to manage its sources:"
@@ -517,7 +563,7 @@ class SourcesHandler:
             keyboard_rows = []
             for group in groups:
                 sources = await self.source_model.get_by_group(group['id'])
-                group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+                group_name = group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}"
                 keyboard_rows.append([
                     InlineKeyboardButton(
                         text=f"{group_name} ({len(sources)} sources)",
@@ -543,7 +589,7 @@ class SourcesHandler:
             group = await self.db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
             sources = await self.source_model.get_by_group(group_id)
             
-            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+            group_name = group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}"
             text = f"<b>📋 Sources for {group_name}</b>\n\n"
             
             if not sources:
@@ -633,6 +679,9 @@ class SourcesHandler:
                     name=title,
                     title=title
                 )
+            
+            # Clear cache since we added new source
+            self.clear_cache()
             
             type_emojis = {'channel': '📢', 'group': '👥', 'dm': '💬'}
             text = f"✅ <b>{type_emojis.get(source_type, '')} {source_type.title()} Source Added</b>\n\n"
@@ -921,6 +970,9 @@ class SourcesHandler:
             
             # Finally delete the source
             success = await self.source_model.remove_source(source_id)
+            
+            # Clear cache since we deleted source
+            self.clear_cache()
             
             if success:
                 text = f"✅ <b>{type_emoji} Source Deleted</b>\n\n"

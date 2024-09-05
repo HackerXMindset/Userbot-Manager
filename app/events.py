@@ -145,8 +145,8 @@ class EventRouter:
                 return
             
             # Add token to tracking if not already tracked
-            from app.dex import DexScreenerService
-            dex_service = DexScreenerService()
+            from app.dex import get_dex_service
+            dex_service = get_dex_service()
             result = await dex_service.add_token(token_address)
             
             if result['success']:

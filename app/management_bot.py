@@ -735,7 +735,9 @@ class ManagementBot:
             action = query.data.split(':', 1)[1]
             
             if action == 'cleanup':
-                await self.cleanup_tracking_data(query)
+                await self.menu_handler.confirm_cleanup(query)
+            elif action == 'cleanup:confirm':
+                await self.menu_handler.execute_cleanup(query)
             else:
                 await query.answer("❌ Unknown tracking action")
                 

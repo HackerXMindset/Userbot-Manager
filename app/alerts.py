@@ -104,15 +104,19 @@ class AlertSystem:
             else:
                 gain_multipliers = [5, 10, 15]
             
-            # Check gain alerts
+            # Check gain alerts - fire ALL thresholds that haven't been triggered yet
             for threshold in sorted(gain_multipliers):
                 threshold_decimal = Decimal(str(threshold))
                 
-                # If current multiplier exceeds threshold and we haven't fired this alert yet
-                if (current_multiplier >= threshold_decimal and 
-                    last_hit_multiplier < threshold_decimal):
+                # Check if current multiplier exceeds this threshold
+                if current_multiplier >= threshold_decimal:
+                    # Check if this specific threshold has already fired
+                    already_fired = await self.alert_model.has_alert_fired(
+                        token['id'], 'gain', threshold_decimal
+                    )
                     
-                    await self._trigger_gain_alert(token, threshold_decimal, current_multiplier)
+                    if not already_fired:
+                        await self._trigger_gain_alert(token, threshold_decimal, current_multiplier)
             
             # Check drop alert
             await self._check_drop_alert(token, current_multiplier)
@@ -126,6 +130,12 @@ class AlertSystem:
     async def _trigger_gain_alert(self, token: Dict[str, Any], threshold: Decimal, current_multiplier: Decimal):
         """Trigger a gain alert"""
         try:
+            # Verify token still exists before proceeding
+            token_exists = await self.token_model.get_by_address(token['address'])
+            if not token_exists:
+                logger.warning(f"Token {token['address'][:8]}... no longer exists, skipping alert")
+                return
+            
             # Check if this alert has already fired
             already_fired = await self.alert_model.has_alert_fired(
                 token['id'], 'gain', threshold
@@ -151,7 +161,7 @@ class AlertSystem:
             logger.info(f"Triggered {threshold}x gain alert for token {token['address'][:8]}...")
             
         except Exception as e:
-            logger.error(f"Error triggering gain alert: {e}")
+            logger.error(f"Error triggering gain alert for token {token['address'][:8] if 'address' in token else token['id']}: {e}")
     
     async def _check_drop_alert(self, token: Dict[str, Any], current_multiplier: Decimal):
         """Check for drop alert (stop loss)"""
@@ -225,9 +235,14 @@ class AlertSystem:
                 logger.warning(f"No destination groups found for token {token['address'][:8]}...")
                 return
             
-            # Send /pnl command to each destination group
-            for group in destination_groups:
+            # Send /pnl command to each destination group with 20-second delay between groups
+            for i, group in enumerate(destination_groups):
                 try:
+                    # Add 20-second delay between groups (skip for first group)
+                    if i > 0:
+                        logger.info(f"Waiting 20 seconds before sending to next group...")
+                        await asyncio.sleep(20)
+                    
                     # Get userbot assigned to this group
                     userbot_info = await db.fetchrow("""
                         SELECT b.id, b.session_name

@@ -26,18 +26,41 @@ class MenuHandler:
         self._stats_cache = {}
         self._cache_ttl = 300  # 5 minutes
         self._max_cache_entries = 20  # Limit cache size
+        self.cache = {}
+        self.cache_time = {}
+    
+    def is_fresh(self, key, seconds=300):
+        """Check if cache entry is fresh (default 5 minutes)"""
+        return key in self.cache_time and time.time() - self.cache_time[key] < seconds
+    
+    async def get_cached_dashboard_stats(self):
+        """Get dashboard stats using caching"""
+        if self.is_fresh("dashboard_stats"):
+            return self.cache["dashboard_stats"]
+        
+        stats = await self.db.fetchrow("""
+            SELECT 
+                (SELECT COUNT(*) FROM groups WHERE enabled = true) as groups_count,
+                (SELECT COUNT(*) FROM bots WHERE kind = 'userbot' AND status = 'active') as userbots_count,
+                (SELECT COUNT(*) FROM tokens_tracked WHERE status = 'active') as tokens_active,
+                (SELECT COUNT(*) FROM calls WHERE sent_at > CURRENT_DATE AND status = 'sent') as calls_today
+        """)
+        
+        self.cache["dashboard_stats"] = dict(stats) if stats else {}
+        self.cache_time["dashboard_stats"] = time.time()
+        return self.cache["dashboard_stats"]
+    
+    def clear_cache(self):
+        """Clear all cached data"""
+        self.cache.clear()
+        self.cache_time.clear()
+        self._stats_cache.clear()  # Also clear old cache
     
     async def get_status_text(self) -> str:
         """Generate status overview"""
         try:
-            # Simple batch query - no complex caching for small scale
-            result = await self.db.fetchrow("""
-                SELECT 
-                    (SELECT COUNT(*) FROM groups WHERE enabled = true) as groups_count,
-                    (SELECT COUNT(*) FROM bots WHERE kind = 'userbot' AND status = 'active') as userbots_count,
-                    (SELECT COUNT(*) FROM tokens_tracked WHERE status = 'active') as tokens_active,
-                    (SELECT COUNT(*) FROM calls WHERE sent_at > CURRENT_DATE AND status = 'sent') as calls_today
-            """)
+            # Use cached dashboard stats
+            result = await self.get_cached_dashboard_stats()
             
             return (
                 f"📊 <b>System Status</b>\n"
@@ -252,49 +275,62 @@ class MenuHandler:
                     self.db.fetchrow(f"""
                 WITH time_period AS (
                     SELECT NOW() - INTERVAL '{interval}' AS start_time
-                ),
-                token_stats AS (
-                    SELECT 
-                        COUNT(*) as tokens_tracked,
-                        AVG(CASE 
-                            WHEN first_seen_mc > 0 AND last_mc > 0 
-                            THEN LEAST(last_mc / first_seen_mc, 1000) -- Cap at 1000x to avoid infinity
-                            ELSE 1 
-                        END) as avg_multiplier,
-                        MAX(CASE 
-                            WHEN first_seen_mc > 0 AND last_mc > 0 
-                            THEN LEAST(last_mc / first_seen_mc, 1000) -- Cap at 1000x
-                            ELSE 1 
-                        END) as top_multiplier,
-                        COUNT(CASE WHEN status = 'active' THEN 1 END) as active_tokens,
-                        COUNT(CASE WHEN status = 'stopped' THEN 1 END) as stopped_tokens
-                    FROM tokens_tracked tt, time_period tp
-                    WHERE tt.created_at >= tp.start_time
-                ),
-                alert_stats AS (
-                    SELECT COUNT(*) as alerts_count
-                    FROM alerts a, time_period tp
-                    WHERE a.triggered_at >= tp.start_time
-                ),
-                call_stats AS (
-                    SELECT COUNT(*) as calls_sent
-                    FROM calls c, time_period tp
-                    WHERE c.sent_at >= tp.start_time AND c.status = 'sent'
                 )
                 SELECT 
-                    COALESCE(ts.tokens_tracked, 0) as tokens_tracked,
-                    COALESCE(ts.avg_multiplier, 0) as avg_multiplier,
-                    COALESCE(ts.top_multiplier, 0) as top_multiplier,
-                    CASE 
-                        WHEN COALESCE(ts.tokens_tracked, 0) > 0 
-                        THEN (COALESCE(ts.active_tokens, 0)::float / ts.tokens_tracked * 100)
-                        ELSE 0 
-                    END as success_rate,
-                    COALESCE(als.alerts_count, 0) as alerts_count,
-                    COALESCE(cs.calls_sent, 0) as calls_sent
-                FROM token_stats ts
-                CROSS JOIN alert_stats als
-                CROSS JOIN call_stats cs
+                    -- Token statistics (check both created_at and last_checked_at)
+                    (SELECT COUNT(*) 
+                     FROM tokens_tracked tt 
+                     WHERE tt.created_at >= (SELECT start_time FROM time_period)
+                        OR tt.last_checked_at >= (SELECT start_time FROM time_period)
+                    ) as tokens_tracked,
+                    
+                    -- Average multiplier (handle nulls properly)
+                    (SELECT COALESCE(AVG(CASE 
+                        WHEN first_seen_mc > 0 AND last_mc > 0 
+                        THEN LEAST(last_mc / first_seen_mc, 1000)
+                        ELSE 1.0 
+                     END), 0.0)
+                     FROM tokens_tracked tt 
+                     WHERE tt.created_at >= (SELECT start_time FROM time_period)
+                        OR tt.last_checked_at >= (SELECT start_time FROM time_period)
+                    ) as avg_multiplier,
+                    
+                    -- Top multiplier
+                    (SELECT COALESCE(MAX(CASE 
+                        WHEN first_seen_mc > 0 AND last_mc > 0 
+                        THEN LEAST(last_mc / first_seen_mc, 1000)
+                        ELSE 1.0 
+                     END), 0.0)
+                     FROM tokens_tracked tt 
+                     WHERE tt.created_at >= (SELECT start_time FROM time_period)
+                        OR tt.last_checked_at >= (SELECT start_time FROM time_period)
+                    ) as top_multiplier,
+                    
+                    -- Success rate (active tokens vs total)
+                    (SELECT 
+                        CASE 
+                            WHEN COUNT(*) > 0 
+                            THEN (COUNT(CASE WHEN status = 'active' THEN 1 END)::float / COUNT(*) * 100)
+                            ELSE 0 
+                        END
+                     FROM tokens_tracked tt 
+                     WHERE tt.created_at >= (SELECT start_time FROM time_period)
+                        OR tt.last_checked_at >= (SELECT start_time FROM time_period)
+                    ) as success_rate,
+                    
+                    -- Alert count
+                    (SELECT COUNT(*) 
+                     FROM alerts a 
+                     WHERE a.triggered_at >= (SELECT start_time FROM time_period)
+                    ) as alerts_count,
+                    
+                    -- Calls sent (check multiple status values and time fields)
+                    (SELECT COUNT(*) 
+                     FROM calls c 
+                     WHERE (c.sent_at >= (SELECT start_time FROM time_period) 
+                            OR c.created_at >= (SELECT start_time FROM time_period))
+                       AND c.status IN ('sent', 'queued', 'completed')
+                    ) as calls_sent
             """), timeout=30.0  # 30 second timeout
                 )
             except asyncio.TimeoutError:
@@ -385,4 +421,66 @@ class MenuHandler:
                 'tokens_tracked': 0, 'avg_multiplier': 0.0, 'top_multiplier': 0.0,
                 'success_rate': 0.0, 'alerts_count': 0, 'calls_sent': 0, 'top_tokens': []
             }
+    
+    async def confirm_cleanup(self, query: types.CallbackQuery):
+        """Show cleanup confirmation dialog"""
+        try:
+            text = (
+                "<b>⚠️ Database Cleanup Confirmation</b>\n\n"
+                "This will permanently delete:\n"
+                "• All tracked tokens\n"
+                "• All alert history\n"
+                "• All call records\n\n"
+                "<b>This action cannot be undone!</b>\n\n"
+                "Are you sure you want to proceed?"
+            )
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="❌ Cancel", callback_data="tracking_time:1d"),
+                    InlineKeyboardButton(text="🗑️ Delete All", callback_data="tracking:cleanup:confirm")
+                ]
+            ])
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            await query.answer()
+            
+        except Exception as e:
+            logger.error(f"Error showing cleanup confirmation: {e}")
+            await query.answer("❌ Error showing confirmation", show_alert=True)
+    
+    async def execute_cleanup(self, query: types.CallbackQuery):
+        """Execute database cleanup after confirmation"""
+        try:
+            # Delete all data
+            token_count = await self.db.fetchval("DELETE FROM tokens_tracked")
+            await self.db.execute("DELETE FROM alerts")
+            await self.db.execute("DELETE FROM calls")
+            
+            # Clear cache
+            self.clear_cache()
+            
+            text = (
+                "<b>✅ Cleanup Complete</b>\n\n"
+                f"Successfully deleted:\n"
+                f"• {token_count or 0} tokens\n"
+                f"• All alerts\n"
+                f"• All calls\n\n"
+                "Database has been reset."
+            )
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Back to Tracking", callback_data="tracking_time:1d")]
+            ])
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            await query.answer("🗑️ All data deleted successfully", show_alert=True)
+            
+        except Exception as e:
+            logger.error(f"Error executing cleanup: {e}")
+            await query.message.edit_text(
+                "❌ Error during cleanup. Please try again.",
+                reply_markup=self.keyboards.back_button("tracking_time:1d")
+            )
+            await query.answer("❌ Cleanup failed", show_alert=True)
     
