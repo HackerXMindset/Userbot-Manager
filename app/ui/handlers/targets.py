@@ -15,6 +15,15 @@ class TargetsHandler:
         self.keyboards = keyboards
         self.group_model = GroupModel(db)
     
+    async def handle_target_action(self, query: types.CallbackQuery):
+        """Handle target actions"""
+        action = query.data.split(':', 1)[1]
+        
+        if action == 'add':
+            await self.start_add_target(query)
+        else:
+            await self.show_targets_menu(query)
+    
     async def show_targets_menu(self, query: types.CallbackQuery):
         """Show targets overview"""
         try:
@@ -48,8 +57,56 @@ class TargetsHandler:
                 [InlineKeyboardButton(text="🔙 Back", callback_data="menu:main")]
             ])
             
-            await query.message.edit_text(text, reply_markup=keyboard)
+            try:
+                await query.message.edit_text(text, reply_markup=keyboard)
+            except Exception as edit_error:
+                if "message is not modified" in str(edit_error):
+                    # Message content is identical, just answer the callback
+                    await query.answer()
+                else:
+                    raise edit_error
             
         except Exception as e:
             logger.error(f"Error showing targets menu: {e}")
             await query.answer("❌ Error loading targets")
+
+    async def start_add_target(self, query: types.CallbackQuery):
+        """Start adding a target"""
+        try:
+            # Get available groups
+            groups = await self.group_model.get_groups_with_stats()
+            
+            if not groups:
+                await query.answer("❌ No groups available. Add groups first.")
+                return
+            
+            text = "<b>➕ Add Target</b>\n\n"
+            text += "Select a group to add a target to:"
+            
+            keyboard_rows = []
+            for group in groups:
+                group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+                keyboard_rows.append([
+                    InlineKeyboardButton(
+                        text=group_name,
+                        callback_data=f"target_group:{group['id']}"
+                    )
+                ])
+            
+            keyboard_rows.append([
+                InlineKeyboardButton(text="🔙 Back", callback_data="menu:targets")
+            ])
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+            
+            try:
+                await query.message.edit_text(text, reply_markup=keyboard)
+            except Exception as edit_error:
+                if "message is not modified" in str(edit_error):
+                    await query.answer()
+                else:
+                    raise edit_error
+            
+        except Exception as e:
+            logger.error(f"Error starting add target: {e}")
+            await query.answer("❌ Error starting target setup")

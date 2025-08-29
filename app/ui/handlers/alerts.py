@@ -1,4 +1,5 @@
 from aiogram import types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from typing import List
 import logging
 
@@ -27,7 +28,7 @@ class AlertsHandler:
             )
             
             current_gains = gains or [5, 10, 15]
-            drop_pct = drop or 0.70
+            drop_pct = float(drop) if drop else 0.70
             
             # Get alert stats
             alerts_today = await self.db.fetchval("""
@@ -112,7 +113,7 @@ class AlertsHandler:
             drop = await self.db.fetchval(
                 "SELECT value FROM settings WHERE key = 'drop_percentage'"
             )
-            drop_pct = drop or 0.70
+            drop_pct = float(drop) if drop else 0.70
             
             text = (
                 f"<b>📉 Drop Threshold</b>\n\n"

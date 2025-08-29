@@ -86,13 +86,13 @@ class GroupsHandler:
             "Type /cancel to abort.",
             reply_markup=self.keyboards.cancel_button("menu:groups")
         )
-        await ManagementStates.adding_group.set()
+        await state.set_state(ManagementStates.adding_group.state)
         await state.update_data(message_id=query.message.message_id)
     
     async def process_group_input(self, message: types.Message, state: FSMContext):
         """Process group addition input"""
         if message.text == '/cancel':
-            await state.finish()
+            await state.clear()
             return
         
         try:
@@ -141,7 +141,7 @@ class GroupsHandler:
             await message.answer(f"❌ Error adding group: {e}")
         
         finally:
-            await state.finish()
+            await state.clear()
     
     async def show_group_details(self, query: types.CallbackQuery, group_id: int):
         """Show detailed group information"""

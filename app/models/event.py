@@ -2,6 +2,7 @@ from typing import Dict, Any, Optional, List
 from .base import BaseModel
 from decimal import Decimal
 import asyncpg
+import json
 
 class EventModel(BaseModel):
     """Model for managing events"""
@@ -19,7 +20,7 @@ class EventModel(BaseModel):
             VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING *
         """
-        return await self.db.fetchrow(query, kind, src_chat_id, src_msg_id, user_id, token_id, payload)
+        return await self.db.fetchrow(query, kind, src_chat_id, src_msg_id, user_id, token_id, json.dumps(payload))
     
     async def get_events_by_type(self, kind: str, limit: int = 100) -> List[asyncpg.Record]:
         """Get events by type"""

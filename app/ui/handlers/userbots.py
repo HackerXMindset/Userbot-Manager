@@ -3,7 +3,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import (
+    SessionPasswordNeededError, 
+    PhoneCodeInvalidError, 
+    FloodWaitError,
+    PasswordHashInvalidError
+)
+import asyncio
 import logging
 
 from app.ui.keyboards import Keyboards
@@ -20,7 +26,6 @@ class UserbotsHandler:
         self.db = db
         self.keyboards = keyboards
         self.bot_model = BotModel(db)
-        self.temp_clients = {}  # Store temporary clients during login
     
     async def show_userbots_menu(self, query: types.CallbackQuery):
         """Display userbots management menu"""
@@ -72,19 +77,38 @@ class UserbotsHandler:
             "<b>➕ Add New Userbot</b>\n\n"
             "I'll help you login a userbot account.\n"
             "Please enter the phone number (with country code):\n\n"
-            "Example: +919876543210",
+            "Example: +919876543210\n\n"
+            "Type /cancel to abort.",
             reply_markup=self.keyboards.cancel_button("menu:userbots")
         )
-        await ManagementStates.userbot_login_phone.set()
-        await state.update_data(message_id=query.message.message_id)
+        await state.set_state(ManagementStates.userbot_login_phone)
+        await state.update_data(
+            message_id=query.message.message_id,
+            retry_count=0
+        )
     
-    async def process_phone_input(self, message: types.Message, state: FSMContext, bot):
-        """Process userbot phone number"""
+    async def process_phone_input(self, message: types.Message, state: FSMContext):
+        """Process userbot phone number with proper validation and error handling"""
+        if message.text == '/cancel':
+            await message.answer("❌ Userbot login cancelled.")
+            await state.clear()
+            return
+            
         phone = message.text.strip()
-        await message.delete()  # Hide phone number
+        await message.delete()  # Hide phone number for security
+        
+        # Validate phone format
+        if not phone.startswith('+'):
+            await message.answer("❌ Please include country code (e.g., +919876543210)")
+            return
+            
+        if not phone[1:].replace(' ', '').replace('-', '').isdigit():
+            await message.answer("❌ Invalid phone number format. Use: +919876543210")
+            return
         
         try:
-            session_name = f"userbot_{phone[-6:]}"
+            # Create client with StringSession
+            session_name = f"userbot_{phone.replace('+', '')[-8:]}"
             client = TelegramClient(
                 StringSession(),
                 settings.api_id,
@@ -92,60 +116,114 @@ class UserbotsHandler:
             )
             
             await client.connect()
-            await client.send_code_request(phone)
             
-            # Store client temporarily
-            self.temp_clients[message.from_user.id] = client
+            # Check if already authorized (edge case)
+            try:
+                me = await client.get_me()
+                if me and hasattr(me, 'id'):
+                    # If we can get user info, already authorized
+                    session_string = client.session.save()
+                    await client.disconnect()
+                    
+                    # Save directly to database
+                    await self._save_userbot(session_name, session_string, me)
+                    await message.answer(
+                        f"✅ <b>Userbot Already Authorized!</b>\n\n"
+                        f"Name: {me.first_name}\n"
+                        f"Username: @{me.username or 'none'}\n"
+                        f"Session: {session_name}"
+                    )
+                    await state.clear()
+                    return
+            except Exception:
+                # Not authorized, continue with normal flow
+                pass
             
-            data = await state.get_data()
-            msg_id = data.get('message_id')
+            # Send code request
+            sent_code = await client.send_code_request(phone)
+            session_string = client.session.save()
+            await client.disconnect()  # Disconnect after getting session
             
-            await bot.edit_message_text(
-                chat_id=message.chat.id,
-                message_id=msg_id,
-                text=(
-                    f"<b>📱 Code Sent</b>\n\n"
-                    f"A code has been sent to: {'*' * (len(phone)-4) + phone[-4:]}\n"
-                    f"Please enter the verification code:"
-                ),
+            # Store session data in FSM state (not memory)
+            await state.update_data(
+                phone=phone,
+                session_name=session_name,
+                session_string=session_string,
+                phone_code_hash=sent_code.phone_code_hash
+            )
+            
+            await state.set_state(ManagementStates.userbot_login_code)
+            
+            masked_phone = '*' * (len(phone) - 4) + phone[-4:]
+            await message.answer(
+                f"<b>📱 Code Sent</b>\n\n"
+                f"A verification code has been sent to: {masked_phone}\n"
+                f"Please enter the 5-digit code:\n\n"
+                f"Type /cancel to abort.",
                 reply_markup=self.keyboards.cancel_button("menu:userbots")
             )
             
-            await ManagementStates.userbot_login_code.set()
-            await state.update_data(phone=phone, session_name=session_name)
+        except FloodWaitError as e:
+            await message.answer(
+                f"❌ <b>Rate Limited</b>\n\n"
+                f"Please wait {e.seconds} seconds before trying again."
+            )
+            await state.clear()
             
         except Exception as e:
-            await message.answer(f"❌ Error: {e}")
-            await state.finish()
+            logger.error(f"Phone processing error: {e}")
+            await message.answer(
+                f"❌ <b>Error</b>\n\n"
+                f"Failed to send verification code: {str(e)}\n"
+                f"Please try again with /start"
+            )
+            await state.clear()
     
     async def process_code_input(self, message: types.Message, state: FSMContext):
-        """Process verification code"""
+        """Process verification code with proper error handling"""
+        if message.text == '/cancel':
+            await message.answer("❌ Userbot login cancelled.")
+            await state.clear()
+            return
+            
         code = message.text.strip()
-        await message.delete()  # Hide code
+        await message.delete()  # Hide verification code for security
+        
+        # Validate code format
+        if not code.isdigit() or len(code) != 5:
+            await message.answer("❌ Please enter a valid 5-digit verification code.")
+            return
         
         data = await state.get_data()
         phone = data.get('phone')
         session_name = data.get('session_name')
+        session_string = data.get('session_string')
         
-        client = self.temp_clients.get(message.from_user.id)
-        if not client:
-            await message.answer("❌ Session expired. Please start again.")
-            await state.finish()
+        if not all([phone, session_name, session_string]):
+            await message.answer("❌ Session data lost. Please start again with /start.")
+            await state.clear()
             return
         
         try:
-            await client.sign_in(phone, code)
-            session_string = client.session.save()
+            # Recreate client from stored session
+            client = TelegramClient(
+                StringSession(session_string),
+                settings.api_id,
+                settings.api_hash
+            )
             
-            # Save to database
-            userbot = await self.bot_model.create({
-                'kind': 'userbot',
-                'session_name': session_name,
-                'status': 'active',
-                'session_string': session_string
-            })
+            await client.connect()
             
-            me = await client.get_me()
+            # Attempt sign in with verification code
+            phone_code_hash = data.get('phone_code_hash')
+            me = await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
+            
+            # Success - save session
+            final_session = client.session.save()
+            await client.disconnect()
+            
+            # Save userbot to database
+            await self._save_userbot(session_name, final_session, me)
             
             await message.answer(
                 f"✅ <b>Userbot Added Successfully!</b>\n\n"
@@ -154,26 +232,221 @@ class UserbotsHandler:
                 f"ID: <code>{me.id}</code>\n\n"
                 f"Session: {session_name}"
             )
-            
-            await client.disconnect()
-            del self.temp_clients[message.from_user.id]
+            await state.clear()
             
         except SessionPasswordNeededError:
+            # 2FA is required
+            try:
+                # Get password hint if available
+                from telethon import functions
+                password_info = await client(functions.account.GetPasswordRequest())
+                hint = password_info.hint or "No hint available"
+                await client.disconnect()
+                
+                # Update session string and move to 2FA state
+                updated_session = client.session.save()
+                await state.update_data(
+                    session_string=updated_session,
+                    password_hint=hint,
+                    retry_count=0
+                )
+                await state.set_state(ManagementStates.userbot_login_2fa)
+                
+                await message.answer(
+                    f"🔐 <b>2FA Required</b>\n\n"
+                    f"This account has two-factor authentication enabled.\n"
+                    f"Hint: <i>{hint}</i>\n\n"
+                    f"Please enter your 2FA password:\n\n"
+                    f"Type /cancel to abort."
+                )
+                
+            except Exception as e:
+                logger.error(f"2FA setup error: {e}")
+                await message.answer(
+                    "🔐 <b>2FA Required</b>\n\n"
+                    "Please enter your 2FA password:\n\n"
+                    "Type /cancel to abort."
+                )
+                await client.disconnect()
+                await state.set_state(ManagementStates.userbot_login_2fa)
+            
+        except PhoneCodeInvalidError:
             await message.answer(
-                "🔐 This account has 2FA enabled.\n"
-                "Please enter your 2FA password:"
+                "❌ <b>Invalid Code</b>\n\n"
+                "The verification code is incorrect. Please try again:"
             )
-            await ManagementStates.userbot_login_2fa.set()
+            await client.disconnect()
+            
+        except FloodWaitError as e:
+            await message.answer(
+                f"❌ <b>Rate Limited</b>\n\n"
+                f"Please wait {e.seconds} seconds before trying again."
+            )
+            await client.disconnect()
+            await state.clear()
             
         except Exception as e:
-            await message.answer(f"❌ Error: {e}")
-            if client:
+            logger.error(f"Code processing error: {e}")
+            await message.answer(
+                f"❌ <b>Error</b>\n\n"
+                f"Authentication failed: {str(e)}\n"
+                f"Please start again with /start"
+            )
+            try:
                 await client.disconnect()
-                if message.from_user.id in self.temp_clients:
-                    del self.temp_clients[message.from_user.id]
+            except:
+                pass
+            await state.clear()
+    
+    async def process_2fa_input(self, message: types.Message, state: FSMContext):
+        """Process 2FA password with retry logic and proper error handling"""
+        if message.text == '/cancel':
+            await message.answer("❌ Userbot login cancelled.")
+            await state.clear()
+            return
+            
+        password = message.text
+        await message.delete()  # Hide password for security
         
-        finally:
-            await state.finish()
+        data = await state.get_data()
+        phone = data.get('phone')
+        session_name = data.get('session_name')
+        session_string = data.get('session_string')
+        password_hint = data.get('password_hint', 'No hint available')
+        retry_count = data.get('retry_count', 0)
+        
+        if not all([phone, session_name, session_string]):
+            await message.answer("❌ Session data lost. Please start again with /start.")
+            await state.clear()
+            return
+        
+        # Check retry limit
+        if retry_count >= 3:
+            await message.answer(
+                "❌ <b>Maximum Attempts Exceeded</b>\n\n"
+                "Too many failed attempts. Please start again with /start."
+            )
+            await state.clear()
+            return
+        
+        try:
+            # Recreate client from stored session
+            client = TelegramClient(
+                StringSession(session_string),
+                settings.api_id,
+                settings.api_hash
+            )
+            
+            await client.connect()
+            
+            # Attempt 2FA authentication
+            me = await client.sign_in(password=password)
+            
+            # Success - save session
+            final_session = client.session.save()
+            await client.disconnect()
+            
+            # Save userbot to database
+            await self._save_userbot(session_name, final_session, me)
+            
+            await message.answer(
+                f"✅ <b>Userbot Added Successfully!</b>\n\n"
+                f"Name: {me.first_name}\n"
+                f"Username: @{me.username or 'none'}\n"
+                f"ID: <code>{me.id}</code>\n\n"
+                f"Session: {session_name}"
+            )
+            await state.clear()
+            
+        except PasswordHashInvalidError:
+            # Invalid 2FA password - allow retry
+            await client.disconnect()
+            
+            retry_count += 1
+            attempts_left = 3 - retry_count
+            
+            await state.update_data(retry_count=retry_count)
+            
+            if attempts_left > 0:
+                await message.answer(
+                    f"❌ <b>Invalid 2FA Password</b>\n\n"
+                    f"Hint: <i>{password_hint}</i>\n\n"
+                    f"Attempts remaining: {attempts_left}\n"
+                    f"Please try again:\n\n"
+                    f"Type /cancel to abort."
+                )
+            else:
+                await message.answer(
+                    "❌ <b>Maximum Attempts Exceeded</b>\n\n"
+                    "Too many failed 2FA attempts. Please start again with /start."
+                )
+                await state.clear()
+                
+        except FloodWaitError as e:
+            await message.answer(
+                f"❌ <b>Rate Limited</b>\n\n"
+                f"Please wait {e.seconds} seconds before trying again."
+            )
+            await client.disconnect()
+            await state.clear()
+            
+        except Exception as e:
+            logger.error(f"2FA processing error: {e}")
+            error_msg = str(e).lower()
+            
+            if any(word in error_msg for word in ['password', 'invalid', 'wrong', 'incorrect', 'hash']):
+                # Likely a password error - allow retry
+                await client.disconnect()
+                
+                retry_count += 1
+                attempts_left = 3 - retry_count
+                
+                await state.update_data(retry_count=retry_count)
+                
+                if attempts_left > 0:
+                    await message.answer(
+                        f"❌ <b>Authentication Failed</b>\n\n"
+                        f"Error: {str(e)}\n\n"
+                        f"Attempts remaining: {attempts_left}\n"
+                        f"Please try again:\n\n"
+                        f"Type /cancel to abort."
+                    )
+                else:
+                    await message.answer(
+                        "❌ <b>Maximum Attempts Exceeded</b>\n\n"
+                        "Please start again with /start."
+                    )
+                    await state.clear()
+            else:
+                # Other error - fail completely
+                await message.answer(
+                    f"❌ <b>Authentication Error</b>\n\n"
+                    f"Unexpected error: {str(e)}\n"
+                    f"Please start again with /start."
+                )
+                try:
+                    await client.disconnect()
+                except:
+                    pass
+                await state.clear()
+    
+    async def _save_userbot(self, session_name: str, session_string: str, me) -> None:
+        """Helper method to save userbot to database"""
+        try:
+            await self.bot_model.create({
+                'kind': 'userbot',
+                'session_name': session_name,
+                'status': 'active',
+                'session_string': session_string,
+                'telegram_id': me.id,
+                'username': me.username,
+                'first_name': me.first_name,
+                'last_name': me.last_name
+            })
+            logger.info(f"Successfully saved userbot: {session_name} ({me.id})")
+        except Exception as e:
+            logger.error(f"Failed to save userbot to database: {e}")
+            raise
     
     async def show_userbot_details(self, query: types.CallbackQuery, userbot_id: int):
         """Show detailed userbot information"""

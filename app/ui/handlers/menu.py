@@ -1,5 +1,6 @@
 from aiogram import types
 from typing import Dict, Any
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import logging
 
 from app.ui.keyboards import Keyboards
@@ -79,7 +80,7 @@ class MenuHandler:
                 f"├ Active Userbots: {len([u for u in userbots if u['status'] == 'active'])}\n"
                 f"├ Tracked Tokens: {token_stats.get('total_tokens', 0)}\n"
                 f"├ Active Tokens: {token_stats.get('active_tokens', 0)}\n"
-                f"└ Avg Multiplier: {token_stats.get('avg_multiplier', 0):.2f}x\n\n"
+                f"└ Avg Multiplier: {(token_stats.get('avg_multiplier') or 0):.2f}x\n\n"
                 f"<b>📈 Recent Activity (1h):</b>\n"
                 f"├ Calls: {recent_calls}\n"
                 f"└ Alerts: {recent_alerts}\n\n"
@@ -114,7 +115,7 @@ class MenuHandler:
                 f"├ Total: {token_stats.get('total_tokens', 0)}\n"
                 f"├ Active: {token_stats.get('active_tokens', 0)}\n"
                 f"├ Stopped: {token_stats.get('stopped_tokens', 0)}\n"
-                f"└ Avg Performance: {token_stats.get('avg_multiplier', 0):.2f}x\n\n"
+                f"└ Avg Performance: {(token_stats.get('avg_multiplier') or 0):.2f}x\n\n"
             )
             
             if top_tokens:

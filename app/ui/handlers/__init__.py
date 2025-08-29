@@ -6,6 +6,7 @@ from .userbots import UserbotsHandler
 from .alerts import AlertsHandler
 from .schedules import SchedulesHandler
 from .targets import TargetsHandler
+from .sources import SourcesHandler
 
 __all__ = [
     "MenuHandler",
@@ -13,5 +14,6 @@ __all__ = [
     "UserbotsHandler",
     "AlertsHandler",
     "SchedulesHandler",
-    "TargetsHandler"
+    "TargetsHandler",
+    "SourcesHandler"
 ]

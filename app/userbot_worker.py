@@ -9,6 +9,7 @@ from telethon.tl.types import Message
 from app.config import settings
 from app.db import db
 from app.models import BotModel, GroupModel
+from app.models.source_chat import SourceChatModel
 from app.events import EventRouter
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ class UserbotWorker:
         # Models
         self.bot_model = BotModel(db)
         self.group_model = GroupModel(db)
+        self.source_model = SourceChatModel(db)
         
         # Solana address pattern
         self.solana_pattern = re.compile(settings.solana_pattern)
@@ -49,7 +51,7 @@ class UserbotWorker:
             assigned_groups = await self.bot_model.get_assigned_groups(self.userbot_id)
             
             # Set up event handlers
-            self._setup_event_handlers(assigned_groups)
+            await self._setup_event_handlers(assigned_groups)
             
             # Update bot status
             await self.bot_model.set_status(self.userbot_id, 'active')
@@ -78,20 +80,32 @@ class UserbotWorker:
         
         logger.info(f"Userbot {self.userbot_id} stopped")
     
-    def _setup_event_handlers(self, groups: List[Dict[str, Any]]):
-        """Setup event handlers for assigned groups"""
+    async def _setup_event_handlers(self, groups: List[Dict[str, Any]]):
+        """Setup event handlers for assigned groups and their source chats"""
         if not self.client:
             return
         
+        # Get group IDs
         group_ids = [g['tg_chat_id'] for g in groups]
         
-        @self.client.on(events.NewMessage(chats=group_ids))
-        async def handle_new_message(event):
-            await self._handle_message(event)
+        # Get all source chats for these groups
+        sources = await self.source_model.get_sources_for_userbot([g['id'] for g in groups])
+        source_chat_ids = [s['source_chat_id'] for s in sources] if sources else []
         
-        @self.client.on(events.MessageEdited(chats=group_ids))
-        async def handle_edited_message(event):
-            await self._handle_message(event, is_edit=True)
+        # Monitor source chats for token addresses
+        if source_chat_ids:
+            @self.client.on(events.NewMessage(chats=source_chat_ids))
+            async def handle_source_message(event):
+                await self._handle_source_message(event)
+            
+            @self.client.on(events.MessageEdited(chats=source_chat_ids))
+            async def handle_source_edited(event):
+                await self._handle_source_message(event, is_edit=True)
+        
+        # Monitor assigned groups for general events (replies, mentions, etc.)
+        @self.client.on(events.NewMessage(chats=group_ids))
+        async def handle_group_message(event):
+            await self._handle_group_message(event)
         
         # Handle replies to our messages
         @self.client.on(events.NewMessage(incoming=True))
@@ -110,23 +124,142 @@ class UserbotWorker:
             if event.is_private:
                 await self._handle_dm(event)
     
-    async def _handle_message(self, event, is_edit: bool = False):
-        """Handle new/edited messages in monitored groups"""
+    async def _handle_source_message(self, event, is_edit: bool = False):
+        """Handle messages from source chats - extract tokens and forward to targets"""
         try:
+            # Check if user is allowed to trigger forwards (for groups)
+            is_allowed = await self.source_model.is_user_allowed(event.chat_id, event.sender_id)
+            
+            if not is_allowed:
+                logger.debug(f"User {event.sender_id} not allowed to trigger from source {event.chat_id}")
+                return
+            
             message = event.message
             
             # Extract Solana addresses
             solana_addresses = self._extract_solana_addresses(message.text or "")
             
             if solana_addresses:
-                await self._process_token_addresses(event, solana_addresses, is_edit)
+                # Get source chat info
+                source = await self.source_model.get_source_by_chat_id(event.chat_id)
+                if source:
+                    # Forward to group's targets
+                    await self._forward_tokens_to_targets(source['group_id'], solana_addresses, event)
             
             # Update last seen
             await self.bot_model.update_last_seen(self.userbot_id)
             
         except Exception as e:
-            logger.error(f"Error handling message: {e}")
+            logger.error(f"Error handling source message: {e}")
     
+    async def _handle_group_message(self, event, is_edit: bool = False):
+        """Handle new/edited messages in monitored groups (for general events, no token forwarding)"""
+        try:
+            # This is for general monitoring of assigned groups for replies, mentions, etc.
+            # Token forwarding is now handled by source chats only
+            
+            # Update last seen
+            await self.bot_model.update_last_seen(self.userbot_id)
+            
+        except Exception as e:
+            logger.error(f"Error handling group message: {e}")
+    
+    async def _forward_tokens_to_targets(self, group_id: int, addresses: List[str], source_event):
+        """Forward token addresses from source to group's target chats"""
+        try:
+            # Get group's targets
+            targets = await self.group_model.get_targets(group_id)
+            
+            if not targets:
+                logger.debug(f"No targets configured for group {group_id}")
+                return
+            
+            # Get group info for call creation
+            group = await self.db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
+            if not group:
+                logger.error(f"Group {group_id} not found")
+                return
+            
+            for address in addresses:
+                # Log the token detection
+                logger.info(f"Token {address[:8]}... detected from source, forwarding to {len(targets)} targets")
+                
+                # Create token call event
+                await self.event_router.create_event(
+                    kind='source_token_call',
+                    src_chat_id=source_event.chat_id,
+                    src_msg_id=source_event.message.id,
+                    user_id=source_event.sender_id,
+                    payload={
+                        'token_address': address,
+                        'message_text': self._get_message_text(source_event.message),
+                        'source_chat_title': getattr(source_event.chat, 'title', 'Unknown'),
+                        'target_group_id': group_id,
+                        'target_count': len(targets),
+                        'user_name': self._get_user_name(source_event.sender)
+                    }
+                )
+                
+                # Add token to tracking if not already tracked
+                from app.dex import DexScreenerService
+                dex_service = DexScreenerService()
+                await dex_service.add_token(address)
+                
+                # Send to each target chat
+                for target in targets:
+                    try:
+                        # Get source info for the message
+                        source_title = getattr(source_event.chat, 'title', f"Chat {source_event.chat_id}")
+                        user_name = self._get_user_name(source_event.sender)
+                        source_info = f"{source_title} ({user_name})"
+                        
+                        # Create formatted call message
+                        call_result = await self.send_call_message(
+                            target_chat_id=target['tg_chat_id'],
+                            token_address=address,
+                            additional_info=self._get_message_text(source_event.message),
+                            source_info=source_info
+                        )
+                        
+                        if call_result['success']:
+                            # Get or create token record first
+                            token_record = await db.fetchrow("""
+                                INSERT INTO tokens_tracked (address) 
+                                VALUES ($1) 
+                                ON CONFLICT (address) DO UPDATE SET last_checked_at = NOW()
+                                RETURNING id
+                            """, address)
+                            
+                            # Get target record
+                            target_record = await db.fetchrow("""
+                                SELECT id FROM targets WHERE group_id = $1 AND dest_chat_id = $2
+                            """, group_id, target['tg_chat_id'])
+                            
+                            # Log successful call
+                            await db.execute("""
+                                INSERT INTO calls (group_id, token_id, target_id, userbot_id, 
+                                                 scheduled_at, sent_at, status)
+                                VALUES ($1, $2, $3, $4, NOW(), NOW(), 'sent')
+                            """, group_id, token_record['id'], 
+                                target_record['id'] if target_record else None, 
+                                self.userbot_id)
+                            
+                            logger.info(f"Successfully sent {address[:8]}... to target {target['tg_chat_id']}")
+                        else:
+                            logger.error(f"Failed to send to target {target['tg_chat_id']}: {call_result.get('error')}")
+                            
+                    except Exception as target_error:
+                        logger.error(f"Error sending to target {target['tg_chat_id']}: {target_error}")
+                
+        except Exception as e:
+            logger.error(f"Error forwarding tokens to targets: {e}")
+    
+    def _get_message_text(self, message) -> str:
+        """Safely get message text as string"""
+        if hasattr(message, 'text') and message.text:
+            return str(message.text)
+        return ""
+
     async def _handle_reply(self, event):
         """Handle replies to messages"""
         try:
@@ -143,8 +276,8 @@ class UserbotWorker:
                     src_msg_id=event.message.id,
                     user_id=event.sender_id,
                     payload={
-                        'message_text': event.message.text,
-                        'reply_to_text': reply_to.text,
+                        'message_text': self._get_message_text(event.message),
+                        'reply_to_text': self._get_message_text(reply_to),
                         'chat_title': getattr(event.chat, 'title', 'Private'),
                         'user_name': self._get_user_name(event.sender)
                     }
@@ -164,7 +297,7 @@ class UserbotWorker:
                     src_msg_id=event.message.id,
                     user_id=event.sender_id,
                     payload={
-                        'message_text': event.message.text,
+                        'message_text': self._get_message_text(event.message),
                         'chat_title': getattr(event.chat, 'title', 'Private'),
                         'user_name': self._get_user_name(event.sender)
                     }
@@ -182,7 +315,7 @@ class UserbotWorker:
                 src_msg_id=event.message.id,
                 user_id=event.sender_id,
                 payload={
-                    'message_text': event.message.text,
+                    'message_text': self._get_message_text(event.message),
                     'user_name': self._get_user_name(event.sender)
                 }
             )
@@ -210,7 +343,7 @@ class UserbotWorker:
                     user_id=event.sender_id,
                     payload={
                         'token_address': address,
-                        'message_text': event.message.text,
+                        'message_text': self._get_message_text(event.message),
                         'is_edit': is_edit,
                         'chat_title': getattr(event.chat, 'title', 'Unknown'),
                         'user_name': self._get_user_name(event.sender)
@@ -239,24 +372,25 @@ class UserbotWorker:
         return "Unknown"
     
     async def send_call_message(self, target_chat_id: int, token_address: str, 
-                               additional_info: str = "") -> Dict[str, Any]:
+                               additional_info: str = "", source_info: str = "") -> Dict[str, Any]:
         """Send a call message to a target chat"""
         try:
             if not self.client:
                 return {'success': False, 'error': 'Client not initialized'}
             
-            # Format call message
-            message = f"🚀 CALL: {token_address}"
-            if additional_info:
-                message += f"\n\n{additional_info}"
+            # Format call message with source info
+            message = f"🚀 **NEW CALL**\n"
+            message += f"📄 CA: `{token_address}`\n"
+            
+            if source_info:
+                message += f"📡 Source: {source_info}\n"
+            
+            if additional_info and additional_info.strip():
+                message += f"\n💬 Message:\n{additional_info[:200]}{'...' if len(additional_info) > 200 else ''}\n"
             
             # Add scanner bot button if configured
             if settings.scanner_bot_id and settings.scanner_button_text:
-                from telethon.tl.types import KeyboardButtonUrl
-                from telethon.tl.types import ReplyKeyboardMarkup
-                
-                # Create inline button (this is simplified - actual implementation may vary)
-                message += f"\n\n[{settings.scanner_button_text}](t.me/{settings.scanner_bot_id})"
+                message += f"\n[{settings.scanner_button_text}](t.me/{settings.scanner_bot_id})"
             
             # Send message
             sent_message = await self.client.send_message(target_chat_id, message)

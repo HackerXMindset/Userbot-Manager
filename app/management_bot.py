@@ -8,6 +8,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from app.config import settings
 from app.db import db
@@ -15,7 +16,7 @@ from app.ui.keyboards import Keyboards
 from app.ui.states import ManagementStates
 from app.ui.handlers import (
     MenuHandler, GroupsHandler, UserbotsHandler, 
-    AlertsHandler, SchedulesHandler, TargetsHandler
+    AlertsHandler, SchedulesHandler, TargetsHandler, SourcesHandler
 )
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ class ManagementBot:
         self.alerts_handler = AlertsHandler(db, self.keyboards)
         self.schedules_handler = SchedulesHandler(db, self.keyboards)
         self.targets_handler = TargetsHandler(db, self.keyboards)
+        self.sources_handler = SourcesHandler(db, self.keyboards)
         
         self.setup_handlers()
     
@@ -83,8 +85,27 @@ class ManagementBot:
         
         # Targets
         self.dp.callback_query.register(
-            self.targets_handler.show_targets_menu,
+            self.targets_handler.handle_target_action,
             F.data.startswith('targets:'),
+            F.from_user.id == settings.admin_telegram_id
+        )
+        
+        # Sources
+        self.dp.callback_query.register(
+            self.sources_handler.handle_sources_action,
+            F.data.startswith('sources:'),
+            F.from_user.id == settings.admin_telegram_id
+        )
+        
+        self.dp.callback_query.register(
+            self.handle_source_group_selection,
+            F.data.startswith('source_group:'),
+            F.from_user.id == settings.admin_telegram_id
+        )
+        
+        self.dp.callback_query.register(
+            self.handle_source_edit,
+            F.data.startswith('source_edit:'),
             F.from_user.id == settings.admin_telegram_id
         )
         
@@ -107,7 +128,25 @@ class ManagementBot:
             F.from_user.id == settings.admin_telegram_id
         )
         
-        # Error handler
+        self.dp.message.register(
+            self.userbots_handler.process_2fa_input,
+            ManagementStates.userbot_login_2fa,
+            F.from_user.id == settings.admin_telegram_id
+        )
+        
+        self.dp.message.register(
+            self.sources_handler.process_source_input,
+            ManagementStates.adding_source_chat_id,
+            F.from_user.id == settings.admin_telegram_id
+        )
+        
+        self.dp.message.register(
+            self.sources_handler.process_user_input,
+            ManagementStates.adding_source_user_id,
+            F.from_user.id == settings.admin_telegram_id
+        )
+        
+        # Error handler  
         self.dp.errors.register(self.handle_errors)
     
     async def cmd_menu(self, message: types.Message):
@@ -140,6 +179,8 @@ class ManagementBot:
             await self.userbots_handler.show_userbots_menu(query)
         elif action == 'targets':
             await self.targets_handler.show_targets_menu(query)
+        elif action == 'sources':
+            await self.sources_handler.show_sources_menu(query)
         elif action == 'alerts':
             await self.alerts_handler.show_alerts_menu(query)
         elif action == 'notifications':
@@ -230,7 +271,89 @@ class ManagementBot:
     
     async def process_userbot_phone(self, message: types.Message, state: FSMContext):
         """Process userbot phone input"""
-        await self.userbots_handler.process_phone_input(message, state, self.bot)
+        await self.userbots_handler.process_phone_input(message, state)
+    
+    async def handle_source_group_selection(self, query: types.CallbackQuery, state: FSMContext):
+        """Handle source group selection for adding source"""
+        try:
+            group_id = int(query.data.split(':', 1)[1])
+            
+            # Set group ID in state
+            await state.set_data({'group_id': group_id})
+            await state.set_state(ManagementStates.adding_source_chat_id)
+            
+            # Get group info
+            group = await db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
+            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+            
+            text = f"<b>➕ Add Source for {group_name}</b>\n\n"
+            text += "Please paste the source chat ID (the chat to monitor for token addresses).\n\n"
+            text += "Examples:\n"
+            text += "• Channel: @channelname or -1001234567890\n"
+            text += "• Group: -1001234567890\n"
+            text += "• Public chat: @chatname\n\n"
+            text += "💡 <i>The bot will auto-detect if it's a channel or group</i>"
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Cancel", callback_data="menu:sources")]
+            ])
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error handling source group selection: {e}")
+            await query.answer("❌ Error processing selection")
+    
+    async def handle_source_edit(self, query: types.CallbackQuery):
+        """Handle source edit menu"""
+        try:
+            source_id = int(query.data.split(':', 1)[1])
+            
+            # Get source info
+            source = await db.fetchrow("SELECT * FROM source_chats WHERE id = $1", source_id)
+            if not source:
+                await query.answer("❌ Source not found")
+                return
+            
+            title = source['title'] or f"ID: {source['source_chat_id']}"
+            status = "✅ Enabled" if source['enabled'] else "❌ Disabled"
+            type_name = "📢 Channel" if source['source_type'] == 'channel' else "👥 Group"
+            
+            text = f"<b>⚙️ Edit Source</b>\n\n"
+            text += f"{type_name} {title}\n"
+            text += f"Status: {status}\n"
+            text += f"Chat ID: <code>{source['source_chat_id']}</code>\n"
+            
+            keyboard_rows = [
+                [InlineKeyboardButton(
+                    text="🔄 Toggle Enable/Disable",
+                    callback_data=f"sources:toggle:{source_id}"
+                )]
+            ]
+            
+            if source['source_type'] == 'group':
+                keyboard_rows.append([
+                    InlineKeyboardButton(
+                        text="👥 Manage Users",
+                        callback_data=f"sources:users:{source_id}"
+                    )
+                ])
+            
+            keyboard_rows.extend([
+                [InlineKeyboardButton(
+                    text="🗑️ Remove Source",
+                    callback_data=f"sources:remove:{source_id}"
+                )],
+                [InlineKeyboardButton(text="🔙 Back", callback_data="sources:manage")]
+            ])
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error handling source edit: {e}")
+            await query.answer("❌ Error loading source")
     
     async def handle_errors(self, update: types.Update, exception: Exception):
         """Handle bot errors"""

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from typing import Dict, Any, Optional, List
 from datetime import datetime
@@ -98,7 +99,7 @@ class EventRouter:
             if not notif_channel:
                 return
             
-            payload = event['payload']
+            payload = json.loads(event['payload']) if isinstance(event['payload'], str) else event['payload']
             
             # Format message
             message = (
@@ -111,7 +112,7 @@ class EventRouter:
             )
             
             # TODO: Send via notification bot
-            logger.info(f"Would send reply notification: {message}")
+            logger.debug(f"Reply detected in {payload.get('chat_title', 'Unknown')} from {payload.get('user_name', 'Unknown')}")
             
         except Exception as e:
             logger.error(f"Error handling reply event: {e}")
@@ -127,7 +128,7 @@ class EventRouter:
             if not notif_channel:
                 return
             
-            payload = event['payload']
+            payload = json.loads(event['payload']) if isinstance(event['payload'], str) else event['payload']
             
             # Format message
             message = (
@@ -139,7 +140,7 @@ class EventRouter:
             )
             
             # TODO: Send via notification bot
-            logger.info(f"Would send mention notification: {message}")
+            logger.debug(f"Mention detected in {payload.get('chat_title', 'Unknown')} from {payload.get('user_name', 'Unknown')}")
             
         except Exception as e:
             logger.error(f"Error handling mention event: {e}")
@@ -155,7 +156,7 @@ class EventRouter:
             if not notif_channel:
                 return
             
-            payload = event['payload']
+            payload = json.loads(event['payload']) if isinstance(event['payload'], str) else event['payload']
             
             # Format message
             message = (
@@ -167,7 +168,7 @@ class EventRouter:
             )
             
             # TODO: Send via notification bot
-            logger.info(f"Would send DM notification: {message}")
+            logger.debug(f"DM received from {payload.get('user_name', 'Unknown')} (ID: {event['user_id']})")
             
         except Exception as e:
             logger.error(f"Error handling DM event: {e}")
@@ -175,7 +176,7 @@ class EventRouter:
     async def _handle_token_call_event(self, event: Dict[str, Any]):
         """Handle token call events"""
         try:
-            payload = event['payload']
+            payload = json.loads(event['payload']) if isinstance(event['payload'], str) else event['payload']
             token_address = payload.get('token_address')
             
             if not token_address:
