@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(/root/callbot_copy/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

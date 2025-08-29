@@ -1,0 +1,9 @@
+aiogram==2.25.1
+telethon
+asyncpg
+pydantic
+python-dotenv
+pytz
+aiohttp
+base58
+cryptography
