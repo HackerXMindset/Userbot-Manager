@@ -18,6 +18,7 @@ from app.ui.handlers import (
     MenuHandler, GroupsHandler, UserbotsHandler, 
     AlertsHandler, SchedulesHandler, TargetsHandler, SourcesHandler
 )
+from app.ui.handlers.notifications import NotificationsHandler
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class ManagementBot:
         self.schedules_handler = SchedulesHandler(db, self.keyboards)
         self.targets_handler = TargetsHandler(db, self.keyboards)
         self.sources_handler = SourcesHandler(db, self.keyboards)
+        self.notifications_handler = NotificationsHandler(db, self.keyboards)
         
         self.setup_handlers()
     
@@ -59,6 +61,13 @@ class ManagementBot:
         self.dp.callback_query.register(
             self.groups_handler.handle_group_action,
             F.data.startswith('group:'),
+            F.from_user.id == settings.admin_telegram_id
+        )
+        
+        # Userbot assignments
+        self.dp.callback_query.register(
+            self.handle_userbot_assignment,
+            F.data.startswith('assign:userbot:'),
             F.from_user.id == settings.admin_telegram_id
         )
         
@@ -90,10 +99,24 @@ class ManagementBot:
             F.from_user.id == settings.admin_telegram_id
         )
         
+        # Target group selection
+        self.dp.callback_query.register(
+            self.handle_target_group_selection,
+            F.data.startswith('target_group:'),
+            F.from_user.id == settings.admin_telegram_id
+        )
+        
         # Sources
         self.dp.callback_query.register(
             self.sources_handler.handle_sources_action,
             F.data.startswith('sources:'),
+            F.from_user.id == settings.admin_telegram_id
+        )
+        
+        # Notifications
+        self.dp.callback_query.register(
+            self.handle_notifications_action,
+            F.data.startswith('notifications:'),
             F.from_user.id == settings.admin_telegram_id
         )
         
@@ -146,6 +169,24 @@ class ManagementBot:
             F.from_user.id == settings.admin_telegram_id
         )
         
+        self.dp.message.register(
+            self.process_target_input,
+            ManagementStates.adding_target,
+            F.from_user.id == settings.admin_telegram_id
+        )
+        
+        self.dp.message.register(
+            self.notifications_handler.process_channel_input,
+            ManagementStates.setting_notification_channel,
+            F.from_user.id == settings.admin_telegram_id
+        )
+        
+        self.dp.message.register(
+            self.notifications_handler.process_blacklist_input,
+            ManagementStates.adding_blacklist_user,
+            F.from_user.id == settings.admin_telegram_id
+        )
+        
         # Error handler  
         self.dp.errors.register(self.handle_errors)
     
@@ -184,7 +225,7 @@ class ManagementBot:
         elif action == 'alerts':
             await self.alerts_handler.show_alerts_menu(query)
         elif action == 'notifications':
-            await self.show_notifications_menu(query)
+            await self.notifications_handler.show_notifications_menu(query)
         elif action == 'tracking':
             await self.menu_handler.show_tracking_menu(query)
         elif action == 'settings':
@@ -193,6 +234,13 @@ class ManagementBot:
             await query.message.delete()
         
         await query.answer()
+    
+    async def handle_notifications_action(self, query: types.CallbackQuery, state: FSMContext = None):
+        """Handle notifications-related callbacks"""
+        if state is None:
+            from aiogram.fsm.context import FSMContext
+            state = FSMContext.current()
+        await self.notifications_handler.handle_notifications_action(query, state)
     
     async def handle_schedules(self, query: types.CallbackQuery):
         """Handle schedule-related callbacks"""
@@ -235,43 +283,127 @@ class ManagementBot:
             logger.error(f"Error showing quotas: {e}")
             await query.answer("❌ Error loading quotas")
     
-    async def show_notifications_menu(self, query: types.CallbackQuery):
-        """Show notifications configuration"""
-        try:
-            # Get recent events
-            recent_events = await db.fetch("""
-                SELECT kind, COUNT(*) as count 
-                FROM events 
-                WHERE created_at > NOW() - INTERVAL '24 hours'
-                GROUP BY kind
-                ORDER BY count DESC
-            """)
-            
-            text = "<b>📢 Notifications</b>\n\n"
-            text += "<b>Event Activity (24h):</b>\n"
-            
-            if recent_events:
-                for event in recent_events:
-                    text += f"• {event['kind']}: {event['count']}\n"
-            else:
-                text += "No recent events\n"
-            
-            text += "\n<b>Configuration:</b>\n"
-            text += "• Forward replies to notification channel ✅\n"
-            text += "• Forward mentions to notification channel ✅\n"
-            text += "• Forward DMs to notification channel ✅\n"
-            
-            await query.message.edit_text(
-                text,
-                reply_markup=self.keyboards.back_button("menu:main")
-            )
-        except Exception as e:
-            logger.error(f"Error showing notifications: {e}")
-            await query.answer("❌ Error loading notifications")
     
     async def process_userbot_phone(self, message: types.Message, state: FSMContext):
         """Process userbot phone input"""
         await self.userbots_handler.process_phone_input(message, state)
+    
+    async def handle_userbot_assignment(self, query: types.CallbackQuery):
+        """Handle userbot assignment to group"""
+        try:
+            # Parse callback data: assign:userbot:group_id:userbot_id
+            parts = query.data.split(':')
+            group_id = int(parts[2])
+            userbot_id = int(parts[3])
+            
+            # Get bot model
+            from app.models import BotModel
+            bot_model = BotModel(db)
+            
+            # Assign userbot to group
+            await bot_model.assign_to_group(userbot_id, group_id)
+            
+            # Enable the group when userbot is assigned
+            await db.execute("UPDATE groups SET enabled = true WHERE id = $1", group_id)
+            
+            # Get group and userbot info for confirmation
+            group = await db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
+            userbot = await db.fetchrow("SELECT * FROM bots WHERE id = $1", userbot_id)
+            
+            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+            bot_name = userbot['session_name'] or f"Bot {userbot_id}"
+            
+            await query.answer(f"✅ {bot_name} assigned to {group_name}")
+            
+            # Go back to group details
+            await self.groups_handler.show_group_details(query, group_id)
+            
+        except Exception as e:
+            logger.error(f"Error handling userbot assignment: {e}")
+            await query.answer("❌ Error assigning userbot")
+    
+    async def handle_target_group_selection(self, query: types.CallbackQuery, state: FSMContext):
+        """Handle target group selection for adding target"""
+        try:
+            group_id = int(query.data.split(':', 1)[1])
+            
+            # Set group ID in state
+            await state.set_data({'group_id': group_id})
+            await state.set_state(ManagementStates.adding_target)
+            
+            # Get group info
+            group = await db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
+            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+            
+            text = f"<b>➕ Add Target for {group_name}</b>\n\n"
+            text += "Please enter the target chat ID where calls should be sent.\n\n"
+            text += "Examples:\n"
+            text += "• Channel: -1001234567890\n"
+            text += "• Group: -1001234567890\n"
+            text += "• Your private chat ID\n\n"
+            text += "Type /cancel to abort."
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Cancel", callback_data="menu:targets")]
+            ])
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error handling target group selection: {e}")
+            await query.answer("❌ Error processing selection")
+    
+    async def process_target_input(self, message: types.Message, state: FSMContext):
+        """Process target chat ID input"""
+        try:
+            if message.text == '/cancel':
+                await message.reply("❌ Target addition cancelled.")
+                await state.clear()
+                return
+            
+            data = await state.get_data()
+            group_id = data.get('group_id')
+            
+            if not group_id:
+                await message.reply("❌ Session expired. Please start again.")
+                await state.clear()
+                return
+            
+            # Parse target chat ID
+            try:
+                target_chat_id = int(message.text.strip())
+            except ValueError:
+                await message.reply("❌ Invalid chat ID. Please enter a valid number.")
+                return
+            
+            # Add target to database
+            await db.execute("""
+                INSERT INTO targets (group_id, dest_chat_id)
+                VALUES ($1, $2)
+                ON CONFLICT (group_id, dest_chat_id) DO NOTHING
+            """, group_id, target_chat_id)
+            
+            # Get group info for confirmation
+            group = await db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
+            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+            
+            text = f"✅ <b>Target Added</b>\n\n"
+            text += f"Group: {group_name}\n"
+            text += f"Target Chat ID: <code>{target_chat_id}</code>\n\n"
+            text += "Calls will now be forwarded to this target chat when tokens are detected in source chats."
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📋 View Targets", callback_data="menu:targets")],
+                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]
+            ])
+            
+            await message.reply(text, reply_markup=keyboard)
+            await state.clear()
+            
+        except Exception as e:
+            logger.error(f"Error processing target input: {e}")
+            await message.reply("❌ Error adding target")
+            await state.clear()
     
     async def handle_source_group_selection(self, query: types.CallbackQuery, state: FSMContext):
         """Handle source group selection for adding source"""
@@ -355,16 +487,21 @@ class ManagementBot:
             logger.error(f"Error handling source edit: {e}")
             await query.answer("❌ Error loading source")
     
-    async def handle_errors(self, update: types.Update, exception: Exception):
+    async def handle_errors(self, event, **data):
         """Handle bot errors"""
-        logger.error(f"Bot error: {exception}")
+        exception = data.get('exception')
+        if exception:
+            logger.error(f"Bot error: {exception}")
         
-        if update.callback_query:
+        # Get update from event
+        update = event.update if hasattr(event, 'update') else event
+        
+        if hasattr(update, 'callback_query') and update.callback_query:
             try:
                 await update.callback_query.answer("❌ An error occurred. Please try again.")
             except:
                 pass
-        elif update.message:
+        elif hasattr(update, 'message') and update.message:
             try:
                 await update.message.reply("❌ An error occurred. Please try again.")
             except:

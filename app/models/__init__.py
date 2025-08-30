@@ -5,6 +5,7 @@ from .bot import BotModel
 from .group import GroupModel, ScheduleModel
 from .token import TokenModel
 from .event import EventModel, AlertModel
+from .notification import NotificationModel
 
 __all__ = [
     "BaseModel",
@@ -13,5 +14,6 @@ __all__ = [
     "ScheduleModel",
     "TokenModel",
     "EventModel",
-    "AlertModel"
+    "AlertModel",
+    "NotificationModel"
 ]

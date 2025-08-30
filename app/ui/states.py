@@ -31,3 +31,7 @@ class ManagementStates(StatesGroup):
     # Settings
     setting_timezone = State()
     setting_dex_poll = State()
+    
+    # Notifications
+    setting_notification_channel = State()
+    adding_blacklist_user = State()
