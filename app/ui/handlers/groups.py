@@ -74,6 +74,9 @@ class GroupsHandler:
         elif action == 'assign':
             group_id = int(parts[2])
             await self.show_userbot_assignment(query, group_id)
+        elif action == 'schedules':
+            group_id = int(parts[2])
+            await self.show_group_schedules(query, group_id)
     
     async def start_add_group(self, query: types.CallbackQuery, state: FSMContext):
         """Start the add group process"""
@@ -263,3 +266,87 @@ class GroupsHandler:
         except Exception as e:
             logger.error(f"Error showing userbot assignment: {e}")
             await query.answer("❌ Error loading userbots")
+    
+    async def show_group_schedules(self, query: types.CallbackQuery, group_id: int):
+        """Show schedules for a specific group"""
+        try:
+            # Get group info
+            group = await self.db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
+            if not group:
+                await query.answer("❌ Group not found")
+                return
+            
+            # Get schedules for this group
+            schedules = await self.db.fetch("""
+                SELECT * FROM group_schedules 
+                WHERE group_id = $1 
+                ORDER BY start_time
+            """, group_id)
+            
+            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+            text = f"<b>📅 Schedules for {group_name}</b>\n\n"
+            
+            if not schedules:
+                text += "No schedules configured for this group.\n\n"
+                text += "Schedules determine when this group can send calls. "
+                text += "Without schedules, the group can send calls 24/7."
+            else:
+                text += f"<b>Active Schedules ({len(schedules)}):</b>\n\n"
+                for i, schedule in enumerate(schedules, 1):
+                    days = self._format_weekdays(schedule['weekdays'])
+                    max_calls = schedule['max_calls_in_window'] or '∞'
+                    text += (
+                        f"<b>{i}.</b> {schedule['start_time']} - {schedule['end_time']}\n"
+                        f"   └ Days: {days} | Max calls: {max_calls}\n\n"
+                    )
+            
+            # Build keyboard
+            keyboard_rows = []
+            
+            # Add schedule button
+            keyboard_rows.append([
+                InlineKeyboardButton(text="➕ Add Schedule", callback_data=f"schedule:add:{group_id}")
+            ])
+            
+            # Edit/Remove buttons for existing schedules
+            if schedules:
+                for schedule in schedules[:5]:  # Limit to 5 for UI space
+                    keyboard_rows.append([
+                        InlineKeyboardButton(
+                            text=f"✏️ Edit {schedule['start_time']}-{schedule['end_time']}", 
+                            callback_data=f"schedule:edit:{schedule['id']}"
+                        ),
+                        InlineKeyboardButton(
+                            text="🗑️", 
+                            callback_data=f"schedule:delete:{schedule['id']}"
+                        )
+                    ])
+            
+            # Back button
+            keyboard_rows.append([
+                InlineKeyboardButton(text="🔙 Back to Group", callback_data=f"group:view:{group_id}")
+            ])
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error showing group schedules: {e}")
+            await query.answer("❌ Error loading schedules")
+    
+    def _format_weekdays(self, weekdays):
+        """Format weekdays list to readable string"""
+        if not weekdays:
+            return "No days"
+        
+        day_names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+        
+        if len(weekdays) == 7:
+            return "Daily"
+        elif set(weekdays) == {1, 2, 3, 4, 5}:
+            return "Weekdays" 
+        elif set(weekdays) == {6, 7}:
+            return "Weekends"
+        else:
+            return ", ".join([day_names[d-1] for d in sorted(weekdays)])

@@ -11,6 +11,9 @@ class ManagementStates(StatesGroup):
     # Schedule management
     setting_schedule_time = State()
     setting_schedule_window = State()
+    custom_schedule_start_time = State()
+    custom_schedule_end_time = State()
+    custom_schedule_max_calls = State()
     
     # Userbot management
     userbot_login_phone = State()
@@ -32,6 +35,3 @@ class ManagementStates(StatesGroup):
     setting_timezone = State()
     setting_dex_poll = State()
     
-    # Notifications
-    setting_notification_channel = State()
-    adding_blacklist_user = State()

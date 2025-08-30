@@ -10,7 +10,6 @@ from app.config import settings
 from app.db import db
 from app.models import BotModel, GroupModel
 from app.models.source_chat import SourceChatModel
-from app.events import EventRouter
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +21,6 @@ class UserbotWorker:
         self.session_string = session_string
         self.client: Optional[TelegramClient] = None
         self.running = False
-        self.event_router = EventRouter()
         
         # Models
         self.bot_model = BotModel(db)
@@ -56,6 +54,8 @@ class UserbotWorker:
             me = await self.client.get_me()
             self.userbot_user_id = me.id
             self.userbot_username = me.username
+            
+            logger.info(f"Userbot initialized: ID={self.userbot_user_id}, Username=@{self.userbot_username}")
             
             # Get assigned groups
             assigned_groups = await self.bot_model.get_assigned_groups(self.userbot_id)
@@ -112,27 +112,26 @@ class UserbotWorker:
             async def handle_source_edited(event):
                 await self._handle_source_message(event, is_edit=True)
         
-        # Monitor assigned groups for replies and mentions
-        @self.client.on(events.NewMessage(chats=group_ids))
-        async def handle_group_message(event):
-            # Check for replies to our messages
-            if event.is_reply:
-                await self._handle_reply(event)
-            
-            # Check for mentions of our userbot (be more selective)
-            elif '@' in (event.message.text or '') and self.userbot_username:
-                # Only check if our username might be mentioned
-                if f'@{self.userbot_username}' in (event.message.text or ''):
-                    await self._handle_mention(event)
-            
-            # General group message handling (for source monitoring only)
-            await self._handle_group_message(event)
+        # Monitor assigned groups for replies and mentions (removed notification features)
+        # This section has been removed - no longer monitoring for replies/mentions
         
-        # Handle DMs
-        @self.client.on(events.NewMessage(incoming=True))
-        async def handle_dms(event):
-            if event.is_private:
-                await self._handle_dm(event)
+        # Handle outgoing messages to track them for reply detection
+        @self.client.on(events.NewMessage(chats=group_ids, outgoing=True))
+        async def track_outgoing_messages(event):
+            # Track all messages we send for reply detection
+            self.sent_message_ids.add((event.chat_id, event.message.id))
+            logger.debug(f"Tracked outgoing message: chat={event.chat_id}, msg_id={event.message.id}")
+            
+            # Keep only recent messages (last 1000) to prevent memory bloat
+            if len(self.sent_message_ids) > 1000:
+                oldest_messages = list(self.sent_message_ids)[:100]
+                for msg in oldest_messages:
+                    self.sent_message_ids.discard(msg)
+        
+        # Handle DMs (private messages) - removed notification features
+        # This section has been removed - no longer monitoring DMs for notifications
+    
+    
     
     async def _handle_source_message(self, event, is_edit: bool = False):
         """Handle messages from source chats - extract tokens and forward to targets"""
@@ -162,18 +161,6 @@ class UserbotWorker:
         except Exception as e:
             logger.error(f"Error handling source message: {e}")
     
-    async def _handle_group_message(self, event, is_edit: bool = False):
-        """Handle new/edited messages in monitored groups (for general events, no token forwarding)"""
-        try:
-            # This is for general monitoring of assigned groups for replies, mentions, etc.
-            # Token forwarding is now handled by source chats only
-            
-            # Update last seen
-            await self.bot_model.update_last_seen(self.userbot_id)
-            
-        except Exception as e:
-            logger.error(f"Error handling group message: {e}")
-    
     async def _forward_tokens_to_targets(self, group_id: int, addresses: List[str], source_event):
         """Forward token addresses from source to group's target chats"""
         try:
@@ -194,21 +181,7 @@ class UserbotWorker:
                 # Log the token detection
                 logger.info(f"Token {address[:8]}... detected from source, forwarding to {len(targets)} targets")
                 
-                # Create token call event
-                await self.event_router.create_event(
-                    kind='source_token_call',
-                    src_chat_id=source_event.chat_id,
-                    src_msg_id=source_event.message.id,
-                    user_id=source_event.sender_id,
-                    payload={
-                        'token_address': address,
-                        'message_text': self._get_message_text(source_event.message),
-                        'source_chat_title': getattr(source_event.chat, 'title', 'Unknown'),
-                        'target_group_id': group_id,
-                        'target_count': len(targets),
-                        'user_name': self._get_user_name(source_event.sender)
-                    }
-                )
+                # Removed event creation for notification system
                 
                 # Add token to tracking if not already tracked
                 from app.dex import DexScreenerService
@@ -264,105 +237,7 @@ class UserbotWorker:
         except Exception as e:
             logger.error(f"Error forwarding tokens to targets: {e}")
     
-    def _get_message_text(self, message) -> str:
-        """Safely get message text as string"""
-        if hasattr(message, 'text') and message.text:
-            return str(message.text)
-        return ""
-
-    async def _handle_reply(self, event):
-        """Handle replies to messages"""
-        try:
-            reply_to = await event.message.get_reply_message()
-            
-            if reply_to and reply_to.sender_id:
-                # Check if reply is to one of our sent messages
-                message_key = (event.chat_id, reply_to.id)
-                
-                # Additional check: ensure the replied-to message is from our userbot
-                logger.info(f"REPLY DEBUG: reply_to.sender_id={reply_to.sender_id}, our_id={self.userbot_user_id}, message_key={message_key}, in_sent_messages={message_key in self.sent_message_ids}")
-                if reply_to.sender_id == self.userbot_user_id and message_key in self.sent_message_ids:
-                    logger.info(f"WOULD CREATE REPLY EVENT but DISABLED for testing from user {event.sender_id}")
-                    
-                    # TEMPORARILY DISABLED FOR TESTING
-                    # Create reply event
-                    # await self.event_router.create_event(
-                    #     kind='reply',
-                    #     src_chat_id=event.chat_id,
-                    #     src_msg_id=event.message.id,
-                    #     user_id=event.sender_id,
-                    #     payload={
-                    #         'message_text': self._get_message_text(event.message),
-                    #         'reply_to_text': self._get_message_text(reply_to),
-                    #         'chat_title': getattr(event.chat, 'title', 'Private'),
-                    #         'user_name': self._get_user_name(event.sender)
-                    #     }
-                    # )
-                else:
-                    logger.debug(f"Reply not to our message, ignoring (sender_id: {reply_to.sender_id}, our_id: {self.userbot_user_id})")
-            
-        except Exception as e:
-            logger.error(f"Error handling reply: {e}")
     
-    async def _handle_mention(self, event):
-        """Handle mentions"""
-        try:
-            message_text = event.message.text or ''
-            
-            # Check if the userbot is actually mentioned
-            is_mentioned = False
-            
-            # Check for @username mention
-            if self.userbot_username and f'@{self.userbot_username}' in message_text:
-                is_mentioned = True
-            
-            # Check for entity mentions (more reliable)
-            if hasattr(event.message, 'entities') and event.message.entities:
-                for entity in event.message.entities:
-                    if hasattr(entity, 'user_id') and entity.user_id == self.userbot_user_id:
-                        is_mentioned = True
-                        break
-            
-            if is_mentioned:
-                logger.debug(f"Userbot mentioned by user {event.sender_id}")
-                
-                await self.event_router.create_event(
-                    kind='mention',
-                    src_chat_id=event.chat_id,
-                    src_msg_id=event.message.id,
-                    user_id=event.sender_id,
-                    payload={
-                        'message_text': self._get_message_text(event.message),
-                        'chat_title': getattr(event.chat, 'title', 'Private'),
-                        'user_name': self._get_user_name(event.sender)
-                    }
-                )
-            else:
-                logger.debug("Message contains @ but doesn't mention our userbot, ignoring")
-            
-        except Exception as e:
-            logger.error(f"Error handling mention: {e}")
-    
-    async def _handle_dm(self, event):
-        """Handle direct messages"""
-        try:
-            # Only process if it's actually a private message and not from ourselves
-            if event.is_private and event.sender_id != self.userbot_user_id:
-                logger.debug(f"DM received from user {event.sender_id}")
-                
-                await self.event_router.create_event(
-                    kind='dm',
-                    src_chat_id=event.chat_id,
-                    src_msg_id=event.message.id,
-                    user_id=event.sender_id,
-                    payload={
-                        'message_text': self._get_message_text(event.message),
-                        'user_name': self._get_user_name(event.sender)
-                    }
-                )
-            
-        except Exception as e:
-            logger.error(f"Error handling DM: {e}")
     
     def _extract_solana_addresses(self, text: str) -> List[str]:
         """Extract Solana addresses from text"""
@@ -372,29 +247,11 @@ class UserbotWorker:
         matches = self.solana_pattern.findall(text)
         return list(set(matches))  # Remove duplicates
     
-    async def _process_token_addresses(self, event, addresses: List[str], is_edit: bool = False):
-        """Process detected token addresses"""
-        try:
-            for address in addresses:
-                # Create token call event
-                await self.event_router.create_event(
-                    kind='token_call',
-                    src_chat_id=event.chat_id,
-                    src_msg_id=event.message.id,
-                    user_id=event.sender_id,
-                    payload={
-                        'token_address': address,
-                        'message_text': self._get_message_text(event.message),
-                        'is_edit': is_edit,
-                        'chat_title': getattr(event.chat, 'title', 'Unknown'),
-                        'user_name': self._get_user_name(event.sender)
-                    }
-                )
-                
-                logger.info(f"Detected token {address[:8]}... in chat {event.chat_id}")
-            
-        except Exception as e:
-            logger.error(f"Error processing token addresses: {e}")
+    def _get_message_text(self, message) -> str:
+        """Safely get message text as string"""
+        if hasattr(message, 'text') and message.text:
+            return str(message.text)
+        return ""
     
     def _get_user_name(self, sender) -> str:
         """Get user name from sender object"""
@@ -405,10 +262,13 @@ class UserbotWorker:
             name = sender.first_name or ""
             if hasattr(sender, 'last_name') and sender.last_name:
                 name += f" {sender.last_name}"
-            return name.strip()
+            return name.strip() or "Unknown"
         
         if hasattr(sender, 'title'):
             return sender.title or "Unknown"
+        
+        if hasattr(sender, 'username') and sender.username:
+            return f"@{sender.username}"
         
         return "Unknown"
     
@@ -427,6 +287,7 @@ class UserbotWorker:
             
             # Track sent message for reply detection
             self.sent_message_ids.add((target_chat_id, sent_message.id))
+            logger.debug(f"Tracked sent call message: chat={target_chat_id}, msg_id={sent_message.id}")
             
             # Keep only recent messages (last 1000) to prevent memory bloat
             if len(self.sent_message_ids) > 1000:

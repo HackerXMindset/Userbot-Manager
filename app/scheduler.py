@@ -119,8 +119,8 @@ class Scheduler:
                 window_calls = await db.fetchval("""
                     SELECT COUNT(*) FROM calls 
                     WHERE group_id = $1 
-                    AND sent_at > $2::TIME 
-                    AND sent_at < $3::TIME
+                    AND sent_at::TIME > $2::TIME 
+                    AND sent_at::TIME < $3::TIME
                     AND DATE(sent_at) = CURRENT_DATE
                     AND status = 'sent'
                 """, group_id, schedule['start_time'], schedule['end_time'])
@@ -146,7 +146,7 @@ class Scheduler:
             # 2. Haven't been called in this group recently
             # 3. Have gain potential or alerts to trigger
             tokens = await db.fetch("""
-                SELECT DISTINCT t.* 
+                SELECT t.* 
                 FROM tokens_tracked t
                 WHERE t.status = 'active'
                 AND t.id NOT IN (

@@ -24,8 +24,7 @@ class Keyboards:
                 InlineKeyboardButton(text="📡 Sources", callback_data="menu:sources")
             ],
             [
-                InlineKeyboardButton(text="🚨 Alerts", callback_data="menu:alerts"),
-                InlineKeyboardButton(text="📢 Notifications", callback_data="menu:notifications")
+                InlineKeyboardButton(text="🚨 Alerts", callback_data="menu:alerts")
             ],
             [
                 InlineKeyboardButton(text="📈 Tracking", callback_data="menu:tracking"),

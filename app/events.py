@@ -6,7 +6,7 @@ from datetime import datetime
 
 from app.config import settings
 from app.db import db
-from app.models import EventModel, NotificationModel
+from app.models import EventModel
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +15,6 @@ class EventRouter:
     
     def __init__(self):
         self.event_model = EventModel(db)
-        self.notification_model = NotificationModel(db)
         self.running = False
         self._task: Optional[asyncio.Task] = None
     
@@ -81,28 +80,18 @@ class EventRouter:
                 logger.warning(f"Event {event.get('id')} has no kind")
                 return
             
-            # Check if user is blacklisted
-            if user_id and await self.notification_model.is_user_blacklisted(user_id):
-                logger.debug(f"Event from blacklisted user {user_id} ignored")
-                await self.event_model.mark_routed(event.get('id', 0), 0)
-                return
+            # Notification system removed - no longer checking blacklist or event type settings
             
-            # Check if event type is enabled
-            if not await self.notification_model.is_event_type_enabled(event_kind):
-                logger.debug(f"Event type {event_kind} disabled for notifications")
-                await self.event_model.mark_routed(event.get('id', 0), 0)
-                return
+            # Removed notification event handlers for reply, mention, and dm events
             
-            if event_kind == 'reply':
-                await self._handle_reply_event(event)
-            elif event_kind == 'mention':
-                await self._handle_mention_event(event)
-            elif event_kind == 'dm':
-                await self._handle_dm_event(event)
-            elif event_kind == 'token_call':
+            if event_kind == 'token_call':
                 await self._handle_token_call_event(event)
             elif event_kind == 'source_token_call':
                 await self._handle_token_call_event(event)  # Handle same as token_call
+            elif event_kind in ['reply', 'mention', 'dm', 'test']:
+                # These event types are no longer supported (notification feature removed)
+                # Silently mark as processed without logging warnings
+                pass
             else:
                 logger.warning(f"Unknown event kind: {event_kind}")
             
@@ -113,96 +102,8 @@ class EventRouter:
             event_id = event.get('id', 'unknown') if isinstance(event, dict) else 'unknown'
             logger.error(f"Error routing event {event_id}: {e}")
     
-    async def _handle_reply_event(self, event: Dict[str, Any]):
-        """Handle reply events"""
-        try:
-            # Get notification channel from settings
-            notif_channel = await self.notification_model.get_notification_channel()
-            
-            if not notif_channel:
-                logger.debug("No notification channel configured for reply event")
-                return
-            
-            payload = json.loads(event['payload']) if isinstance(event['payload'], str) else event['payload']
-            
-            # Format message
-            message = (
-                f"💬 <b>REPLY DETECTED</b>\n\n"
-                f"Chat: {payload.get('chat_title', 'Unknown')}\n"
-                f"User: {payload.get('user_name', 'Unknown')}\n"
-                f"Reply to: {payload.get('reply_to_text', 'Unknown')[:100]}...\n\n"
-                f"Message: {payload.get('message_text', '')[:200]}...\n\n"
-                f"Time: {event['created_at'].strftime('%H:%M:%S')}"
-            )
-            
-            # Send notification
-            from app.notification_sender import notification_sender
-            await notification_sender.send_notification(event)
-            
-            logger.debug(f"Reply detected in {payload.get('chat_title', 'Unknown')} from {payload.get('user_name', 'Unknown')}")
-            
-        except Exception as e:
-            logger.error(f"Error handling reply event: {e}")
     
-    async def _handle_mention_event(self, event: Dict[str, Any]):
-        """Handle mention events"""
-        try:
-            # Get notification channel from settings
-            notif_channel = await self.notification_model.get_notification_channel()
-            
-            if not notif_channel:
-                logger.debug("No notification channel configured for mention event")
-                return
-            
-            payload = json.loads(event['payload']) if isinstance(event['payload'], str) else event['payload']
-            
-            # Format message
-            message = (
-                f"📢 <b>MENTION DETECTED</b>\n\n"
-                f"Chat: {payload.get('chat_title', 'Unknown')}\n"
-                f"User: {payload.get('user_name', 'Unknown')}\n\n"
-                f"Message: {payload.get('message_text', '')[:200]}...\n\n"
-                f"Time: {event['created_at'].strftime('%H:%M:%S')}"
-            )
-            
-            # Send notification
-            from app.notification_sender import notification_sender
-            await notification_sender.send_notification(event)
-            
-            logger.debug(f"Mention detected in {payload.get('chat_title', 'Unknown')} from {payload.get('user_name', 'Unknown')}")
-            
-        except Exception as e:
-            logger.error(f"Error handling mention event: {e}")
     
-    async def _handle_dm_event(self, event: Dict[str, Any]):
-        """Handle DM events"""
-        try:
-            # Get notification channel from settings
-            notif_channel = await self.notification_model.get_notification_channel()
-            
-            if not notif_channel:
-                logger.debug("No notification channel configured for DM event")
-                return
-            
-            payload = json.loads(event['payload']) if isinstance(event['payload'], str) else event['payload']
-            
-            # Format message
-            message = (
-                f"💌 <b>DIRECT MESSAGE</b>\n\n"
-                f"From: {payload.get('user_name', 'Unknown')}\n"
-                f"User ID: <code>{event['user_id']}</code>\n\n"
-                f"Message: {payload.get('message_text', '')[:300]}...\n\n"
-                f"Time: {event['created_at'].strftime('%H:%M:%S')}"
-            )
-            
-            # Send notification
-            from app.notification_sender import notification_sender
-            await notification_sender.send_notification(event)
-            
-            logger.debug(f"DM received from {payload.get('user_name', 'Unknown')} (ID: {event['user_id']})")
-            
-        except Exception as e:
-            logger.error(f"Error handling DM event: {e}")
     
     async def _handle_token_call_event(self, event: Dict[str, Any]):
         """Handle token call events"""
