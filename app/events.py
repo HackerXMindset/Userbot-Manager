@@ -88,6 +88,8 @@ class EventRouter:
                 await self._handle_token_call_event(event)
             elif event_kind == 'source_token_call':
                 await self._handle_token_call_event(event)  # Handle same as token_call
+            elif event_kind == 'system':
+                await self._handle_system_event(event)
             elif event_kind in ['reply', 'mention', 'dm', 'test']:
                 # These event types are no longer supported (notification feature removed)
                 # Silently mark as processed without logging warnings
@@ -103,7 +105,29 @@ class EventRouter:
             logger.error(f"Error routing event {event_id}: {e}")
     
     
-    
+    async def _handle_system_event(self, event: Dict[str, Any]):
+        """Handle system events"""
+        try:
+            payload = json.loads(event['payload']) if isinstance(event['payload'], str) else event['payload']
+            
+            event_type = payload.get('event_type', 'unknown')
+            userbot_id = payload.get('userbot_id', 'unknown')
+            
+            logger.debug(f"Processing system event: {event_type} for userbot {userbot_id}")
+            
+            # System events are informational - just log them
+            if event_type == 'userbot_started':
+                logger.info(f"Userbot {userbot_id} started successfully")
+            elif event_type == 'userbot_stopped':
+                logger.info(f"Userbot {userbot_id} stopped")
+            elif event_type == 'connection_error':
+                error_msg = payload.get('error', 'Unknown error')
+                logger.warning(f"Userbot {userbot_id} connection error: {error_msg}")
+            else:
+                logger.debug(f"System event {event_type} for userbot {userbot_id}")
+                
+        except Exception as e:
+            logger.error(f"Error handling system event: {e}")
     
     async def _handle_token_call_event(self, event: Dict[str, Any]):
         """Handle token call events"""
