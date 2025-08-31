@@ -130,9 +130,17 @@ class GroupsHandler:
                     'cooldown_minutes': 10
                 })
             
+            # Auto-create target for this group
+            target_chat_id = chat_id if chat_id else 0  # Use 0 for username-based groups until resolved
+            await self.db.execute(
+                "INSERT INTO targets (group_id, dest_chat_id, created_at) VALUES ($1, $2, NOW())",
+                result['id'], target_chat_id
+            )
+            
             await message.answer(
                 f"✅ Group added successfully!\n"
-                f"ID: {result['id']}\n\n"
+                f"ID: {result['id']}\n"
+                f"Target auto-created for calls delivery.\n\n"
                 f"Configure schedules and assign a userbot to start monitoring.",
                 reply_markup=self.keyboards.group_details(dict(result))
             )

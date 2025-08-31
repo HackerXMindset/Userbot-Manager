@@ -16,7 +16,7 @@ from app.ui.keyboards import Keyboards
 from app.ui.states import ManagementStates
 from app.ui.handlers import (
     MenuHandler, GroupsHandler, UserbotsHandler, 
-    AlertsHandler, SchedulesHandler, TargetsHandler, SourcesHandler
+    AlertsHandler, SchedulesHandler, SourcesHandler
 )
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,6 @@ class ManagementBot:
         self.userbots_handler = UserbotsHandler(db, self.keyboards)
         self.alerts_handler = AlertsHandler(db, self.keyboards)
         self.schedules_handler = SchedulesHandler(db, self.keyboards)
-        self.targets_handler = TargetsHandler(db, self.keyboards)
         self.sources_handler = SourcesHandler(db, self.keyboards)
         
         self.setup_handlers()
@@ -170,19 +169,7 @@ class ManagementBot:
             F.from_user.id == settings.admin_telegram_id
         )
         
-        # Targets
-        self.dp.callback_query.register(
-            self.targets_handler.handle_target_action,
-            F.data.startswith('targets:'),
-            F.from_user.id == settings.admin_telegram_id
-        )
         
-        # Target group selection
-        self.dp.callback_query.register(
-            self.handle_target_group_selection,
-            F.data.startswith('target_group:'),
-            F.from_user.id == settings.admin_telegram_id
-        )
         
         # Sources
         self.dp.callback_query.register(
@@ -255,11 +242,6 @@ class ManagementBot:
             F.from_user.id == settings.admin_telegram_id
         )
         
-        self.dp.message.register(
-            self.process_target_input,
-            ManagementStates.adding_target,
-            F.from_user.id == settings.admin_telegram_id
-        )
         
         # Custom schedule input handlers
         self.dp.message.register(
@@ -313,8 +295,6 @@ class ManagementBot:
             await self.show_quotas_menu(query)
         elif action == 'userbots':
             await self.userbots_handler.show_userbots_menu(query)
-        elif action == 'targets':
-            await self.targets_handler.show_targets_menu(query)
         elif action == 'sources':
             await self.sources_handler.show_sources_menu(query)
         elif action == 'alerts':
@@ -1933,88 +1913,7 @@ class ManagementBot:
             logger.error(f"Error handling userbot assignment: {e}")
             await query.answer("❌ Error assigning userbot")
     
-    async def handle_target_group_selection(self, query: types.CallbackQuery, state: FSMContext):
-        """Handle target group selection for adding target"""
-        try:
-            group_id = int(query.data.split(':', 1)[1])
-            
-            # Set group ID in state
-            await state.set_data({'group_id': group_id})
-            await state.set_state(ManagementStates.adding_target)
-            
-            # Get group info
-            group = await db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
-            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
-            
-            text = f"<b>➕ Add Target for {group_name}</b>\n\n"
-            text += "Please enter the target chat ID where calls should be sent.\n\n"
-            text += "Examples:\n"
-            text += "• Channel: -1001234567890\n"
-            text += "• Group: -1001234567890\n"
-            text += "• Your private chat ID\n\n"
-            text += "Type /cancel to abort."
-            
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="❌ Cancel", callback_data="menu:targets")]
-            ])
-            
-            await query.message.edit_text(text, reply_markup=keyboard)
-            
-        except Exception as e:
-            logger.error(f"Error handling target group selection: {e}")
-            await query.answer("❌ Error processing selection")
     
-    async def process_target_input(self, message: types.Message, state: FSMContext):
-        """Process target chat ID input"""
-        try:
-            if message.text == '/cancel':
-                await message.reply("❌ Target addition cancelled.")
-                await state.clear()
-                return
-            
-            data = await state.get_data()
-            group_id = data.get('group_id')
-            
-            if not group_id:
-                await message.reply("❌ Session expired. Please start again.")
-                await state.clear()
-                return
-            
-            # Parse target chat ID
-            try:
-                target_chat_id = int(message.text.strip())
-            except ValueError:
-                await message.reply("❌ Invalid chat ID. Please enter a valid number.")
-                return
-            
-            # Add target to database
-            await db.execute("""
-                INSERT INTO targets (group_id, dest_chat_id)
-                VALUES ($1, $2)
-                ON CONFLICT (group_id, dest_chat_id) DO NOTHING
-            """, group_id, target_chat_id)
-            
-            # Get group info for confirmation
-            group = await db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
-            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
-            
-            text = f"✅ <b>Target Added</b>\n\n"
-            text += f"Group: {group_name}\n"
-            text += f"Target Chat ID: <code>{target_chat_id}</code>\n\n"
-            text += "Calls will now be forwarded to this target chat when tokens are detected in source chats."
-            
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📋 View Targets", callback_data="menu:targets")],
-                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]
-            ])
-            
-            await message.reply(text, reply_markup=keyboard)
-            await state.clear()
-            
-        except Exception as e:
-            logger.error(f"Error processing target input: {e}")
-            await message.reply("❌ Error adding target")
-            await state.clear()
     
     async def handle_source_group_selection(self, query: types.CallbackQuery, state: FSMContext):
         """Handle source group selection for adding source"""
