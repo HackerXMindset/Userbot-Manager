@@ -23,6 +23,7 @@ class ManagementStates(StatesGroup):
     # Alerts
     adding_gain_threshold = State()
     setting_drop_percentage = State()
+    custom_drop_input = State()
     
     # Targets
     adding_target = State()

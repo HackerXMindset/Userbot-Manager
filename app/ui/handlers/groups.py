@@ -62,12 +62,6 @@ class GroupsHandler:
         elif action == 'toggle':
             group_id = int(parts[2])
             await self.toggle_group(query, group_id)
-        elif action == 'quota':
-            group_id = int(parts[2])
-            await self.show_quota_editor(query, group_id)
-        elif action == 'cooldown':
-            group_id = int(parts[2])
-            await self.show_cooldown_editor(query, group_id)
         elif action == 'delete':
             group_id = int(parts[2])
             await self.confirm_delete_group(query, group_id)
@@ -77,6 +71,9 @@ class GroupsHandler:
         elif action == 'schedules':
             group_id = int(parts[2])
             await self.show_group_schedules(query, group_id)
+        elif action == 'stats':
+            group_id = int(parts[2])
+            await self.show_group_stats(query, group_id)
     
     async def start_add_group(self, query: types.CallbackQuery, state: FSMContext):
         """Start the add group process"""
@@ -204,34 +201,6 @@ class GroupsHandler:
             logger.error(f"Error toggling group: {e}")
             await query.answer("❌ Error updating group")
     
-    async def show_quota_editor(self, query: types.CallbackQuery, group_id: int):
-        """Show quota editor"""
-        try:
-            current = await self.db.fetchval("SELECT daily_cap FROM groups WHERE id = $1", group_id)
-            await query.message.edit_text(
-                f"<b>📦 Set Daily Quota</b>\n\n"
-                f"Current: {current or 'Unlimited'}\n"
-                f"Enter new daily cap (0 for unlimited):",
-                reply_markup=self.keyboards.number_picker(f"quota:{group_id}", current or 0, 0, 1000)
-            )
-        except Exception as e:
-            logger.error(f"Error showing quota editor: {e}")
-            await query.answer("❌ Error loading quota settings")
-    
-    async def show_cooldown_editor(self, query: types.CallbackQuery, group_id: int):
-        """Show cooldown editor"""
-        try:
-            current = await self.db.fetchval("SELECT cooldown_minutes FROM groups WHERE id = $1", group_id)
-            await query.message.edit_text(
-                f"<b>⏱ Set Cooldown</b>\n\n"
-                f"Current: {current} minutes\n"
-                f"Minimum time between calls in this group:",
-                reply_markup=self.keyboards.number_picker(f"cooldown:{group_id}", current, 0, 60)
-            )
-        except Exception as e:
-            logger.error(f"Error showing cooldown editor: {e}")
-            await query.answer("❌ Error loading cooldown settings")
-    
     async def show_userbot_assignment(self, query: types.CallbackQuery, group_id: int):
         """Show userbot assignment options"""
         try:
@@ -308,16 +277,12 @@ class GroupsHandler:
                 InlineKeyboardButton(text="➕ Add Schedule", callback_data=f"schedule:add:{group_id}")
             ])
             
-            # Edit/Remove buttons for existing schedules
+            # Remove buttons for existing schedules
             if schedules:
                 for schedule in schedules[:5]:  # Limit to 5 for UI space
                     keyboard_rows.append([
                         InlineKeyboardButton(
-                            text=f"✏️ Edit {schedule['start_time']}-{schedule['end_time']}", 
-                            callback_data=f"schedule:edit:{schedule['id']}"
-                        ),
-                        InlineKeyboardButton(
-                            text="🗑️", 
+                            text=f"🗑️ Delete {schedule['start_time']}-{schedule['end_time']}", 
                             callback_data=f"schedule:delete:{schedule['id']}"
                         )
                     ])
@@ -334,6 +299,178 @@ class GroupsHandler:
         except Exception as e:
             logger.error(f"Error showing group schedules: {e}")
             await query.answer("❌ Error loading schedules")
+    
+    async def show_group_stats(self, query: types.CallbackQuery, group_id: int):
+        """Show statistics for a specific group"""
+        try:
+            # Get group info
+            group = await self.db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
+            if not group:
+                await query.answer("❌ Group not found")
+                return
+            
+            # Get comprehensive stats
+            stats = await self.db.fetchrow("""
+                SELECT 
+                    COUNT(DISTINCT s.id) as schedules_count,
+                    COUNT(DISTINCT sc.id) as sources_count,
+                    COUNT(DISTINCT t.id) as targets_count,
+                    COUNT(CASE WHEN c.sent_at >= CURRENT_DATE THEN 1 END) as calls_today,
+                    COUNT(CASE WHEN c.sent_at >= CURRENT_DATE - INTERVAL '7 days' THEN 1 END) as calls_this_week,
+                    COUNT(c.id) as total_calls,
+                    b.session_name as userbot_name,
+                    MAX(c.sent_at) as last_call_time
+                FROM groups g
+                LEFT JOIN group_schedules s ON s.group_id = g.id
+                LEFT JOIN source_chats sc ON sc.group_id = g.id
+                LEFT JOIN targets t ON t.group_id = g.id
+                LEFT JOIN calls c ON c.group_id = g.id
+                LEFT JOIN userbot_assignments ua ON ua.group_id = g.id
+                LEFT JOIN bots b ON b.id = ua.userbot_id
+                WHERE g.id = $1
+                GROUP BY g.id, b.session_name
+            """, group_id)
+            
+            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+            status = "✅ Enabled" if group['enabled'] else "🔴 Disabled"
+            
+            # Format last call time
+            if stats['last_call_time']:
+                last_call = stats['last_call_time'].strftime('%Y-%m-%d %H:%M')
+            else:
+                last_call = 'Never'
+            
+            text = f"<b>📊 Stats for {group_name}</b>\n\n"
+            text += f"<b>Status:</b> {status}\n"
+            text += f"<b>Userbot:</b> {stats['userbot_name'] or 'Not assigned'}\n\n"
+            
+            text += f"<b>Configuration:</b>\n"
+            text += f"├ Schedules: {stats['schedules_count']}\n"
+            text += f"├ Sources: {stats['sources_count']}\n"
+            text += f"└ Targets: {stats['targets_count']}\n\n"
+            
+            text += f"<b>Call Activity:</b>\n"
+            text += f"├ Today: {stats['calls_today']}\n"
+            text += f"├ This Week: {stats['calls_this_week']}\n"
+            text += f"├ All Time: {stats['total_calls']}\n"
+            text += f"└ Last Call: {last_call}\n\n"
+            
+            text += f"<b>Group Details:</b>\n"
+            text += f"└ Chat ID: <code>{group['tg_chat_id']}</code>"
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Back to Group", callback_data=f"group:view:{group_id}")],
+                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]
+            ])
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error showing group stats: {e}")
+            await query.answer("❌ Error loading statistics")
+    
+    async def confirm_delete_group(self, query: types.CallbackQuery, group_id: int):
+        """Show delete confirmation for a group"""
+        try:
+            # Get group info
+            group = await self.db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
+            if not group:
+                await query.answer("❌ Group not found")
+                return
+            
+            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+            
+            # Get counts for warning
+            counts = await self.db.fetchrow("""
+                SELECT 
+                    COUNT(DISTINCT s.id) as schedules_count,
+                    COUNT(DISTINCT sc.id) as sources_count,
+                    COUNT(DISTINCT t.id) as targets_count,
+                    COUNT(c.id) as total_calls
+                FROM groups g
+                LEFT JOIN group_schedules s ON s.group_id = g.id
+                LEFT JOIN source_chats sc ON sc.group_id = g.id
+                LEFT JOIN targets t ON t.group_id = g.id
+                LEFT JOIN calls c ON c.group_id = g.id
+                WHERE g.id = $1
+            """, group_id)
+            
+            text = f"<b>🗑️ Delete Group</b>\n\n"
+            text += f"<b>Group:</b> {group_name}\n"
+            text += f"<b>Chat ID:</b> <code>{group['tg_chat_id']}</code>\n\n"
+            
+            text += f"⚠️ <b>This will permanently delete:</b>\n"
+            text += f"├ {counts['schedules_count']} schedule(s)\n"
+            text += f"├ {counts['sources_count']} source(s)\n" 
+            text += f"├ {counts['targets_count']} target(s)\n"
+            text += f"└ {counts['total_calls']} call record(s)\n\n"
+            
+            text += f"<b>This action cannot be undone!</b>\n"
+            text += f"Are you sure you want to delete this group?"
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Yes, Delete", callback_data=f"confirm_delete_group:{group_id}"),
+                    InlineKeyboardButton(text="❌ Cancel", callback_data=f"group:view:{group_id}")
+                ]
+            ])
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error showing delete confirmation: {e}")
+            await query.answer("❌ Error loading delete confirmation")
+    
+    async def delete_group(self, query: types.CallbackQuery):
+        """Actually delete the group and all related data"""
+        try:
+            # Parse callback data: confirm_delete_group:group_id
+            group_id = int(query.data.split(':', 1)[1])
+            
+            # Get group info before deletion
+            group = await self.db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
+            if not group:
+                await query.answer("❌ Group not found")
+                return
+            
+            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+            
+            # Delete all related data (foreign keys should handle this, but be explicit)
+            async with self.db.transaction():
+                # Delete schedules
+                await self.db.execute("DELETE FROM group_schedules WHERE group_id = $1", group_id)
+                
+                # Delete targets  
+                await self.db.execute("DELETE FROM targets WHERE group_id = $1", group_id)
+                
+                # Delete sources
+                await self.db.execute("DELETE FROM source_chats WHERE group_id = $1", group_id)
+                
+                # Delete userbot assignments
+                await self.db.execute("DELETE FROM userbot_assignments WHERE group_id = $1", group_id)
+                
+                # Delete call records
+                await self.db.execute("DELETE FROM calls WHERE group_id = $1", group_id)
+                
+                # Finally delete the group itself
+                await self.db.execute("DELETE FROM groups WHERE id = $1", group_id)
+            
+            text = f"✅ <b>Group Deleted</b>\n\n"
+            text += f"Successfully deleted: <b>{group_name}</b>\n"
+            text += f"All associated data has been removed.\n\n"
+            text += f"You can add a new group anytime from the groups menu."
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="👥 Groups Menu", callback_data="menu:groups")],
+                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]
+            ])
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            await query.answer("✅ Group deleted successfully!")
+            
+        except Exception as e:
+            logger.error(f"Error deleting group: {e}")
+            await query.answer("❌ Error deleting group")
     
     def _format_weekdays(self, weekdays):
         """Format weekdays list to readable string"""

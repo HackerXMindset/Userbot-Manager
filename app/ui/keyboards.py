@@ -13,10 +13,6 @@ class Keyboards:
                 InlineKeyboardButton(text="👥 Groups", callback_data="menu:groups")
             ],
             [
-                InlineKeyboardButton(text="📅 Schedules", callback_data="menu:schedules"),
-                InlineKeyboardButton(text="📦 Quotas", callback_data="menu:quotas")
-            ],
-            [
                 InlineKeyboardButton(text="🤖 Userbots", callback_data="menu:userbots"),
                 InlineKeyboardButton(text="🎯 Targets", callback_data="menu:targets")
             ],
@@ -68,12 +64,7 @@ class Keyboards:
         return InlineKeyboardMarkup(inline_keyboard=[
             [status_btn],
             [
-                InlineKeyboardButton(text="📅 Schedules", callback_data=f"group:schedules:{group['id']}"),
-                InlineKeyboardButton(text="🎯 Targets", callback_data=f"group:targets:{group['id']}")
-            ],
-            [
-                InlineKeyboardButton(text="📦 Set Quota", callback_data=f"group:quota:{group['id']}"),
-                InlineKeyboardButton(text="⏱ Set Cooldown", callback_data=f"group:cooldown:{group['id']}")
+                InlineKeyboardButton(text="📅 Schedules", callback_data=f"group:schedules:{group['id']}")
             ],
             [
                 InlineKeyboardButton(text="🤖 Assign Bot", callback_data=f"group:assign:{group['id']}"),
@@ -148,11 +139,6 @@ class Keyboards:
             [InlineKeyboardButton(text=f"📈 Gains: {gains_text}", callback_data="alerts:gains")],
             [InlineKeyboardButton(text=f"📉 Drop: {drop_pct*100:.0f}%", callback_data="alerts:drop")],
             [
-                InlineKeyboardButton(text="➕ Add Gain", callback_data="alerts:add_gain"),
-                InlineKeyboardButton(text="➖ Remove Gain", callback_data="alerts:remove_gain")
-            ],
-            [
-                InlineKeyboardButton(text="🔄 Set Drop %", callback_data="alerts:set_drop"),
                 InlineKeyboardButton(text="⚙️ Per-Group", callback_data="alerts:per_group")
             ],
             [InlineKeyboardButton(text="🔙 Back", callback_data="menu:main")]
