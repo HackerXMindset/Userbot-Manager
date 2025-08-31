@@ -321,8 +321,6 @@ class ManagementBot:
             await self.alerts_handler.show_alerts_menu(query)
         elif action == 'tracking':
             await self.menu_handler.show_tracking_menu(query)
-        elif action == 'settings':
-            await self.menu_handler.show_settings_menu(query)
         elif action == 'close':
             await query.message.delete()
         

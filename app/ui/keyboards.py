@@ -10,21 +10,18 @@ class Keyboards:
         return InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="📊 Status", callback_data="menu:status"),
-                InlineKeyboardButton(text="👥 Groups", callback_data="menu:groups")
+                InlineKeyboardButton(text="📈 Tracking", callback_data="menu:tracking")
             ],
             [
-                InlineKeyboardButton(text="🤖 Userbots", callback_data="menu:userbots"),
+                InlineKeyboardButton(text="👥 Groups", callback_data="menu:groups"),
+                InlineKeyboardButton(text="🤖 Userbots", callback_data="menu:userbots")
+            ],
+            [
+                InlineKeyboardButton(text="📡 Sources", callback_data="menu:sources"),
                 InlineKeyboardButton(text="🎯 Targets", callback_data="menu:targets")
             ],
             [
-                InlineKeyboardButton(text="📡 Sources", callback_data="menu:sources")
-            ],
-            [
                 InlineKeyboardButton(text="🚨 Alerts", callback_data="menu:alerts")
-            ],
-            [
-                InlineKeyboardButton(text="📈 Tracking", callback_data="menu:tracking"),
-                InlineKeyboardButton(text="⚙️ Settings", callback_data="menu:settings")
             ],
             [
                 InlineKeyboardButton(text="❌ Close", callback_data="menu:close")

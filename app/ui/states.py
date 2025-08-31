@@ -32,7 +32,4 @@ class ManagementStates(StatesGroup):
     adding_source_chat_id = State()
     adding_source_user_id = State()
     
-    # Settings
-    setting_timezone = State()
-    setting_dex_poll = State()
     
