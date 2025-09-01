@@ -9,29 +9,71 @@ class SourceChatModel(BaseModel):
         super().__init__(db)
         self.table_name = "source_chats"
     
+    async def get_all_sources(self) -> List[asyncpg.Record]:
+        """Get all source chats globally"""
+        query = """
+            SELECT sc.*, COUNT(scu.id) as user_count,
+                   COUNT(rr.id) as route_count
+            FROM source_chats sc
+            LEFT JOIN source_chat_users scu ON scu.source_chat_id = sc.id
+            LEFT JOIN routing_rules rr ON rr.source_chat_id = sc.id AND rr.enabled = true
+            GROUP BY sc.id
+            ORDER BY sc.created_at DESC
+        """
+        return await self.db.fetch(query)
+    
     async def get_by_group(self, group_id: int) -> List[asyncpg.Record]:
-        """Get all source chats for a group"""
+        """Get all source chats routed to a specific group"""
         query = """
             SELECT sc.*, COUNT(scu.id) as user_count
             FROM source_chats sc
             LEFT JOIN source_chat_users scu ON scu.source_chat_id = sc.id
-            WHERE sc.group_id = $1
+            LEFT JOIN routing_rules rr ON rr.source_chat_id = sc.id
+            WHERE rr.target_group_id = $1 AND rr.enabled = true
             GROUP BY sc.id
             ORDER BY sc.created_at DESC
         """
         return await self.db.fetch(query, group_id)
     
-    async def add_source(self, group_id: int, source_chat_id: int, 
-                        source_type: str, title: str = None) -> asyncpg.Record:
-        """Add a new source chat"""
+    async def add_source(self, source_chat_id: int, source_type: str, 
+                        name: str = None, title: str = None) -> asyncpg.Record:
+        """Add a new global source chat"""
         query = """
-            INSERT INTO source_chats (group_id, source_chat_id, source_type, title)
+            INSERT INTO source_chats (source_chat_id, source_type, name, title)
             VALUES ($1, $2, $3, $4)
-            ON CONFLICT (group_id, source_chat_id) DO UPDATE SET
-                source_type = $3, title = $4, enabled = true
+            ON CONFLICT (source_chat_id) DO UPDATE SET
+                source_type = $2, name = $3, title = $4, enabled = true
             RETURNING *
         """
-        return await self.db.fetchrow(query, group_id, source_chat_id, source_type, title)
+        return await self.db.fetchrow(query, source_chat_id, source_type, name, title)
+    
+    async def add_routing_rule(self, source_id: int, target_group_id: int) -> asyncpg.Record:
+        """Add a routing rule from source to target group"""
+        query = """
+            INSERT INTO routing_rules (source_chat_id, target_group_id)
+            VALUES ($1, $2)
+            ON CONFLICT (source_chat_id, target_group_id) DO UPDATE SET
+                enabled = true
+            RETURNING *
+        """
+        return await self.db.fetchrow(query, source_id, target_group_id)
+    
+    async def get_routing_rules(self, source_id: int) -> List[asyncpg.Record]:
+        """Get all routing rules for a source"""
+        query = """
+            SELECT rr.*, g.title as group_title, g.tg_chat_id
+            FROM routing_rules rr
+            JOIN groups g ON g.id = rr.target_group_id
+            WHERE rr.source_chat_id = $1
+            ORDER BY rr.enabled DESC, g.title
+        """
+        return await self.db.fetch(query, source_id)
+    
+    async def remove_routing_rule(self, source_id: int, target_group_id: int) -> bool:
+        """Remove a routing rule"""
+        query = "DELETE FROM routing_rules WHERE source_chat_id = $1 AND target_group_id = $2"
+        result = await self.db.execute(query, source_id, target_group_id)
+        return result.split()[-1] == '1'
     
     async def toggle_enabled(self, source_id: int) -> bool:
         """Toggle source chat enabled status"""
@@ -91,7 +133,7 @@ class SourceChatModel(BaseModel):
     
     async def is_user_allowed(self, source_chat_id: int, user_id: int) -> bool:
         """Check if user is allowed to trigger forwards from this source"""
-        # For channels, get the source type first
+        # Get the source type first
         source_query = "SELECT source_type FROM source_chats WHERE source_chat_id = $1"
         source_type = await self.db.fetchval(source_query, source_chat_id)
         
@@ -102,7 +144,12 @@ class SourceChatModel(BaseModel):
         if source_type == 'channel':
             return True
         
-        # Groups only allow specific users
+        # DMs: user is allowed if the source_chat_id matches their user_id
+        # (DM sources have source_chat_id = user_id of the person in the DM)
+        if source_type == 'dm':
+            return source_chat_id == user_id
+        
+        # Groups: only allow specific users from source_chat_users table
         query = """
             SELECT EXISTS(
                 SELECT 1 FROM source_chat_users scu

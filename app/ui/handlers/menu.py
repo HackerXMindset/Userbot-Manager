@@ -30,22 +30,21 @@ class MenuHandler:
     async def get_status_text(self) -> str:
         """Generate status overview"""
         try:
-            # Get counts from database
-            groups_count = await self.db.fetchval("SELECT COUNT(*) FROM groups WHERE enabled = true")
-            userbots_count = await self.db.fetchval("SELECT COUNT(*) FROM bots WHERE kind = 'userbot' AND status = 'active'")
-            tokens_active = await self.db.fetchval("SELECT COUNT(*) FROM tokens_tracked WHERE status = 'active'")
-            calls_today = await self.db.fetchval("""
-                SELECT COUNT(*) FROM calls 
-                WHERE sent_at > CURRENT_DATE 
-                AND status = 'sent'
+            # Simple batch query - no complex caching for small scale
+            result = await self.db.fetchrow("""
+                SELECT 
+                    (SELECT COUNT(*) FROM groups WHERE enabled = true) as groups_count,
+                    (SELECT COUNT(*) FROM bots WHERE kind = 'userbot' AND status = 'active') as userbots_count,
+                    (SELECT COUNT(*) FROM tokens_tracked WHERE status = 'active') as tokens_active,
+                    (SELECT COUNT(*) FROM calls WHERE sent_at > CURRENT_DATE AND status = 'sent') as calls_today
             """)
             
             return (
                 f"📊 <b>System Status</b>\n"
-                f"├ Groups: {groups_count} active\n"
-                f"├ Userbots: {userbots_count} online\n"
-                f"├ Tokens: {tokens_active} tracking\n"
-                f"├ Calls Today: {calls_today}\n"
+                f"├ Groups: {result['groups_count']} active\n"
+                f"├ Userbots: {result['userbots_count']} online\n"
+                f"├ Tokens: {result['tokens_active']} tracking\n"
+                f"├ Calls Today: {result['calls_today']}\n"
                 f"└ Time: {settings.get_local_time().strftime('%H:%M IST')}"
             )
         except Exception as e:
@@ -54,11 +53,19 @@ class MenuHandler:
     
     async def show_main_menu(self, query: types.CallbackQuery):
         """Show the main menu"""
-        status_text = await self.get_status_text()
-        await query.message.edit_text(
-            f"<b>🎛 Management Console</b>\n\n{status_text}",
-            reply_markup=self.keyboards.main_menu()
-        )
+        try:
+            status_text = await self.get_status_text()
+            await query.message.edit_text(
+                f"<b>🎛 Management Console</b>\n\n{status_text}",
+                reply_markup=self.keyboards.main_menu()
+            )
+            await query.answer()
+        except Exception as e:
+            if "message is not modified" in str(e).lower():
+                await query.answer()
+            else:
+                logger.error(f"Error showing main menu: {e}")
+                await query.answer("❌ Error loading menu", show_alert=True)
     
     async def show_detailed_status(self, query: types.CallbackQuery):
         """Show detailed system status"""

@@ -70,6 +70,17 @@ class UserbotsHandler:
             await self.show_userbot_details(query, userbot_id)
         elif action == 'health':
             await self.check_userbots_health(query)
+        elif action == 'refresh_sources':
+            await self.refresh_all_sources(query)
+        elif action == 'check':
+            userbot_id = int(parts[2])
+            await self.check_individual_userbot(query, userbot_id)
+        elif action == 'delete':
+            userbot_id = int(parts[2])
+            await self.delete_userbot(query, userbot_id)
+        elif action == 'confirm_delete':
+            userbot_id = int(parts[2])
+            await self.confirm_delete_userbot(query, userbot_id)
     
     async def start_userbot_login(self, query: types.CallbackQuery, state: FSMContext):
         """Start userbot login process"""
@@ -520,3 +531,250 @@ class UserbotsHandler:
         except Exception as e:
             logger.error(f"Error checking userbot health: {e}")
             await query.answer("❌ Error checking userbot health")
+    
+    async def refresh_all_sources(self, query: types.CallbackQuery):
+        """Refresh source monitoring for all userbots"""
+        try:
+            # Import the legacy userbot manager
+            from app.userbot_worker import UserbotManager
+            
+            # Since we can't easily access the running instance, 
+            # we'll create a temporary instance to access worker functionality
+            # This is not ideal but works for the refresh functionality
+            temp_manager = UserbotManager()
+            
+            # Get all active userbots from database
+            userbots = await self.bot_model.get_active_userbots()
+            
+            if not userbots:
+                await query.answer("❌ No active userbots found")
+                return
+            
+            await query.message.edit_text(
+                "<b>🔄 Refreshing Sources</b>\n\n"
+                "Please wait while we refresh source monitoring for all userbots...",
+                reply_markup=None
+            )
+            
+            # Refresh sources by creating temporary workers for each active userbot
+            refreshed_count = 0
+            failed_count = 0
+            
+            for userbot in userbots:
+                userbot_id = userbot['id']
+                session_string = userbot.get('session_string')
+                
+                if not session_string:
+                    logger.warning(f"No session string for userbot {userbot_id}")
+                    failed_count += 1
+                    continue
+                
+                try:
+                    # Create a temporary worker instance for refresh
+                    from app.userbot_worker import UserbotWorker
+                    temp_worker = UserbotWorker(userbot_id, session_string)
+                    
+                    # Initialize the session to allow refresh
+                    if await temp_worker._modular_worker.session_manager.initialize_client():
+                        await temp_worker.refresh_sources()
+                        refreshed_count += 1
+                        logger.info(f"Refreshed sources for userbot {userbot_id}")
+                        
+                        # Clean up the temporary session
+                        await temp_worker._modular_worker.session_manager.disconnect_client()
+                    else:
+                        failed_count += 1
+                        logger.error(f"Failed to initialize session for userbot {userbot_id}")
+                        
+                except Exception as worker_error:
+                    failed_count += 1
+                    logger.error(f"Failed to refresh sources for userbot {userbot_id}: {worker_error}")
+            
+            # Show results
+            if refreshed_count > 0:
+                text = f"✅ <b>Sources Refreshed Successfully</b>\n\n"
+                text += f"Refreshed source monitoring for {refreshed_count} userbot(s)\n"
+                if failed_count > 0:
+                    text += f"Failed to refresh {failed_count} userbot(s)\n"
+                text += "\nNew sources and routing rules are now active!"
+                
+                await query.answer("✅ Sources refreshed successfully")
+            else:
+                text = f"⚠️ <b>Refresh Completed</b>\n\n"
+                text += "No active userbots found to refresh.\n"
+                text += f"Failed attempts: {failed_count}"
+                
+                await query.answer("⚠️ No userbots to refresh")
+            
+            await query.message.edit_text(
+                text,
+                reply_markup=self.keyboards.back_button("menu:userbots")
+            )
+            
+        except Exception as e:
+            logger.error(f"Error refreshing sources: {e}")
+            await query.answer("❌ Error refreshing sources")
+            
+            try:
+                await query.message.edit_text(
+                    f"❌ <b>Refresh Failed</b>\n\n"
+                    f"Error: {str(e)}\n\n"
+                    f"Please try again or restart the bot.",
+                    reply_markup=self.keyboards.back_button("menu:userbots")
+                )
+            except:
+                pass
+    
+    async def check_individual_userbot(self, query: types.CallbackQuery, userbot_id: int):
+        """Check status of individual userbot"""
+        try:
+            userbot = await self.bot_model.get_by_id(userbot_id)
+            if not userbot:
+                await query.answer("Userbot not found!")
+                return
+            
+            # Test the userbot connection
+            from app.userbot.session_manager import SessionManager
+            session_manager = SessionManager(userbot_id, userbot['session_string'])
+            
+            await query.message.edit_text(
+                "<b>🔄 Checking Userbot Status...</b>\n\n"
+                "Please wait while we test the connection...",
+                reply_markup=None
+            )
+            
+            # Initialize and test connection
+            success = await session_manager.initialize_client()
+            
+            if success:
+                health = await session_manager.health_check()
+                user_info = session_manager.get_user_info()
+                
+                await session_manager.disconnect_client()
+                
+                if health['healthy']:
+                    status_icon = "✅"
+                    status_text = "Connected and working"
+                    details = f"User ID: {user_info.get('user_id')}\nUsername: @{user_info.get('username') or 'none'}"
+                else:
+                    status_icon = "❌"
+                    status_text = f"Connection issues: {health.get('error', 'Unknown error')}"
+                    details = "Health check failed"
+            else:
+                status_icon = "❌"
+                status_text = "Failed to initialize"
+                details = "Could not connect to Telegram"
+            
+            text = (
+                f"<b>🔍 Userbot Status Check</b>\n\n"
+                f"<b>{userbot['session_name']}</b>\n\n"
+                f"Status: {status_icon} {status_text}\n"
+                f"Details: {details}\n\n"
+                f"✅ Check completed successfully"
+            )
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Back", callback_data=f"userbot:view:{userbot_id}")]
+            ])
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error checking individual userbot: {e}")
+            await query.answer("❌ Error checking userbot status")
+            
+            try:
+                await query.message.edit_text(
+                    f"❌ <b>Status Check Failed</b>\n\n"
+                    f"Error: {str(e)}",
+                    reply_markup=self.keyboards.back_button(f"userbot:view:{userbot_id}")
+                )
+            except:
+                pass
+    
+    async def delete_userbot(self, query: types.CallbackQuery, userbot_id: int):
+        """Delete userbot with confirmation"""
+        try:
+            userbot = await self.bot_model.get_by_id(userbot_id)
+            if not userbot:
+                await query.answer("Userbot not found!")
+                return
+            
+            text = (
+                f"<b>🗑 Delete Userbot</b>\n\n"
+                f"Are you sure you want to delete:\n"
+                f"<b>{userbot['session_name']}</b>\n\n"
+                f"⚠️ <b>Warning:</b>\n"
+                f"• This will permanently remove the userbot\n"
+                f"• All assignments will be lost\n"
+                f"• This action cannot be undone\n\n"
+                f"Confirm deletion?"
+            )
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Yes, Delete", callback_data=f"userbot:confirm_delete:{userbot_id}"),
+                    InlineKeyboardButton(text="❌ Cancel", callback_data=f"userbot:view:{userbot_id}")
+                ]
+            ])
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error showing delete confirmation: {e}")
+            await query.answer("❌ Error loading delete confirmation")
+    
+    async def confirm_delete_userbot(self, query: types.CallbackQuery, userbot_id: int):
+        """Actually delete the userbot after confirmation"""
+        try:
+            userbot = await self.bot_model.get_by_id(userbot_id)
+            if not userbot:
+                await query.answer("Userbot not found!")
+                return
+            
+            session_name = userbot['session_name']
+            
+            # Delete the userbot from database
+            success = await self.bot_model.delete(userbot_id)
+            
+            if success:
+                text = (
+                    f"✅ <b>Userbot Deleted</b>\n\n"
+                    f"Successfully removed:\n"
+                    f"<b>{session_name}</b>\n\n"
+                    f"The userbot and all its assignments have been permanently deleted."
+                )
+                
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Back to Userbots", callback_data="menu:userbots")]
+                ])
+                
+                await query.answer("✅ Userbot deleted successfully")
+            else:
+                text = (
+                    f"❌ <b>Deletion Failed</b>\n\n"
+                    f"Could not delete userbot:\n"
+                    f"<b>{session_name}</b>\n\n"
+                    f"The userbot may not exist or there was a database error."
+                )
+                
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Back", callback_data=f"userbot:view:{userbot_id}")]
+                ])
+                
+                await query.answer("❌ Failed to delete userbot")
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error confirming userbot deletion: {e}")
+            await query.answer("❌ Error deleting userbot")
+            
+            try:
+                await query.message.edit_text(
+                    f"❌ <b>Deletion Error</b>\n\n"
+                    f"Error: {str(e)}",
+                    reply_markup=self.keyboards.back_button("menu:userbots")
+                )
+            except:
+                pass

@@ -1,0 +1,25 @@
+#!/bin/bash
+# DAIC command to toggle between Discussion and Implementation modes
+
+# Get the project root (where .claude directory is)
+PROJECT_ROOT="$(pwd)"
+while [[ ! -d "$PROJECT_ROOT/.claude" && "$PROJECT_ROOT" != "/" ]]; do
+    PROJECT_ROOT="$(dirname "$PROJECT_ROOT")"
+done
+
+if [[ "$PROJECT_ROOT" == "/" ]]; then
+    echo "[DAIC Error] Could not find .claude directory in current path or parent directories"
+    exit 1
+fi
+
+# Find the hooks directory
+HOOKS_DIR="$PROJECT_ROOT/.claude/hooks"
+
+# Run Python inline to toggle mode
+python3 -c "
+import sys
+sys.path.insert(0, '$HOOKS_DIR')
+from shared_state import toggle_daic_mode
+mode = toggle_daic_mode()
+print('[DAIC] ' + mode)
+"

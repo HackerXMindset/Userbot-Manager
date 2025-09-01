@@ -20,29 +20,37 @@ class SourcesHandler:
         self.source_model = SourceChatModel(db)
     
     async def show_sources_menu(self, query: types.CallbackQuery):
-        """Show sources overview"""
+        """Show global sources overview"""
         try:
-            # Get all groups with their source counts
-            groups = await self.group_model.get_groups_with_stats()
+            # Get all sources globally
+            sources = await self.source_model.get_all_sources()
             
-            text = "<b>📡 Source Chats Overview</b>\n\n"
-            text += "Source chats are channels/groups that forward token addresses to your targets.\n\n"
+            text = "<b>📡 Global Sources</b>\n\n"
+            text += "Source chats monitor for token addresses and route them to targets.\n\n"
             
-            if not groups:
-                text += "No groups configured. Add groups first."
+            if not sources:
+                text += "No sources configured yet."
             else:
-                for group in groups:
-                    sources = await self.source_model.get_by_group(group['id'])
-                    source_count = len(sources)
-                    group_name = group['title'] or f"Chat {group['tg_chat_id']}"
-                    status = "✅" if group['enabled'] else "❌"
-                    text += f"{status} <b>{group_name}</b>: {source_count} sources\n"
+                for source in sources[:8]:  # Show max 8 sources
+                    type_emojis = {'channel': '📢', 'group': '👥', 'dm': '💬'}
+                    status = "✅" if source['enabled'] else "❌"
+                    type_emoji = type_emojis.get(source['source_type'], '📡')
+                    name = source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
+                    route_count = source['route_count'] or 0
+                    
+                    text += f"{status} {type_emoji} <b>{name}</b>\n"
+                    text += f"   Routes: {route_count} targets\n\n"
             
-            keyboard_rows = []
-            if groups:
+            keyboard_rows = [
+                [
+                    InlineKeyboardButton(text="➕ Add Source", callback_data="sources:add_global"),
+                    InlineKeyboardButton(text="🔄 Routing", callback_data="sources:routing")
+                ]
+            ]
+            
+            if sources:
                 keyboard_rows.append([
-                    InlineKeyboardButton(text="➕ Add Source", callback_data="sources:add"),
-                    InlineKeyboardButton(text="📋 Manage", callback_data="sources:manage")
+                    InlineKeyboardButton(text="📋 Manage Sources", callback_data="sources:manage_global")
                 ])
             
             keyboard_rows.extend([
@@ -69,19 +77,24 @@ class SourcesHandler:
         parts = query.data.split(':')
         action = parts[1]
         
-        if action == 'add':
-            await self.start_add_source(query)
-        elif action == 'manage':
-            await self.show_manage_sources(query)
-        elif action == 'select_group':
-            group_id = int(parts[2])
-            await self.show_group_sources(query, group_id)
-        elif action == 'remove':
+        if action == 'add_global':
+            await self.start_add_global_source(query, state)
+        elif action == 'manage_global':
+            await self.show_manage_global_sources(query)
+        elif action == 'routing':
+            await self.show_routing_menu(query)
+        elif action == 'source_details':
             source_id = int(parts[2])
-            await self.confirm_remove_source(query, source_id)
-        elif action == 'remove_confirm':
+            await self.show_source_details(query, source_id)
+        elif action == 'add_route':
             source_id = int(parts[2])
-            await self.remove_source(query, source_id)
+            await self.show_add_route_menu(query, source_id)
+        elif action == 'create_route':
+            source_id, group_id = int(parts[2]), int(parts[3])
+            await self.create_routing_rule(query, source_id, group_id)
+        elif action == 'remove_route':
+            source_id, group_id = int(parts[2]), int(parts[3])
+            await self.remove_routing_rule(query, source_id, group_id)
         elif action == 'toggle':
             source_id = int(parts[2])
             await self.toggle_source(query, source_id)
@@ -94,8 +107,339 @@ class SourcesHandler:
         elif action == 'remove_user':
             source_id, user_id = int(parts[2]), int(parts[3])
             await self.remove_user_from_source(query, source_id, user_id)
+        elif action == 'delete':
+            source_id = int(parts[2])
+            await self.delete_source(query, source_id)
+        elif action == 'confirm_delete':
+            source_id = int(parts[2])
+            await self.confirm_delete_source(query, source_id)
         else:
             await self.show_sources_menu(query)
+    
+    async def start_add_global_source(self, query: types.CallbackQuery, state: FSMContext):
+        """Start adding a global source - show type selection"""
+        try:
+            await state.clear()  # Clear any existing state
+            
+            text = "<b>➕ Add Global Source</b>\n\n"
+            text += "What type of source are you adding?\n\n"
+            text += "📢 <b>Channel</b> - Monitors all posts from a channel\n"
+            text += "👥 <b>Group</b> - Monitors group with user filtering\n"
+            text += "💬 <b>DM</b> - Monitors direct messages from a user"
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="📢 Channel", callback_data="source_global_type:channel"),
+                    InlineKeyboardButton(text="👥 Group", callback_data="source_global_type:group")
+                ],
+                [
+                    InlineKeyboardButton(text="💬 DM", callback_data="source_global_type:dm")
+                ],
+                [
+                    InlineKeyboardButton(text="❌ Cancel", callback_data="menu:sources")
+                ]
+            ])
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error starting add global source: {e}")
+            await query.answer("❌ Error starting source setup")
+    
+    async def show_manage_global_sources(self, query: types.CallbackQuery):
+        """Show all sources for management"""
+        try:
+            sources = await self.source_model.get_all_sources()
+            
+            text = "<b>📋 Manage Global Sources</b>\n\n"
+            
+            if not sources:
+                text += "No sources configured yet."
+            else:
+                text += "Click a source to view details and manage routing:\n\n"
+                
+            keyboard_rows = []
+            for source in sources:
+                type_emojis = {'channel': '📢', 'group': '👥', 'dm': '💬'}
+                status = "✅" if source['enabled'] else "❌"
+                type_emoji = type_emojis.get(source['source_type'], '📡')
+                name = source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
+                
+                keyboard_rows.append([
+                    InlineKeyboardButton(
+                        text=f"{status} {type_emoji} {name}",
+                        callback_data=f"sources:source_details:{source['id']}"
+                    )
+                ])
+            
+            keyboard_rows.extend([
+                [InlineKeyboardButton(text="🔙 Back", callback_data="menu:sources")]
+            ])
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error showing manage sources: {e}")
+            await query.answer("❌ Error loading sources")
+    
+    async def show_routing_menu(self, query: types.CallbackQuery):
+        """Show routing rules overview"""
+        try:
+            text = "<b>🔄 Routing Rules</b>\n\n"
+            text += "Manage how sources route to target groups.\n\n"
+            text += "Select a source to manage its routing:"
+            
+            sources = await self.source_model.get_all_sources()
+            keyboard_rows = []
+            
+            for source in sources:
+                type_emojis = {'channel': '📢', 'group': '👥', 'dm': '💬'}
+                type_emoji = type_emojis.get(source['source_type'], '📡')
+                name = source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
+                route_count = source['route_count'] or 0
+                
+                keyboard_rows.append([
+                    InlineKeyboardButton(
+                        text=f"{type_emoji} {name} ({route_count} routes)",
+                        callback_data=f"sources:source_details:{source['id']}"
+                    )
+                ])
+            
+            keyboard_rows.append([
+                InlineKeyboardButton(text="🔙 Back", callback_data="menu:sources")
+            ])
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error showing routing menu: {e}")
+            await query.answer("❌ Error loading routing")
+    
+    async def show_source_details(self, query: types.CallbackQuery, source_id: int):
+        """Show detailed source information and routing management"""
+        try:
+            # Get source details
+            source = await self.db.fetchrow("SELECT * FROM source_chats WHERE id = $1", source_id)
+            if not source:
+                await query.answer("❌ Source not found")
+                return
+            
+            # Get routing rules
+            routes = await self.source_model.get_routing_rules(source_id)
+            
+            type_emojis = {'channel': '📢', 'group': '👥', 'dm': '💬'}
+            status = "✅ Enabled" if source['enabled'] else "❌ Disabled"
+            type_emoji = type_emojis.get(source['source_type'], '📡')
+            name = source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
+            
+            text = f"<b>⚙️ {type_emoji} Source Details</b>\n\n"
+            text += f"<b>Name:</b> {name}\n"
+            text += f"<b>Chat/User ID:</b> <code>{source['source_chat_id']}</code>\n"
+            text += f"<b>Type:</b> {source['source_type'].title()}\n"
+            text += f"<b>Status:</b> {status}\n\n"
+            
+            if routes:
+                text += f"<b>🔄 Routing Rules ({len(routes)}):</b>\n"
+                for route in routes:
+                    route_status = "✅" if route['enabled'] else "❌"
+                    group_name = route['group_title'] or f"Chat {route['tg_chat_id']}"
+                    text += f"{route_status} → <b>{group_name}</b>\n"
+            else:
+                text += "📭 <b>No routing rules configured</b>\n"
+                text += "Add routes to forward tokens to target groups."
+            
+            # Build keyboard
+            keyboard_rows = [
+                [
+                    InlineKeyboardButton(
+                        text="🔴 Disable" if source['enabled'] else "🟢 Enable",
+                        callback_data=f"sources:toggle:{source_id}"
+                    ),
+                    InlineKeyboardButton(
+                        text="➕ Add Route",
+                        callback_data=f"sources:add_route:{source_id}"
+                    )
+                ]
+            ]
+            
+            if source['source_type'] == 'group':
+                keyboard_rows.append([
+                    InlineKeyboardButton(text="👥 Manage Users", callback_data=f"sources:users:{source_id}")
+                ])
+            
+            # Add remove route buttons for existing routes
+            for route in routes:
+                group_name = (route['group_title'] or f"Chat {route['tg_chat_id']}")[:25]
+                keyboard_rows.append([
+                    InlineKeyboardButton(
+                        text=f"🗑️ Remove → {group_name}",
+                        callback_data=f"sources:remove_route:{source_id}:{route['target_group_id']}"
+                    )
+                ])
+            
+            keyboard_rows.extend([
+                [InlineKeyboardButton(text="🗑️ Delete Source", callback_data=f"sources:delete:{source_id}")],
+                [InlineKeyboardButton(text="🔙 Back", callback_data="sources:manage_global")],
+                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]
+            ])
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error showing source details: {e}")
+            await query.answer("❌ Error loading source details")
+    
+    async def show_add_route_menu(self, query: types.CallbackQuery, source_id: int):
+        """Show available groups to route to"""
+        try:
+            # Get source info
+            source = await self.db.fetchrow("SELECT * FROM source_chats WHERE id = $1", source_id)
+            if not source:
+                await query.answer("❌ Source not found")
+                return
+            
+            # Get all groups
+            groups = await self.group_model.get_groups_with_stats()
+            
+            # Get existing routing rules to exclude them
+            existing_routes = await self.source_model.get_routing_rules(source_id)
+            existing_group_ids = {route['target_group_id'] for route in existing_routes}
+            
+            # Filter out groups that already have routes
+            available_groups = [g for g in groups if g['id'] not in existing_group_ids]
+            
+            source_name = source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
+            text = f"<b>➕ Add Route for {source_name}</b>\n\n"
+            
+            if not available_groups:
+                text += "No available groups to route to.\nAll groups already have routing rules from this source."
+                keyboard_rows = [
+                    [InlineKeyboardButton(text="🔙 Back", callback_data=f"sources:source_details:{source_id}")]
+                ]
+            else:
+                text += "Select target group to route to:"
+                keyboard_rows = []
+                
+                for group in available_groups:
+                    group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+                    status_icon = "✅" if group['enabled'] else "❌"
+                    
+                    keyboard_rows.append([
+                        InlineKeyboardButton(
+                            text=f"{status_icon} {group_name}",
+                            callback_data=f"sources:create_route:{source_id}:{group['id']}"
+                        )
+                    ])
+                
+                keyboard_rows.append([
+                    InlineKeyboardButton(text="🔙 Back", callback_data=f"sources:source_details:{source_id}")
+                ])
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error showing add route menu: {e}")
+            await query.answer("❌ Error loading available routes")
+    
+    async def create_routing_rule(self, query: types.CallbackQuery, source_id: int, group_id: int):
+        """Create a new routing rule"""
+        try:
+            # Get source and group info
+            source = await self.db.fetchrow("SELECT * FROM source_chats WHERE id = $1", source_id)
+            group = await self.db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
+            
+            if not source or not group:
+                await query.answer("❌ Source or group not found")
+                return
+            
+            # Create the routing rule
+            route = await self.source_model.add_routing_rule(source_id, group_id)
+            
+            source_name = source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
+            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+            
+            text = f"✅ <b>Routing Rule Created</b>\n\n"
+            text += f"<b>Source:</b> {source_name}\n"
+            text += f"<b>Target:</b> {group_name}\n\n"
+            text += "Tokens detected in this source will now be forwarded to the target group."
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="➕ Add Another Route", callback_data=f"sources:add_route:{source_id}"),
+                    InlineKeyboardButton(text="⚙️ Source Details", callback_data=f"sources:source_details:{source_id}")
+                ],
+                [InlineKeyboardButton(text="📋 Manage Sources", callback_data="sources:manage_global")],
+                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]
+            ])
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            await query.answer("✅ Route created successfully")
+            
+        except Exception as e:
+            logger.error(f"Error creating routing rule: {e}")
+            await query.answer("❌ Error creating routing rule")
+    
+    async def remove_routing_rule(self, query: types.CallbackQuery, source_id: int, group_id: int):
+        """Remove a routing rule"""
+        try:
+            # Get source and group info for confirmation message
+            source = await self.db.fetchrow("SELECT * FROM source_chats WHERE id = $1", source_id)
+            group = await self.db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
+            
+            if not source or not group:
+                await query.answer("❌ Source or group not found")
+                return
+            
+            # Remove the routing rule
+            success = await self.source_model.remove_routing_rule(source_id, group_id)
+            
+            source_name = source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
+            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+            
+            if success:
+                text = f"✅ <b>Routing Rule Removed</b>\n\n"
+                text += f"<b>Source:</b> {source_name}\n"
+                text += f"<b>Target:</b> {group_name}\n\n"
+                text += "This source will no longer forward tokens to this target."
+                
+                await query.answer("✅ Route removed successfully")
+            else:
+                text = f"❌ <b>Route Removal Failed</b>\n\n"
+                text += f"Could not remove route from {source_name} to {group_name}.\n"
+                text += "The route may have already been removed."
+                
+                await query.answer("❌ Failed to remove route")
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⚙️ Source Details", callback_data=f"sources:source_details:{source_id}")],
+                [InlineKeyboardButton(text="📋 Manage Sources", callback_data="sources:manage_global")],
+                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]
+            ])
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error removing routing rule: {e}")
+            await query.answer("❌ Error removing routing rule")
+    
+    async def toggle_source(self, query: types.CallbackQuery, source_id: int):
+        """Toggle source enabled/disabled status"""
+        try:
+            new_status = await self.source_model.toggle_enabled(source_id)
+            
+            status_text = "enabled" if new_status else "disabled"
+            await query.answer(f"✅ Source {status_text}")
+            
+            # Refresh the source details view
+            await self.show_source_details(query, source_id)
+            
+        except Exception as e:
+            logger.error(f"Error toggling source: {e}")
+            await query.answer("❌ Error toggling source status")
     
     async def start_add_user(self, query: types.CallbackQuery, source_id: int, state: FSMContext):
         """Start adding user to source"""
@@ -234,9 +578,10 @@ class SourcesHandler:
         """Process source chat ID input"""
         try:
             data = await state.get_data()
-            group_id = data.get('group_id')
+            source_type = data.get('source_type')
+            group_id = data.get('group_id')  # Optional for global sources
             
-            if not group_id:
+            if not source_type:
                 await message.reply("❌ Session expired. Please start again.")
                 await state.clear()
                 return
@@ -248,42 +593,82 @@ class SourcesHandler:
                 await message.reply("❌ Invalid chat ID. Please enter a valid number.")
                 return
             
-            # Try to detect if it's a channel or group by checking if it starts with -100
-            if str(source_chat_id).startswith('-100'):
-                # This could be either a channel or supergroup
-                source_type = 'group'  # Default to group, user can change later
-                title = f"Chat {source_chat_id}"
+            # Validate ID format based on selected source type
+            if source_type == 'dm':
+                if source_chat_id <= 0:
+                    await message.reply("❌ DM user IDs must be positive numbers.")
+                    return
+                title = f"User {source_chat_id}"
+            elif source_type in ['channel', 'group']:
+                if source_chat_id >= 0:
+                    await message.reply(f"❌ {source_type.title()} IDs must be negative numbers.")
+                    return
+                title = f"{source_type.title()} {source_chat_id}"
             else:
-                # Regular group or channel
-                source_type = 'channel'
-                title = f"Channel {source_chat_id}"
+                await message.reply("❌ Invalid source type.")
+                return
             
             # Add source to database
-            source = await self.source_model.add_source(
-                group_id=group_id,
-                source_chat_id=source_chat_id,
-                source_type=source_type,
-                title=title
-            )
+            if group_id:
+                # Old flow: group-specific source
+                source = await self.source_model.add_source(
+                    source_chat_id=source_chat_id,
+                    source_type=source_type,
+                    name=title,
+                    title=title
+                )
+                # Create routing rule for the selected group
+                await self.source_model.add_routing_rule(source['id'], group_id)
+            else:
+                # New flow: global source
+                source = await self.source_model.add_source(
+                    source_chat_id=source_chat_id,
+                    source_type=source_type,
+                    name=title,
+                    title=title
+                )
             
-            text = f"✅ <b>Source Added</b>\n\n"
-            text += f"Chat ID: <code>{source_chat_id}</code>\n"
+            type_emojis = {'channel': '📢', 'group': '👥', 'dm': '💬'}
+            text = f"✅ <b>{type_emojis.get(source_type, '')} {source_type.title()} Source Added</b>\n\n"
+            text += f"Chat/User ID: <code>{source_chat_id}</code>\n"
             text += f"Type: {source_type.title()}\n\n"
             
             keyboard_rows = []
             
-            if source_type == 'group':
-                text += "Since this is a group, you can configure which users are allowed to trigger forwards.\n"
-                keyboard_rows.append([
-                    InlineKeyboardButton(text="👥 Manage Users", callback_data=f"sources:users:{source['id']}")
+            if group_id:
+                # Old flow - source was added with routing to specific group
+                if source_type == 'group':
+                    text += "Since this is a group, you can configure which users are allowed to trigger forwards.\n"
+                    keyboard_rows.append([
+                        InlineKeyboardButton(text="👥 Manage Users", callback_data=f"sources:users:{source['id']}")
+                    ])
+                elif source_type == 'channel':
+                    text += "This channel will forward all token addresses posted."
+                elif source_type == 'dm':
+                    text += "This DM source will forward all token addresses from this user."
+                
+                keyboard_rows.extend([
+                    [InlineKeyboardButton(text="📋 View Sources", callback_data=f"sources:select_group:{group_id}")],
+                    [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]
                 ])
             else:
-                text += "This channel will forward all token addresses posted."
-            
-            keyboard_rows.extend([
-                [InlineKeyboardButton(text="📋 View Sources", callback_data=f"sources:select_group:{group_id}")],
-                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]
-            ])
+                # New flow - global source added
+                text += f"Source added to global pool!\n\n"
+                if source_type == 'group':
+                    text += "Next steps:\n• Configure user filtering (optional)\n• Set up routing to target groups"
+                    keyboard_rows.append([
+                        InlineKeyboardButton(text="👥 Manage Users", callback_data=f"sources:users:{source['id']}")
+                    ])
+                elif source_type == 'channel':
+                    text += "Next step: Set up routing to target groups"
+                elif source_type == 'dm':
+                    text += "Next step: Set up routing to target groups"
+                
+                keyboard_rows.extend([
+                    [InlineKeyboardButton(text="🔄 Setup Routing", callback_data=f"sources:add_route:{source['id']}")],
+                    [InlineKeyboardButton(text="📋 View Sources", callback_data="sources:manage_global")],
+                    [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]
+                ])
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
             
@@ -295,6 +680,59 @@ class SourcesHandler:
             await message.reply("❌ Error adding source")
             await state.clear()
     
+    async def _lookup_user_info(self, user_id: int) -> dict:
+        """Lookup user information from Telegram using an available userbot session"""
+        try:
+            # Get an active userbot to use for user lookup
+            from app.models import BotModel
+            bot_model = BotModel(self.db)
+            userbots = await bot_model.get_active_userbots()
+            
+            if not userbots:
+                return {"user_id": user_id, "username": None, "first_name": f"User {user_id}", "last_name": None}
+            
+            # Use the first active userbot for lookup
+            userbot = userbots[0]
+            session_string = userbot.get('session_string')
+            
+            if not session_string:
+                return {"user_id": user_id, "username": None, "first_name": f"User {user_id}", "last_name": None}
+            
+            # Create temporary client for user lookup
+            from telethon import TelegramClient
+            from telethon.sessions import StringSession
+            from app.config import settings
+            
+            client = TelegramClient(
+                StringSession(session_string),
+                settings.api_id,
+                settings.api_hash
+            )
+            
+            await client.connect()
+            
+            try:
+                # Get user entity
+                user_entity = await client.get_entity(user_id)
+                
+                return {
+                    "user_id": user_id,
+                    "username": user_entity.username,
+                    "first_name": user_entity.first_name or "Unknown",
+                    "last_name": user_entity.last_name
+                }
+                
+            except Exception as lookup_error:
+                logger.debug(f"Could not lookup user {user_id}: {lookup_error}")
+                return {"user_id": user_id, "username": None, "first_name": f"User {user_id}", "last_name": None}
+                
+            finally:
+                await client.disconnect()
+                
+        except Exception as e:
+            logger.error(f"Error in user lookup: {e}")
+            return {"user_id": user_id, "username": None, "first_name": f"User {user_id}", "last_name": None}
+
     async def process_user_input(self, message: types.Message, state: FSMContext):
         """Process user ID input for source filtering"""
         try:
@@ -313,15 +751,26 @@ class SourcesHandler:
                 await message.reply("❌ Invalid user ID. Please enter a valid number.")
                 return
             
-            # Add user to source
+            # Lookup real user info from Telegram
+            user_info = await self._lookup_user_info(user_id)
+            
+            # Add user to source with real info
             await self.source_model.add_user_to_source(
                 source_id=source_id,
                 user_id=user_id,
-                username=f"User{user_id}",  # Placeholder
-                first_name="Unknown"
+                username=user_info["username"],
+                first_name=user_info["first_name"]
             )
             
+            # Show user info in success message
+            display_name = user_info["first_name"]
+            if user_info["username"]:
+                display_name = f"{user_info['first_name']} (@{user_info['username']})"
+            elif user_info["first_name"] == "Unknown":
+                display_name = f"User {user_id}"
+            
             text = f"✅ <b>User Added</b>\n\n"
+            text += f"Name: {display_name}\n"
             text += f"User ID: <code>{user_id}</code>\n"
             text += f"This user can now trigger token forwards from this source."
             
@@ -400,3 +849,109 @@ class SourcesHandler:
         except Exception as e:
             logger.error(f"Error removing user: {e}")
             await query.answer("❌ Error removing user")
+    
+    async def delete_source(self, query: types.CallbackQuery, source_id: int):
+        """Show delete source confirmation"""
+        try:
+            source = await self.db.fetchrow("SELECT * FROM source_chats WHERE id = $1", source_id)
+            if not source:
+                await query.answer("❌ Source not found")
+                return
+            
+            routes = await self.source_model.get_routing_rules(source_id)
+            
+            type_emojis = {'channel': '📢', 'group': '👥', 'dm': '💬'}
+            type_emoji = type_emojis.get(source['source_type'], '📡')
+            name = source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
+            
+            text = f"<b>⚠️ Delete {type_emoji} Source</b>\n\n"
+            text += f"<b>Source:</b> {name}\n"
+            text += f"<b>Type:</b> {source['source_type'].title()}\n"
+            text += f"<b>Chat/User ID:</b> <code>{source['source_chat_id']}</code>\n\n"
+            
+            if routes:
+                text += f"<b>⚠️ This will also remove {len(routes)} routing rule(s):</b>\n"
+                for route in routes[:3]:  # Show first 3 routes
+                    group_name = route['group_title'] or f"Chat {route['tg_chat_id']}"
+                    text += f"• → {group_name}\n"
+                if len(routes) > 3:
+                    text += f"• ... and {len(routes) - 3} more\n"
+                text += "\n"
+            
+            text += "❗ <b>This action cannot be undone!</b>\n"
+            text += "Are you sure you want to delete this source?"
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="🗑️ Yes, Delete", callback_data=f"sources:confirm_delete:{source_id}"),
+                    InlineKeyboardButton(text="❌ Cancel", callback_data=f"sources:source_details:{source_id}")
+                ]
+            ])
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error showing delete confirmation: {e}")
+            await query.answer("❌ Error loading delete confirmation")
+    
+    async def confirm_delete_source(self, query: types.CallbackQuery, source_id: int):
+        """Confirm and execute source deletion"""
+        try:
+            # Get source info for confirmation message
+            source = await self.db.fetchrow("SELECT * FROM source_chats WHERE id = $1", source_id)
+            if not source:
+                await query.answer("❌ Source not found")
+                return
+            
+            type_emojis = {'channel': '📢', 'group': '👥', 'dm': '💬'}
+            type_emoji = type_emojis.get(source['source_type'], '📡')
+            name = source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
+            
+            # Delete routing rules first (foreign key constraints)
+            await self.db.execute("DELETE FROM routing_rules WHERE source_chat_id = $1", source_id)
+            
+            # Delete source users 
+            await self.db.execute("DELETE FROM source_chat_users WHERE source_chat_id = $1", source_id)
+            
+            # Finally delete the source
+            success = await self.source_model.remove_source(source_id)
+            
+            if success:
+                text = f"✅ <b>{type_emoji} Source Deleted</b>\n\n"
+                text += f"<b>Source:</b> {name}\n"
+                text += f"<b>Type:</b> {source['source_type'].title()}\n\n"
+                text += "The source and all its routing rules have been permanently removed."
+                
+                await query.answer("✅ Source deleted successfully")
+            else:
+                text = f"❌ <b>Delete Failed</b>\n\n"
+                text += f"Could not delete source: {name}\n"
+                text += "The source may have already been removed or is in use."
+                
+                await query.answer("❌ Failed to delete source")
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📋 Manage Sources", callback_data="sources:manage_global")],
+                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]
+            ])
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error deleting source: {e}")
+            await query.answer("❌ Error deleting source")
+            
+            # Try to show error message
+            try:
+                text = f"❌ <b>Delete Error</b>\n\n"
+                text += f"Failed to delete source due to an error:\n<code>{str(e)}</code>\n\n"
+                text += "Please try again or contact support."
+                
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Back", callback_data=f"sources:source_details:{source_id}")],
+                    [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]
+                ])
+                
+                await query.message.edit_text(text, reply_markup=keyboard)
+            except:
+                pass

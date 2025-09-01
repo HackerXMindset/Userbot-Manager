@@ -19,9 +19,24 @@ class SourceManager:
         self.source_model = SourceChatModel(db)
     
     async def get_sources_for_groups(self, group_ids: List[int]) -> List[Dict[str, Any]]:
-        """Get all source chats for given groups"""
+        """Get all source chats for given groups using routing rules"""
         try:
-            sources = await self.source_model.get_sources_for_userbot(group_ids)
+            if not group_ids:
+                return []
+            
+            # Get all sources that route to any of the provided groups
+            placeholders = ','.join(f'${i+1}' for i in range(len(group_ids)))
+            query = f"""
+                SELECT DISTINCT sc.*, COUNT(rr.id) as route_count
+                FROM source_chats sc
+                JOIN routing_rules rr ON rr.source_chat_id = sc.id
+                WHERE rr.target_group_id IN ({placeholders}) 
+                AND sc.enabled = true AND rr.enabled = true
+                GROUP BY sc.id
+                ORDER BY sc.created_at DESC
+            """
+            
+            sources = await db.fetch(query, *group_ids)
             return [dict(source) for source in sources] if sources else []
         except Exception as e:
             logger.error(f"Error getting sources for groups: {e}")
@@ -52,6 +67,79 @@ class SourceManager:
         except Exception as e:
             logger.error(f"Error getting source by chat ID: {e}")
             return None
+    
+    async def get_sources_with_routing(self, group_ids: List[int] = None) -> List[Dict[str, Any]]:
+        """Get all sources with their routing information"""
+        try:
+            if group_ids:
+                # Get sources that route to specific groups
+                placeholders = ','.join(f'${i+1}' for i in range(len(group_ids)))
+                query = f"""
+                    SELECT sc.*, rr.target_group_id, g.title as target_group_title
+                    FROM source_chats sc
+                    JOIN routing_rules rr ON rr.source_chat_id = sc.id
+                    JOIN groups g ON g.id = rr.target_group_id
+                    WHERE rr.target_group_id IN ({placeholders})
+                    AND sc.enabled = true AND rr.enabled = true
+                    ORDER BY sc.source_type, sc.created_at DESC
+                """
+                results = await db.fetch(query, *group_ids)
+            else:
+                # Get all sources with all their routing rules
+                query = """
+                    SELECT sc.*, rr.target_group_id, g.title as target_group_title
+                    FROM source_chats sc
+                    LEFT JOIN routing_rules rr ON rr.source_chat_id = sc.id AND rr.enabled = true
+                    LEFT JOIN groups g ON g.id = rr.target_group_id
+                    WHERE sc.enabled = true
+                    ORDER BY sc.source_type, sc.created_at DESC
+                """
+                results = await db.fetch(query)
+            
+            # Group results by source to handle multiple routing rules per source
+            sources_dict = {}
+            for row in results:
+                source_id = row['id']
+                if source_id not in sources_dict:
+                    sources_dict[source_id] = {
+                        'id': row['id'],
+                        'source_chat_id': row['source_chat_id'],
+                        'source_type': row['source_type'],
+                        'name': row['name'],
+                        'title': row['title'],
+                        'enabled': row['enabled'],
+                        'created_at': row['created_at'],
+                        'target_groups': []
+                    }
+                
+                if row['target_group_id']:
+                    sources_dict[source_id]['target_groups'].append({
+                        'group_id': row['target_group_id'],
+                        'group_title': row['target_group_title']
+                    })
+            
+            return list(sources_dict.values())
+            
+        except Exception as e:
+            logger.error(f"Error getting sources with routing: {e}")
+            return []
+    
+    async def get_target_groups_for_source(self, source_chat_id: int) -> List[Dict[str, Any]]:
+        """Get all target groups that should receive tokens from this source"""
+        try:
+            query = """
+                SELECT g.id, g.tg_chat_id, g.title
+                FROM routing_rules rr
+                JOIN groups g ON g.id = rr.target_group_id
+                JOIN source_chats sc ON sc.id = rr.source_chat_id
+                WHERE sc.source_chat_id = $1 
+                AND sc.enabled = true AND rr.enabled = true AND g.enabled = true
+            """
+            results = await db.fetch(query, source_chat_id)
+            return [dict(row) for row in results]
+        except Exception as e:
+            logger.error(f"Error getting target groups for source: {e}")
+            return []
     
     async def add_source_chat(self, group_id: int, source_chat_id: int, 
                              source_type: str = 'group') -> Optional[Dict[str, Any]]:

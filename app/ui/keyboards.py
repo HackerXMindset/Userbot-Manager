@@ -120,6 +120,9 @@ class Keyboards:
                 InlineKeyboardButton(text="🔄 Check Health", callback_data="userbot:health")
             ],
             [
+                InlineKeyboardButton(text="🔄 Refresh Sources", callback_data="userbot:refresh_sources")
+            ],
+            [
                 InlineKeyboardButton(text="🔙 Back", callback_data="menu:main")
             ]
         ])

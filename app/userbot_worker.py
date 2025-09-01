@@ -96,6 +96,14 @@ class UserbotWorker:
         except Exception as e:
             logger.error(f"Error sending call message: {e}")
             return {'success': False, 'error': str(e)}
+    async def refresh_sources(self):
+        """Refresh source monitoring - delegates to modular worker"""
+        try:
+            return await self._modular_worker.refresh_sources()
+        except Exception as e:
+            logger.error(f"Error refreshing sources: {e}")
+            raise
+    
     async def get_worker_info(self) -> Dict[str, Any]:
         """Get worker information - delegates to modular worker"""
         try:

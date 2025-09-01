@@ -1,0 +1,24 @@
+{
+  "developer_name": "MRX",
+  "trigger_phrases": [
+    "make it so",
+    "run that",
+    "go ahead",
+    "yert",
+    "yert",
+    "yesh"
+  ],
+  "blocked_tools": [
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "NotebookEdit"
+  ],
+  "task_detection": {
+    "enabled": true
+  },
+  "branch_enforcement": {
+    "enabled": true
+  },
+  "api_mode": false
+}

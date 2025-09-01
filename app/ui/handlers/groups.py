@@ -36,7 +36,6 @@ class GroupsHandler:
                     text += (
                         f"{status} <b>{g['title'] or f'Chat {g['tg_chat_id']}'}</b>\n"
                         f"  ├ Quota: {g['daily_cap'] or '∞'}/day\n"
-                        f"  ├ Cooldown: {g['cooldown_minutes']}min\n"
                         f"  ├ Targets: {g['targets_count']} | Schedules: {g['schedules_count']}\n"
                         f"  └ {bot_icon} Userbot {'assigned' if g['userbot_id'] else 'needed'}\n\n"
                     )
@@ -119,7 +118,7 @@ class GroupsHandler:
                     'title': username,
                     'enabled': True,
                     'daily_cap': 0,
-                    'cooldown_minutes': 10
+                    'cooldown_minutes': 0
                 })
             else:
                 result = await self.group_model.create({
@@ -127,7 +126,7 @@ class GroupsHandler:
                     'title': None,
                     'enabled': True,
                     'daily_cap': 0,
-                    'cooldown_minutes': 10
+                    'cooldown_minutes': 0
                 })
             
             # Auto-create target for this group
@@ -181,7 +180,6 @@ class GroupsHandler:
                 f"Status: {status}\n\n"
                 f"<b>Configuration:</b>\n"
                 f"├ Daily Quota: {group['daily_cap'] or 'Unlimited'}\n"
-                f"├ Cooldown: {group['cooldown_minutes']} minutes\n"
                 f"├ Targets: {group['targets_count']}\n"
                 f"├ Schedules: {group['schedules_count']}\n"
                 f"└ Userbot: {group['userbot_name'] or 'Not assigned'}\n\n"
@@ -444,24 +442,25 @@ class GroupsHandler:
             group_name = group['title'] or f"Chat {group['tg_chat_id']}"
             
             # Delete all related data (foreign keys should handle this, but be explicit)
-            async with self.db.transaction():
-                # Delete schedules
-                await self.db.execute("DELETE FROM group_schedules WHERE group_id = $1", group_id)
-                
-                # Delete targets  
-                await self.db.execute("DELETE FROM targets WHERE group_id = $1", group_id)
-                
-                # Delete sources
-                await self.db.execute("DELETE FROM source_chats WHERE group_id = $1", group_id)
-                
-                # Delete userbot assignments
-                await self.db.execute("DELETE FROM userbot_assignments WHERE group_id = $1", group_id)
-                
-                # Delete call records
-                await self.db.execute("DELETE FROM calls WHERE group_id = $1", group_id)
-                
-                # Finally delete the group itself
-                await self.db.execute("DELETE FROM groups WHERE id = $1", group_id)
+            async with self.db.acquire() as conn:
+                async with conn.transaction():
+                    # Delete schedules
+                    await conn.execute("DELETE FROM group_schedules WHERE group_id = $1", group_id)
+                    
+                    # Delete targets  
+                    await conn.execute("DELETE FROM targets WHERE group_id = $1", group_id)
+                    
+                    # Delete sources
+                    await conn.execute("DELETE FROM source_chats WHERE group_id = $1", group_id)
+                    
+                    # Delete userbot assignments
+                    await conn.execute("DELETE FROM userbot_assignments WHERE group_id = $1", group_id)
+                    
+                    # Delete call records
+                    await conn.execute("DELETE FROM calls WHERE group_id = $1", group_id)
+                    
+                    # Finally delete the group itself
+                    await conn.execute("DELETE FROM groups WHERE id = $1", group_id)
             
             text = f"✅ <b>Group Deleted</b>\n\n"
             text += f"Successfully deleted: <b>{group_name}</b>\n"

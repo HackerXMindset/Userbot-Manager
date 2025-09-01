@@ -44,129 +44,129 @@ class ManagementBot:
         self.dp.message.register(
             self.cmd_menu,
             Command(commands=['menu', 'start']),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         # Main menu callbacks
         self.dp.callback_query.register(
             self.handle_main_menu,
             F.data.startswith('menu:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         # Groups
         self.dp.callback_query.register(
             self.groups_handler.handle_group_action,
             F.data.startswith('group:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         # Userbot assignments
         self.dp.callback_query.register(
             self.handle_userbot_assignment,
             F.data.startswith('assign:userbot:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         # Schedules
         self.dp.callback_query.register(
             self.handle_schedules,
             F.data.startswith('sched:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         # Userbots
         self.dp.callback_query.register(
             self.userbots_handler.handle_userbot_action,
             F.data.startswith('userbot:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         # Alerts
         self.dp.callback_query.register(
             self.alerts_handler.handle_alerts_action,
             F.data.startswith('alerts:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         # Gain threshold management
         self.dp.callback_query.register(
             self.handle_gain_action,
             F.data.startswith('gain:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         # Drop threshold management
         self.dp.callback_query.register(
             self.handle_drop_action,
             F.data.startswith('drop:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         # Group-specific alerts
         self.dp.callback_query.register(
             self.handle_group_alerts,
             F.data.startswith('group_alerts:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         # Group-specific alert actions
         self.dp.callback_query.register(
             self.handle_group_alert_actions,
             F.data.startswith('group_gain:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         self.dp.callback_query.register(
             self.handle_group_alert_actions,
             F.data.startswith('group_drop:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         self.dp.callback_query.register(
             self.handle_group_alert_actions,
             F.data.startswith('group_reset:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         # Tracking actions
         self.dp.callback_query.register(
             self.handle_tracking_action,
             F.data.startswith('tracking:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         # Cleanup confirmation
         self.dp.callback_query.register(
             self.confirm_cleanup,
             F.data == 'confirm_cleanup',
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         # Tracking time period selection
         self.dp.callback_query.register(
             self.handle_tracking_time,
             F.data.startswith('tracking_time:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         # Group-specific alert value actions
         self.dp.callback_query.register(
             self.handle_group_alert_values,
             F.data.startswith('group_gain_add:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         self.dp.callback_query.register(
             self.handle_group_alert_values,
             F.data.startswith('group_gain_remove:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         self.dp.callback_query.register(
             self.handle_group_alert_values,
             F.data.startswith('group_drop_set:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         
@@ -175,14 +175,14 @@ class ManagementBot:
         self.dp.callback_query.register(
             self.sources_handler.handle_sources_action,
             F.data.startswith('sources:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         # Schedule management (schedule:add, schedule:delete)
         self.dp.callback_query.register(
             self.handle_schedule_action,
             F.data.startswith('schedule:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         
@@ -190,56 +190,68 @@ class ManagementBot:
         self.dp.callback_query.register(
             self.groups_handler.delete_group,
             F.data.startswith('confirm_delete_group:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         self.dp.callback_query.register(
             self.handle_source_group_selection,
             F.data.startswith('source_group:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+        
+        self.dp.callback_query.register(
+            self.handle_source_type_selection,
+            F.data.startswith('source_type:'),
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+        
+        self.dp.callback_query.register(
+            self.handle_global_source_type_selection,
+            F.data.startswith('source_global_type:'),
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         self.dp.callback_query.register(
             self.handle_source_edit,
             F.data.startswith('source_edit:'),
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         # State handlers
         self.dp.message.register(
             self.groups_handler.process_group_input,
             ManagementStates.adding_group,
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         self.dp.message.register(
             self.process_userbot_phone,
             ManagementStates.userbot_login_phone,
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         self.dp.message.register(
             self.userbots_handler.process_code_input,
             ManagementStates.userbot_login_code,
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         self.dp.message.register(
             self.userbots_handler.process_2fa_input,
             ManagementStates.userbot_login_2fa,
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         self.dp.message.register(
             self.sources_handler.process_source_input,
             ManagementStates.adding_source_chat_id,
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         self.dp.message.register(
             self.sources_handler.process_user_input,
             ManagementStates.adding_source_user_id,
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         
@@ -247,19 +259,19 @@ class ManagementBot:
         self.dp.message.register(
             self.process_start_time_input,
             ManagementStates.custom_schedule_start_time,
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         self.dp.message.register(
             self.process_end_time_input,
             ManagementStates.custom_schedule_end_time,
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         self.dp.message.register(
             self.process_max_calls_input,
             ManagementStates.custom_schedule_max_calls,
-            F.from_user.id == settings.admin_telegram_id
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
         
@@ -269,7 +281,7 @@ class ManagementBot:
     
     async def cmd_menu(self, message: types.Message):
         """Handle /menu command"""
-        if message.from_user.id != settings.admin_telegram_id:
+        if message.from_user.id not in settings.admin_telegram_ids_list:
             return
         
         status_text = await self.menu_handler.get_status_text()
@@ -1916,25 +1928,92 @@ class ManagementBot:
     
     
     async def handle_source_group_selection(self, query: types.CallbackQuery, state: FSMContext):
-        """Handle source group selection for adding source"""
+        """Handle source group selection - show source type selection"""
         try:
             group_id = int(query.data.split(':', 1)[1])
             
             # Set group ID in state
             await state.set_data({'group_id': group_id})
-            await state.set_state(ManagementStates.adding_source_chat_id)
             
             # Get group info
             group = await db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
             group_name = group['title'] or f"Chat {group['tg_chat_id']}"
             
             text = f"<b>➕ Add Source for {group_name}</b>\n\n"
-            text += "Please paste the source chat ID (the chat to monitor for token addresses).\n\n"
-            text += "Examples:\n"
-            text += "• Channel: @channelname or -1001234567890\n"
-            text += "• Group: -1001234567890\n"
-            text += "• Public chat: @chatname\n\n"
-            text += "💡 <i>The bot will auto-detect if it's a channel or group</i>"
+            text += "What type of source are you adding?\n\n"
+            text += "📢 <b>Channel</b> - Monitors all posts from a channel\n"
+            text += "👥 <b>Group</b> - Monitors group with user filtering\n" 
+            text += "💬 <b>DM</b> - Monitors direct messages from a user"
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="📢 Channel", callback_data=f"source_type:channel:{group_id}"),
+                    InlineKeyboardButton(text="👥 Group", callback_data=f"source_type:group:{group_id}")
+                ],
+                [
+                    InlineKeyboardButton(text="💬 DM", callback_data=f"source_type:dm:{group_id}")
+                ],
+                [
+                    InlineKeyboardButton(text="❌ Cancel", callback_data="menu:sources")
+                ]
+            ])
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error handling source group selection: {e}")
+            await query.answer("❌ Error processing selection")
+    
+    async def handle_source_type_selection(self, query: types.CallbackQuery, state: FSMContext):
+        """Handle source type selection for adding source"""
+        try:
+            parts = query.data.split(':')
+            source_type = parts[1]
+            group_id = int(parts[2])
+            
+            # Get existing state data and add source type
+            data = await state.get_data()
+            data['source_type'] = source_type
+            await state.set_data(data)
+            await state.set_state(ManagementStates.adding_source_chat_id)
+            
+            # Get group info
+            group = await db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
+            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+            
+            # Source type specific instructions
+            type_instructions = {
+                'channel': {
+                    'emoji': '📢',
+                    'name': 'Channel',
+                    'id_format': 'Channel ID (negative): -1001234567890',
+                    'example': '-1001234567890',
+                    'validation': 'Must be negative and typically start with -100'
+                },
+                'group': {
+                    'emoji': '👥', 
+                    'name': 'Group',
+                    'id_format': 'Group ID (negative): -1001234567890 or -123456789',
+                    'example': '-1001234567890',
+                    'validation': 'Must be negative'
+                },
+                'dm': {
+                    'emoji': '💬',
+                    'name': 'DM',
+                    'id_format': 'User ID (positive): 123456789',
+                    'example': '123456789',
+                    'validation': 'Must be positive'
+                }
+            }
+            
+            info = type_instructions[source_type]
+            
+            text = f"<b>➕ Add {info['emoji']} {info['name']} Source</b>\n\n"
+            text += f"Target Group: <b>{group_name}</b>\n"
+            text += f"Source Type: {info['emoji']} {info['name']}\n\n"
+            text += f"Please enter the {info['id_format']}\n\n"
+            text += f"<b>Example:</b> <code>{info['example']}</code>\n\n"
+            text += f"💡 <i>{info['validation']}</i>"
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="❌ Cancel", callback_data="menu:sources")]
@@ -1943,8 +2022,60 @@ class ManagementBot:
             await query.message.edit_text(text, reply_markup=keyboard)
             
         except Exception as e:
-            logger.error(f"Error handling source group selection: {e}")
-            await query.answer("❌ Error processing selection")
+            logger.error(f"Error handling source type selection: {e}")
+            await query.answer("❌ Error selecting source type")
+    
+    async def handle_global_source_type_selection(self, query: types.CallbackQuery, state: FSMContext):
+        """Handle global source type selection"""
+        try:
+            source_type = query.data.split(':', 1)[1]
+            
+            # Set source type in state
+            await state.set_data({'source_type': source_type})
+            await state.set_state(ManagementStates.adding_source_chat_id)
+            
+            # Source type specific instructions
+            type_instructions = {
+                'channel': {
+                    'emoji': '📢',
+                    'name': 'Channel',
+                    'id_format': 'Channel ID (negative): -1001234567890',
+                    'example': '-1001234567890',
+                    'validation': 'Must be negative and typically start with -100'
+                },
+                'group': {
+                    'emoji': '👥', 
+                    'name': 'Group',
+                    'id_format': 'Group ID (negative): -1001234567890 or -123456789',
+                    'example': '-1001234567890',
+                    'validation': 'Must be negative'
+                },
+                'dm': {
+                    'emoji': '💬',
+                    'name': 'DM',
+                    'id_format': 'User ID (positive): 123456789',
+                    'example': '123456789',
+                    'validation': 'Must be positive'
+                }
+            }
+            
+            info = type_instructions[source_type]
+            
+            text = f"<b>➕ Add {info['emoji']} {info['name']} Source</b>\n\n"
+            text += f"Please enter the {info['id_format']}\n\n"
+            text += f"<b>Example:</b> <code>{info['example']}</code>\n\n"
+            text += f"💡 <i>{info['validation']}</i>\n\n"
+            text += "<i>After adding, you can configure routing to target groups.</i>"
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Cancel", callback_data="menu:sources")]
+            ])
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error handling global source type selection: {e}")
+            await query.answer("❌ Error selecting source type")
     
     async def handle_source_edit(self, query: types.CallbackQuery):
         """Handle source edit menu"""

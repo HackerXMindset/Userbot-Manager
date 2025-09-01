@@ -31,20 +31,24 @@ class MessageHandler:
         self.utils = UserbotUtils()
     
     async def setup_event_handlers(self, assigned_groups: List[Dict[str, Any]]):
-        """Setup event handlers for assigned groups and their source chats"""
+        """Setup event handlers for global sources system"""
         client = self.session_manager.get_client()
         if not client:
             logger.error("Cannot setup handlers - client not available")
             return
         
-        # Get group IDs
+        # Get group IDs for outgoing message tracking
         group_ids = [g['tg_chat_id'] for g in assigned_groups]
-        db_group_ids = [g['id'] for g in assigned_groups]
         
-        # Get all source chats for these groups
-        source_chat_ids = await self.source_manager.get_source_chat_ids(db_group_ids)
+        # Get ALL sources with routing (not just ones for our groups)
+        # This allows monitoring all sources that might route to any group
+        sources_with_routing = await self.source_manager.get_sources_with_routing()
+        source_chat_ids = [s['source_chat_id'] for s in sources_with_routing if s['target_groups']]
         
-        # Setup source message monitoring
+        # Store assigned groups for reference
+        self.assigned_groups = assigned_groups
+        
+        # Setup global source message monitoring
         if source_chat_ids:
             @client.on(events.NewMessage(chats=source_chat_ids))
             async def handle_source_message(event):
@@ -54,17 +58,17 @@ class MessageHandler:
             async def handle_source_edited(event):
                 await self._handle_source_message(event, is_edit=True)
             
-            logger.info(f"Setup monitoring for {len(source_chat_ids)} source chats")
+            logger.info(f"Setup global monitoring for {len(source_chat_ids)} source chats")
         
         # Setup outgoing message tracking for reply detection
         @client.on(events.NewMessage(chats=group_ids, outgoing=True))
         async def track_outgoing_messages(event):
             await self._track_outgoing_message(event)
         
-        logger.info(f"Setup handlers for {len(group_ids)} groups and {len(source_chat_ids)} source chats")
+        logger.info(f"Setup handlers for {len(group_ids)} groups and {len(source_chat_ids)} global source chats")
     
     async def _handle_source_message(self, event, is_edit: bool = False):
-        """Handle messages from source chats - extract tokens and forward to targets"""
+        """Handle messages from source chats - extract tokens and route to targets"""
         try:
             # Validate source permissions
             permission_check = await self.source_manager.validate_source_permissions(event)
@@ -79,15 +83,55 @@ class MessageHandler:
             addresses = await self.token_monitor.process_source_message(event, event.chat_id)
             
             if addresses:
-                # Forward tokens to targets
-                result = await self.call_executor.forward_tokens_to_targets(
-                    source['group_id'], addresses, event
-                )
+                # Get all target groups for this source using routing rules
+                target_groups = await self.source_manager.get_target_groups_for_source(event.chat_id)
                 
-                if result['success']:
-                    logger.info(f"Forwarded {len(addresses)} tokens to {result['sent_count']} targets")
-                else:
-                    logger.error(f"Failed to forward tokens: {result.get('error')}")
+                if not target_groups:
+                    logger.warning(f"No target groups found for source {event.chat_id}")
+                    return
+                
+                # Forward tokens to all target groups
+                total_sent = 0
+                total_failed = 0
+                
+                for target_group in target_groups:
+                    group_sent = 0
+                    group_failed = 0
+                    
+                    # Send each token to this target group
+                    for address in addresses:
+                        try:
+                            # Get source info for the call
+                            source_info = f"From {source.get('name') or source.get('title') or event.chat_id}"
+                            additional_info = self.utils.get_message_text(event.message) if hasattr(event, 'message') else ""
+                            
+                            # Send call message to this target group
+                            result = await self.call_executor.send_call_message(
+                                target_chat_id=target_group['tg_chat_id'],
+                                token_address=address,
+                                additional_info=additional_info,
+                                source_info=source_info
+                            )
+                            
+                            if result['success']:
+                                group_sent += 1
+                                total_sent += 1
+                            else:
+                                group_failed += 1
+                                total_failed += 1
+                                logger.warning(f"Failed to send {address[:8]}... to {target_group['title'] or target_group['tg_chat_id']}: {result.get('error')}")
+                                
+                        except Exception as token_error:
+                            group_failed += 1
+                            total_failed += 1
+                            logger.error(f"Error sending token {address[:8]}... to target {target_group['tg_chat_id']}: {token_error}")
+                    
+                    if group_sent > 0:
+                        logger.debug(f"Sent {group_sent} tokens to {target_group['title'] or target_group['tg_chat_id']}")
+                    if group_failed > 0:
+                        logger.warning(f"Failed {group_failed} tokens to {target_group['title'] or target_group['tg_chat_id']}")
+                
+                logger.info(f"Forwarded {len(addresses)} tokens to {len(target_groups)} target groups: {total_sent} sent, {total_failed} failed")
             
             # Update bot last seen
             await self.bot_model.update_last_seen(self.userbot_id)

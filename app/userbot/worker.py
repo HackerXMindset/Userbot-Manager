@@ -245,3 +245,24 @@ class UserbotWorker:
         except Exception as e:
             logger.error(f"Error restarting userbot {self.userbot_id}: {e}")
             raise
+    
+    async def refresh_sources(self):
+        """Refresh source monitoring by re-setting up event handlers"""
+        if not self.running:
+            logger.warning(f"Cannot refresh sources - userbot {self.userbot_id} not running")
+            return
+        
+        try:
+            logger.info(f"Refreshing sources for userbot {self.userbot_id}")
+            
+            # Get current assigned groups
+            assigned_groups = await self.bot_model.get_assigned_groups(self.userbot_id)
+            
+            # Re-setup event handlers with fresh source data
+            await self.message_handler.setup_event_handlers(assigned_groups)
+            
+            logger.info(f"Successfully refreshed sources for userbot {self.userbot_id}")
+            
+        except Exception as e:
+            logger.error(f"Error refreshing sources for userbot {self.userbot_id}: {e}")
+            raise

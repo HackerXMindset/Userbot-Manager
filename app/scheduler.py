@@ -100,19 +100,6 @@ class Scheduler:
                     logger.debug(f"Daily quota reached for group {group_id}")
                     return
             
-            # Check cooldown
-            if schedule['cooldown_minutes'] > 0:
-                last_call = await db.fetchval("""
-                    SELECT MAX(sent_at) FROM calls 
-                    WHERE group_id = $1 
-                    AND status = 'sent'
-                """, group_id)
-                
-                if last_call:
-                    minutes_since_last = (now - last_call).total_seconds() / 60
-                    if minutes_since_last < schedule['cooldown_minutes']:
-                        logger.debug(f"Cooldown active for group {group_id}")
-                        return
             
             # Check window quota
             if schedule['max_calls_in_window'] and schedule['max_calls_in_window'] > 0:

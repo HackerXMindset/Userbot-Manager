@@ -10,7 +10,7 @@ load_dotenv()
 
 class Settings(BaseSettings):
     # Telegram
-    admin_telegram_id: int = Field(..., env='ADMIN_TELEGRAM_ID')
+    admin_telegram_ids: str = Field(..., env='ADMIN_TELEGRAM_IDS')
     mgmt_bot_token: str = Field(..., env='MGMT_BOT_TOKEN')
     api_id: int = Field(..., env='API_ID')
     api_hash: str = Field(..., env='API_HASH')
@@ -35,12 +35,29 @@ class Settings(BaseSettings):
     # Solana
     solana_pattern: str = r'\b[1-9A-HJ-NP-Za-km-z]{32,44}\b'
     
-    @field_validator('admin_telegram_id')
+    @field_validator('admin_telegram_ids')
     @classmethod
-    def validate_admin_id(cls, v):
-        if v <= 0:
-            raise ValueError('Invalid admin Telegram ID')
-        return v
+    def validate_admin_ids(cls, v):
+        if not isinstance(v, str):
+            raise ValueError('Admin IDs must be a string')
+        
+        # Parse comma-separated values
+        ids = [int(id_str.strip()) for id_str in v.split(',') if id_str.strip()]
+        
+        # Validate each ID
+        for admin_id in ids:
+            if admin_id <= 0:
+                raise ValueError(f'Invalid admin Telegram ID: {admin_id}')
+        
+        if not ids:
+            raise ValueError('At least one admin ID is required')
+        
+        return v  # Return the original string
+    
+    @property
+    def admin_telegram_ids_list(self) -> List[int]:
+        """Get admin IDs as a list of integers"""
+        return [int(id_str.strip()) for id_str in self.admin_telegram_ids.split(',') if id_str.strip()]
     
     @property
     def tz(self):

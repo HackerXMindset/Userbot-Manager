@@ -98,7 +98,13 @@ class EventRouter:
                 logger.warning(f"Unknown event kind: {event_kind}")
             
             # Mark as processed
-            await self.event_model.mark_routed(event.get('id', 0), event.get('routed_to_channel_id', 0))
+            # For system events, use -1 as channel_id to indicate processed but not routed to a specific channel
+            current_channel_id = event.get('routed_to_channel_id')
+            if event_kind == 'system' and current_channel_id is None:
+                channel_id = -1  # Special value for processed system events
+            else:
+                channel_id = current_channel_id or 0
+            await self.event_model.mark_routed(event.get('id', 0), channel_id)
             
         except Exception as e:
             event_id = event.get('id', 'unknown') if isinstance(event, dict) else 'unknown'

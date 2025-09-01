@@ -204,7 +204,7 @@ async def main():
         
         # Check required settings
         required_settings = [
-            'admin_telegram_id',
+            'admin_telegram_ids_list',
             'mgmt_bot_token', 
             'api_id',
             'api_hash',
