@@ -75,13 +75,34 @@ class AlertSystem:
             current_multiplier = token['last_mc'] / token['first_seen_mc']
             last_hit_multiplier = token['last_hit_multiplier'] or Decimal('1.0')
             
-            # Get gain thresholds from settings
-            gain_multipliers = await db.fetchval("""
-                SELECT value FROM settings WHERE key = 'gain_multipliers'
-            """)
+            # Get gain thresholds from settings (group-specific or global)
+            group_specific_key = f"group_{token.get('source_group_id')}_gains" if token.get('source_group_id') else None
             
-            if not gain_multipliers:
-                gain_multipliers = [5, 10, 15, 20, 50]
+            gain_multipliers_raw = None
+            if group_specific_key:
+                gain_multipliers_raw = await db.fetchval("""
+                    SELECT value FROM settings WHERE key = $1
+                """, group_specific_key)
+            
+            if not gain_multipliers_raw:
+                gain_multipliers_raw = await db.fetchval("""
+                    SELECT value FROM settings WHERE key = 'gain_multipliers'
+                """)
+            
+            # Parse gain multipliers
+            import json
+            if gain_multipliers_raw:
+                try:
+                    if isinstance(gain_multipliers_raw, str):
+                        gain_multipliers = json.loads(gain_multipliers_raw)
+                    elif isinstance(gain_multipliers_raw, list):
+                        gain_multipliers = gain_multipliers_raw
+                    else:
+                        gain_multipliers = [5, 10, 15]
+                except (json.JSONDecodeError, TypeError):
+                    gain_multipliers = [5, 10, 15]
+            else:
+                gain_multipliers = [5, 10, 15]
             
             # Check gain alerts
             for threshold in sorted(gain_multipliers):
@@ -124,8 +145,8 @@ class AlertSystem:
             # Update token's last hit multiplier
             await self.token_model.update_hit_multiplier(token['id'], threshold)
             
-            # TODO: Send notification to channels
-            await self._send_gain_notification(token, threshold, current_multiplier, alert['id'])
+            # Send /pnl command to source group
+            await self._send_pnl_command(token, threshold, current_multiplier)
             
             logger.info(f"Triggered {threshold}x gain alert for token {token['address'][:8]}...")
             
@@ -135,15 +156,27 @@ class AlertSystem:
     async def _check_drop_alert(self, token: Dict[str, Any], current_multiplier: Decimal):
         """Check for drop alert (stop loss)"""
         try:
-            # Get drop threshold from settings
-            drop_percentage = await db.fetchval("""
-                SELECT value FROM settings WHERE key = 'drop_percentage'
-            """)
+            # Get drop threshold from settings (group-specific or global)
+            group_specific_key = f"group_{token.get('source_group_id')}_drop" if token.get('source_group_id') else None
+            
+            drop_percentage = None
+            if group_specific_key:
+                drop_percentage = await db.fetchval("""
+                    SELECT value FROM settings WHERE key = $1
+                """, group_specific_key)
+            
+            if not drop_percentage:
+                drop_percentage = await db.fetchval("""
+                    SELECT value FROM settings WHERE key = 'drop_percentage'
+                """)
             
             if not drop_percentage:
                 drop_percentage = 0.70
             
-            drop_threshold = Decimal(str(drop_percentage))
+            try:
+                drop_threshold = Decimal(str(float(drop_percentage)))
+            except (ValueError, TypeError):
+                drop_threshold = Decimal('0.70')
             
             # Check if token has dropped below threshold from its peak
             peak_multiplier = token['last_hit_multiplier'] or Decimal('1.0')
@@ -171,68 +204,66 @@ class AlertSystem:
             # Stop tracking this token
             await self.token_model.set_status(token['id'], 'stopped')
             
-            # TODO: Send stop notification
-            await self._send_drop_notification(token, current_multiplier, drop_percentage, alert['id'])
-            
             logger.info(f"Triggered drop alert for token {token['address'][:8]}... - stopping tracking")
             
         except Exception as e:
             logger.error(f"Error triggering drop alert: {e}")
     
-    async def _send_gain_notification(self, token: Dict[str, Any], threshold: Decimal, current_multiplier: Decimal, alert_id: int):
-        """Send gain notification to channels"""
+    async def _send_pnl_command(self, token: Dict[str, Any], threshold: Decimal, current_multiplier: Decimal):
+        """Send /pnl command to destination groups where token was forwarded"""
         try:
-            # Get notification channel from settings
-            notif_channel = await db.fetchval(
-                "SELECT value FROM settings WHERE key = 'default_notif_channel_id'"
-            )
+            # Get all destination groups where this token was sent
+            destination_groups = await db.fetch("""
+                SELECT DISTINCT c.group_id, g.tg_chat_id, g.title
+                FROM calls c
+                JOIN groups g ON g.id = c.group_id
+                WHERE c.token_id = $1 AND c.status IN ('sent', 'queued')
+                ORDER BY c.created_at DESC
+            """, token['id'])
             
-            if not notif_channel:
-                logger.warning("No notification channel configured")
+            if not destination_groups:
+                logger.warning(f"No destination groups found for token {token['address'][:8]}...")
                 return
             
-            # Format message
-            message = (
-                f"🚀 <b>GAIN ALERT</b>\n\n"
-                f"Token: <code>{token['address']}</code>\n"
-                f"Threshold: {threshold}x\n"
-                f"Current: {current_multiplier:.2f}x\n"
-                f"Time: {datetime.now().strftime('%H:%M:%S')}"
-            )
-            
-            # TODO: Send via bot to notification channel
-            logger.info(f"Would send gain notification: {message}")
-            
-        except Exception as e:
-            logger.error(f"Error sending gain notification: {e}")
-    
-    async def _send_drop_notification(self, token: Dict[str, Any], current_multiplier: Decimal, drop_percentage: Decimal, alert_id: int):
-        """Send drop notification to channels"""
-        try:
-            # Get notification channel from settings
-            notif_channel = await db.fetchval(
-                "SELECT value FROM settings WHERE key = 'default_notif_channel_id'"
-            )
-            
-            if not notif_channel:
-                logger.warning("No notification channel configured")
-                return
-            
-            # Format message
-            message = (
-                f"📉 <b>DROP ALERT</b>\n\n"
-                f"Token: <code>{token['address']}</code>\n"
-                f"Current: {current_multiplier:.2f}x\n"
-                f"Drop: {drop_percentage*100:.1f}% from peak\n"
-                f"Status: STOPPED\n"
-                f"Time: {datetime.now().strftime('%H:%M:%S')}"
-            )
-            
-            # TODO: Send via bot to notification channel
-            logger.info(f"Would send drop notification: {message}")
+            # Send /pnl command to each destination group
+            for group in destination_groups:
+                try:
+                    # Get userbot assigned to this group
+                    userbot_info = await db.fetchrow("""
+                        SELECT b.id, b.session_name
+                        FROM userbot_assignments ua
+                        JOIN bots b ON b.id = ua.userbot_id  
+                        WHERE ua.group_id = $1 AND b.status = 'active'
+                        LIMIT 1
+                    """, group['group_id'])
+                    
+                    if not userbot_info:
+                        logger.warning(f"No active userbot found for destination group {group['group_id']}")
+                        continue
+                    
+                    # Create command message
+                    pnl_command = f"/pnl {token['address']}"
+                    
+                    # Send command via event system to the userbot
+                    from app.events import EventRouter
+                    event_router = EventRouter()
+                    
+                    await event_router.emit_event('send_message', {
+                        'userbot_id': userbot_info['id'],
+                        'target_chat_id': group['tg_chat_id'],
+                        'message': pnl_command,
+                        'reason': f'Gain alert: {threshold}x ({current_multiplier:.2f}x)'
+                    })
+                    
+                    group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+                    logger.info(f"Sent /pnl command for token {token['address'][:8]}... to destination group {group_name} ({threshold}x alert)")
+                    
+                except Exception as group_error:
+                    logger.error(f"Error sending /pnl to group {group['group_id']}: {group_error}")
+                    continue
             
         except Exception as e:
-            logger.error(f"Error sending drop notification: {e}")
+            logger.error(f"Error sending /pnl command: {e}")
     
     async def manual_alert_check(self, token_address: str) -> Dict[str, Any]:
         """Manually check alerts for a specific token"""

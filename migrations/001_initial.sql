@@ -61,6 +61,7 @@ ON CONFLICT (key) DO NOTHING;
 CREATE TABLE IF NOT EXISTS tokens_tracked (
     id BIGSERIAL PRIMARY KEY,
     address TEXT UNIQUE NOT NULL,
+    source_group_id BIGINT REFERENCES groups(id) ON DELETE SET NULL,
     first_seen_mc NUMERIC,
     last_mc NUMERIC,
     status TEXT DEFAULT 'active',
@@ -86,6 +87,7 @@ CREATE TABLE IF NOT EXISTS calls (
 CREATE INDEX idx_calls_scheduled ON calls(scheduled_at);
 CREATE INDEX idx_calls_status ON calls(status);
 CREATE INDEX idx_calls_group_sent ON calls(group_id, sent_at);
+CREATE INDEX idx_tokens_source_group ON tokens_tracked(source_group_id);
 
 -- Alerts
 CREATE TABLE IF NOT EXISTS alerts (

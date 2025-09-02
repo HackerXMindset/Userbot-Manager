@@ -59,12 +59,14 @@ class TokenModel(BaseModel):
     async def get_tokens_for_alert_check(self) -> List[asyncpg.Record]:
         """Get tokens that need alert checking"""
         query = """
-            SELECT * FROM tokens_tracked 
-            WHERE status = 'active' 
-            AND first_seen_mc IS NOT NULL 
-            AND last_mc IS NOT NULL
-            AND first_seen_mc > 0
-            ORDER BY last_checked_at ASC
+            SELECT t.*, g.tg_chat_id as group_chat_id, g.title as group_title
+            FROM tokens_tracked t
+            LEFT JOIN groups g ON g.id = t.source_group_id
+            WHERE t.status = 'active' 
+            AND t.first_seen_mc IS NOT NULL 
+            AND t.last_mc IS NOT NULL
+            AND t.first_seen_mc > 0
+            ORDER BY t.last_checked_at ASC
         """
         return await self.db.fetch(query)
     
