@@ -79,16 +79,17 @@ class MessageHandler:
             
             source = permission_check['source']
             
+            # Get all target groups for this source using routing rules
+            target_groups = await self.source_manager.get_target_groups_for_source(event.chat_id)
+            
+            if not target_groups:
+                logger.warning(f"No target groups found for source {event.chat_id}")
+                return
+            
             # Process message for tokens
-            addresses = await self.token_monitor.process_source_message(event, event.chat_id)
+            addresses = await self.token_monitor.process_source_message(event, event.chat_id, target_groups)
             
             if addresses:
-                # Get all target groups for this source using routing rules
-                target_groups = await self.source_manager.get_target_groups_for_source(event.chat_id)
-                
-                if not target_groups:
-                    logger.warning(f"No target groups found for source {event.chat_id}")
-                    return
                 
                 # Forward tokens to all target groups
                 total_sent = 0

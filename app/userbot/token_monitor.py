@@ -19,7 +19,7 @@ class TokenMonitor:
         self.userbot_id = userbot_id
         self.utils = UserbotUtils()
     
-    async def process_source_message(self, event, source_chat_id: int) -> List[str]:
+    async def process_source_message(self, event, source_chat_id: int, target_groups: List[Dict[str, Any]] = None) -> List[str]:
         """Process a message from a source chat and extract tokens"""
         try:
             message = event.message
@@ -33,7 +33,7 @@ class TokenMonitor:
                 
                 # Process each token
                 for address in addresses:
-                    await self._process_token_address(address, event)
+                    await self._process_token_address(address, event, target_groups or [])
             
             return addresses
             
@@ -41,11 +41,11 @@ class TokenMonitor:
             logger.error(f"Error processing source message: {e}")
             return []
     
-    async def _process_token_address(self, address: str, event):
+    async def _process_token_address(self, address: str, event, target_groups: List[Dict[str, Any]]):
         """Process a single token address"""
         try:
-            # Add token to tracking system
-            await self._add_token_to_tracking(address)
+            # Add token to tracking system with target groups
+            await self._add_token_to_tracking(address, target_groups)
             
             # Log token detection
             source_title = self.utils.get_chat_title(event.chat)
@@ -56,7 +56,7 @@ class TokenMonitor:
         except Exception as e:
             logger.error(f"Error processing token address {address}: {e}")
     
-    async def _add_token_to_tracking(self, address: str) -> Optional[int]:
+    async def _add_token_to_tracking(self, address: str, target_groups: List[Dict[str, Any]]) -> Optional[int]:
         """Add token to tracking database"""
         try:
             # Add to DexScreener service for tracking
@@ -64,17 +64,20 @@ class TokenMonitor:
             dex_service = DexScreenerService()
             await dex_service.add_token(address)
             
+            # Use first target group as primary source group for alerts
+            source_group_id = target_groups[0]['id'] if target_groups else None
+            
             # Insert or update token record
             token_record = await db.fetchrow("""
-                INSERT INTO tokens_tracked (address, created_at, last_checked_at) 
-                VALUES ($1, NOW(), NOW()) 
+                INSERT INTO tokens_tracked (address, source_group_id, created_at, last_checked_at) 
+                VALUES ($1, $2, NOW(), NOW()) 
                 ON CONFLICT (address) DO UPDATE SET 
                     last_checked_at = NOW(),
-                    detection_count = COALESCE(tokens_tracked.detection_count, 0) + 1
+                    source_group_id = COALESCE(tokens_tracked.source_group_id, $2)
                 RETURNING id
-            """, address)
+            """, address, source_group_id)
             
-            logger.debug(f"Token {address[:8]}... added to tracking (ID: {token_record['id']})")
+            logger.debug(f"Token {address[:8]}... added to tracking (ID: {token_record['id']}, Group: {source_group_id})")
             return token_record['id']
             
         except Exception as e:

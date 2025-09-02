@@ -226,11 +226,10 @@ class EventProcessor:
             if not token_address:
                 return
             
-            # Update token detection count
+            # Update token last seen timestamp
             await db.execute("""
                 UPDATE tokens_tracked 
-                SET detection_count = COALESCE(detection_count, 0) + 1,
-                    last_detected_at = NOW()
+                SET last_checked_at = NOW()
                 WHERE address = $1
             """, token_address)
             
