@@ -178,9 +178,10 @@ class GroupsHandler:
             
             status = "✅ Enabled" if group['enabled'] else "🔴 Disabled"
             
+            display_name = group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}"
             text = (
                 f"<b>📋 Group Details</b>\n\n"
-                f"<b>{group['title'] or f'Chat {group['tg_chat_id']}'}</b>\n"
+                f"<b>{display_name}</b>\n"
                 f"Status: {status}\n\n"
                 f"<b>Configuration:</b>\n"
                 f"├ Daily Quota: {group['daily_cap'] or 'Unlimited'}\n"
@@ -341,7 +342,7 @@ class GroupsHandler:
                 GROUP BY g.id, b.session_name, b.display_name
             """, group_id)
             
-            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+            group_name = group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}"
             status = "✅ Enabled" if group['enabled'] else "🔴 Disabled"
             
             # Format last call time

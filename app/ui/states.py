@@ -33,5 +33,6 @@ class ManagementStates(StatesGroup):
     # Sources
     adding_source_chat_id = State()
     adding_source_user_id = State()
+    source_set_name = State()
     
     

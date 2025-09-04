@@ -13,11 +13,13 @@ class SourceChatModel(BaseModel):
         """Get all source chats globally"""
         query = """
             SELECT sc.*, COUNT(scu.id) as user_count,
-                   COUNT(rr.id) as route_count
+                   COUNT(rr.id) as route_count,
+                   COALESCE(g.display_name, g.title) as group_display_name
             FROM source_chats sc
             LEFT JOIN source_chat_users scu ON scu.source_chat_id = sc.id
             LEFT JOIN routing_rules rr ON rr.source_chat_id = sc.id AND rr.enabled = true
-            GROUP BY sc.id
+            LEFT JOIN groups g ON g.tg_chat_id = sc.source_chat_id
+            GROUP BY sc.id, sc.display_name, g.display_name, g.title
             ORDER BY sc.created_at DESC
         """
         return await self.db.fetch(query)
@@ -61,11 +63,11 @@ class SourceChatModel(BaseModel):
     async def get_routing_rules(self, source_id: int) -> List[asyncpg.Record]:
         """Get all routing rules for a source"""
         query = """
-            SELECT rr.*, g.title as group_title, g.tg_chat_id
+            SELECT rr.*, COALESCE(g.display_name, g.title) as group_title, g.tg_chat_id
             FROM routing_rules rr
             JOIN groups g ON g.id = rr.target_group_id
             WHERE rr.source_chat_id = $1
-            ORDER BY rr.enabled DESC, g.title
+            ORDER BY rr.enabled DESC, COALESCE(g.display_name, g.title)
         """
         return await self.db.fetch(query, source_id)
     

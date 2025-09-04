@@ -35,7 +35,7 @@ class SourcesHandler:
                     type_emojis = {'channel': '📢', 'group': '👥', 'dm': '💬'}
                     status = "✅" if source['enabled'] else "❌"
                     type_emoji = type_emojis.get(source['source_type'], '📡')
-                    name = source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
+                    name = source.get('display_name') or source.get('group_display_name') or source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
                     route_count = source['route_count'] or 0
                     
                     text += f"{status} {type_emoji} <b>{name}</b>\n"
@@ -113,6 +113,9 @@ class SourcesHandler:
         elif action == 'confirm_delete':
             source_id = int(parts[2])
             await self.confirm_delete_source(query, source_id)
+        elif action == 'set_name':
+            source_id = int(parts[2])
+            await self.start_set_source_name(query, source_id, state)
         else:
             await self.show_sources_menu(query)
     
@@ -232,7 +235,7 @@ class SourcesHandler:
             type_emojis = {'channel': '📢', 'group': '👥', 'dm': '💬'}
             status = "✅ Enabled" if source['enabled'] else "❌ Disabled"
             type_emoji = type_emojis.get(source['source_type'], '📡')
-            name = source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
+            name = source.get('display_name') or source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
             
             text = f"<b>⚙️ {type_emoji} Source Details</b>\n\n"
             text += f"<b>Name:</b> {name}\n"
@@ -253,10 +256,13 @@ class SourcesHandler:
             # Build keyboard
             keyboard_rows = [
                 [
+                    InlineKeyboardButton(text="✏️ Set Name", callback_data=f"sources:set_name:{source_id}"),
                     InlineKeyboardButton(
                         text="🔴 Disable" if source['enabled'] else "🟢 Enable",
                         callback_data=f"sources:toggle:{source_id}"
-                    ),
+                    )
+                ],
+                [
                     InlineKeyboardButton(
                         text="➕ Add Route",
                         callback_data=f"sources:add_route:{source_id}"
@@ -940,6 +946,78 @@ class SourcesHandler:
         except Exception as e:
             logger.error(f"Error deleting source: {e}")
             await query.answer("❌ Error deleting source")
+    
+    async def start_set_source_name(self, query: types.CallbackQuery, source_id: int, state: FSMContext):
+        """Start source name setting process"""
+        try:
+            source = await self.source_model.get_by_id(source_id)
+            if not source:
+                await query.answer("Source not found!")
+                return
+            
+            current_name = source.get('display_name') or source['name'] or source['title'] or f"Source {source['source_chat_id']}"
+            
+            await query.message.edit_text(
+                f"<b>✏️ Set Source Name</b>\n\n"
+                f"Current name: <b>{current_name}</b>\n\n"
+                f"Enter a new custom name for this source:\n\n"
+                f"Type /cancel to abort.",
+                reply_markup=self.keyboards.cancel_button(f"sources:source_details:{source_id}")
+            )
+            
+            await state.set_state(ManagementStates.source_set_name)
+            await state.update_data(
+                source_id=source_id,
+                message_id=query.message.message_id
+            )
+            
+        except Exception as e:
+            logger.error(f"Error starting source name setting: {e}")
+            await query.answer("❌ Error starting name setting")
+    
+    async def process_source_name_input(self, message: types.Message, state: FSMContext):
+        """Process source name input"""
+        if message.text == '/cancel':
+            data = await state.get_data()
+            source_id = data.get('source_id')
+            await message.answer("❌ Name setting cancelled.")
+            await state.clear()
+            return
+        
+        new_name = message.text.strip()
+        await message.delete()  # Clean up user input
+        
+        # Validate name
+        if not new_name or len(new_name) > 50:
+            await message.answer("❌ Name must be 1-50 characters long.")
+            return
+        
+        try:
+            data = await state.get_data()
+            source_id = data.get('source_id')
+            
+            if not source_id:
+                await message.answer("❌ Session data lost. Please try again.")
+                await state.clear()
+                return
+            
+            # Update source name in database (direct SQL to avoid updated_at requirement)
+            await self.db.execute(
+                "UPDATE source_chats SET display_name = $1 WHERE id = $2",
+                new_name, source_id
+            )
+            
+            await message.answer(
+                f"✅ <b>Source Name Updated Successfully!</b>\n\n"
+                f"Source name set to: <b>{new_name}</b>"
+            )
+            
+            await state.clear()
+            
+        except Exception as e:
+            logger.error(f"Error updating source name: {e}")
+            await message.answer(f"❌ Error updating name: {str(e)}")
+            await state.clear()
             
             # Try to show error message
             try:

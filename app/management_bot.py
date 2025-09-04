@@ -266,6 +266,12 @@ class ManagementBot:
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
+        self.dp.message.register(
+            self.sources_handler.process_source_name_input,
+            ManagementStates.source_set_name,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+        
         
         # Custom schedule input handlers
         self.dp.message.register(
