@@ -37,7 +37,7 @@ class GroupsHandler:
                         f"{status} <b>{g['title'] or f'Chat {g['tg_chat_id']}'}</b>\n"
                         f"  ├ Quota: {g['daily_cap'] or '∞'}/day\n"
                         f"  ├ Targets: {g['targets_count']} | Schedules: {g['schedules_count']}\n"
-                        f"  └ {bot_icon} Userbot {'assigned' if g['userbot_id'] else 'needed'}\n\n"
+                        f"  └ {bot_icon} {g['userbot_name'] if g['userbot_id'] else 'Userbot needed'}\n\n"
                     )
             
             await query.message.edit_text(
@@ -157,7 +157,7 @@ class GroupsHandler:
                 SELECT g.*, 
                        COUNT(DISTINCT t.id) as targets_count,
                        COUNT(DISTINCT s.id) as schedules_count,
-                       b.session_name as userbot_name,
+                       COALESCE(b.display_name, b.session_name) as userbot_name,
                        (SELECT COUNT(*) FROM calls WHERE group_id = g.id AND sent_at > CURRENT_DATE) as calls_today
                 FROM groups g
                 LEFT JOIN targets t ON t.group_id = g.id
@@ -165,7 +165,7 @@ class GroupsHandler:
                 LEFT JOIN userbot_assignments ua ON ua.group_id = g.id
                 LEFT JOIN bots b ON b.id = ua.userbot_id
                 WHERE g.id = $1
-                GROUP BY g.id, b.session_name
+                GROUP BY g.id, b.session_name, b.display_name
             """, group_id)
             
             if not group:
@@ -223,7 +223,7 @@ class GroupsHandler:
             for bot in userbots[:10]:
                 keyboard.append([
                     InlineKeyboardButton(
-                        text=f"🤖 {bot['session_name']}",
+                        text=f"🤖 {bot.get('display_name') or bot['session_name']}",
                         callback_data=f"assign:userbot:{group_id}:{bot['id']}"
                     )
                 ])
@@ -324,7 +324,7 @@ class GroupsHandler:
                     COUNT(CASE WHEN c.sent_at >= CURRENT_DATE THEN 1 END) as calls_today,
                     COUNT(CASE WHEN c.sent_at >= CURRENT_DATE - INTERVAL '7 days' THEN 1 END) as calls_this_week,
                     COUNT(c.id) as total_calls,
-                    b.session_name as userbot_name,
+                    COALESCE(b.display_name, b.session_name) as userbot_name,
                     MAX(c.sent_at) as last_call_time
                 FROM groups g
                 LEFT JOIN group_schedules s ON s.group_id = g.id
@@ -334,7 +334,7 @@ class GroupsHandler:
                 LEFT JOIN userbot_assignments ua ON ua.group_id = g.id
                 LEFT JOIN bots b ON b.id = ua.userbot_id
                 WHERE g.id = $1
-                GROUP BY g.id, b.session_name
+                GROUP BY g.id, b.session_name, b.display_name
             """, group_id)
             
             group_name = group['title'] or f"Chat {group['tg_chat_id']}"

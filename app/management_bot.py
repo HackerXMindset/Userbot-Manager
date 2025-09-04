@@ -243,6 +243,12 @@ class ManagementBot:
         )
         
         self.dp.message.register(
+            self.userbots_handler.process_userbot_name_input,
+            ManagementStates.userbot_set_name,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+        
+        self.dp.message.register(
             self.sources_handler.process_source_input,
             ManagementStates.adding_source_chat_id,
             F.from_user.id.in_(settings.admin_telegram_ids_list)

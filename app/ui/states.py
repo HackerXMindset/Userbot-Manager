@@ -19,6 +19,7 @@ class ManagementStates(StatesGroup):
     userbot_login_phone = State()
     userbot_login_code = State()
     userbot_login_2fa = State()
+    userbot_set_name = State()
     
     # Alerts
     adding_gain_threshold = State()

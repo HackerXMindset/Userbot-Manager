@@ -106,7 +106,7 @@ class Keyboards:
         
         for bot in userbots[:8]:
             status_icon = "🟢" if bot['status'] == 'active' else "🔴"
-            name = bot['session_name'][:20]
+            name = (bot.get('display_name') or bot['session_name'])[:20]
             keyboard.append([
                 InlineKeyboardButton(
                     text=f"{status_icon} {name}",

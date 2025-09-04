@@ -5,6 +5,8 @@ Call Executor - Handles sending call messages to target chats
 import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+from telethon.errors import RPCError, FloodWaitError
+from telethon.tl.types import PeerChannel, PeerChat, PeerUser
 
 from app.db import db
 from .utils import MessageTracker, RateLimiter
@@ -20,6 +22,35 @@ class CallExecutor:
         self.session_manager = session_manager
         self.message_tracker = MessageTracker()
         self.rate_limiter = RateLimiter(max_calls=30, time_window=60)  # 30 calls per minute
+    
+    async def _resolve_entity_safely(self, client, target_chat_id: int):
+        """Safely resolve entity with fallback strategies"""
+        try:
+            # First try: Direct entity resolution
+            entity = await client.get_entity(target_chat_id)
+            return entity
+        except Exception as resolve_error:
+            # Log as debug since this isn't a real error if sending still works
+            logger.debug(f"Entity resolution failed for {target_chat_id}: {resolve_error}")
+            
+            # Fallback: Construct peer directly based on chat ID pattern
+            try:
+                if target_chat_id < 0:
+                    # Supergroup/channel (starts with -100)
+                    if str(target_chat_id).startswith('-100'):
+                        channel_id = abs(target_chat_id) - 1000000000000
+                        return PeerChannel(channel_id)
+                    # Regular group (negative but not starting with -100)
+                    else:
+                        chat_id = abs(target_chat_id)
+                        return PeerChat(chat_id)
+                else:
+                    # User
+                    return PeerUser(target_chat_id)
+            except Exception as peer_error:
+                logger.debug(f"Peer construction failed for {target_chat_id}: {peer_error}")
+                # Return original ID as final fallback
+                return target_chat_id
     
     async def send_call_message(self, target_chat_id: int, token_address: str, 
                                additional_info: str = "", source_info: str = "") -> Dict[str, Any]:
@@ -37,8 +68,11 @@ class CallExecutor:
             # Send only the contract address, no formatting
             message = token_address
             
-            # Send message
-            sent_message = await client.send_message(target_chat_id, message)
+            # Pre-resolve entity to avoid entity resolution errors
+            resolved_entity = await self._resolve_entity_safely(client, target_chat_id)
+            
+            # Send message with resolved entity
+            sent_message = await client.send_message(resolved_entity, message)
             
             # Record the call for rate limiting
             self.rate_limiter.record_call()

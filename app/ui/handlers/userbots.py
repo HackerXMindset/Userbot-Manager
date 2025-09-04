@@ -44,8 +44,9 @@ class UserbotsHandler:
                         'error': '🔴'
                     }.get(bot['status'], '⚪')
                     
+                    display_name = bot.get('display_name') or bot['session_name']
                     text += (
-                        f"{status_icon} <b>{bot['session_name']}</b>\n"
+                        f"{status_icon} <b>{display_name}</b>\n"
                         f"  ├ Groups: {bot['assigned_groups']}\n"
                         f"  └ Last seen: {bot['last_seen'] or 'Never'}\n\n"
                     )
@@ -81,6 +82,9 @@ class UserbotsHandler:
         elif action == 'confirm_delete':
             userbot_id = int(parts[2])
             await self.confirm_delete_userbot(query, userbot_id)
+        elif action == 'set_name':
+            userbot_id = int(parts[2])
+            await self.start_set_userbot_name(query, userbot_id, state)
     
     async def start_userbot_login(self, query: types.CallbackQuery, state: FSMContext):
         """Start userbot login process"""
@@ -444,6 +448,17 @@ class UserbotsHandler:
     async def _save_userbot(self, session_name: str, session_string: str, me) -> None:
         """Helper method to save userbot to database"""
         try:
+            # Generate display name from user info
+            display_name = None
+            if me.first_name and me.last_name:
+                display_name = f"{me.first_name} {me.last_name}"
+            elif me.first_name:
+                display_name = me.first_name
+            elif me.username:
+                display_name = f"@{me.username}"
+            else:
+                display_name = session_name
+            
             await self.bot_model.create({
                 'kind': 'userbot',
                 'session_name': session_name,
@@ -452,7 +467,8 @@ class UserbotsHandler:
                 'telegram_id': me.id,
                 'username': me.username,
                 'first_name': me.first_name,
-                'last_name': me.last_name
+                'last_name': me.last_name,
+                'display_name': display_name
             })
             logger.info(f"Successfully saved userbot: {session_name} ({me.id})")
         except Exception as e:
@@ -475,9 +491,10 @@ class UserbotsHandler:
                 'error': '🔴'
             }.get(userbot['status'], '⚪')
             
+            display_name = userbot.get('display_name') or userbot['session_name']
             text = (
                 f"<b>🤖 Userbot Details</b>\n\n"
-                f"<b>{userbot['session_name']}</b>\n"
+                f"<b>{display_name}</b>\n"
                 f"Status: {status_icon} {userbot['status'].title()}\n"
                 f"Last Seen: {userbot['last_seen'] or 'Never'}\n\n"
                 f"<b>Assignments:</b>\n"
@@ -492,7 +509,10 @@ class UserbotsHandler:
                 
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="🔄 Check Status", callback_data=f"userbot:check:{userbot_id}"),
+                    InlineKeyboardButton(text="✏️ Set Name", callback_data=f"userbot:set_name:{userbot_id}"),
+                    InlineKeyboardButton(text="🔄 Check Status", callback_data=f"userbot:check:{userbot_id}")
+                ],
+                [
                     InlineKeyboardButton(text="🗑 Delete", callback_data=f"userbot:delete:{userbot_id}")
                 ],
                 [InlineKeyboardButton(text="🔙 Back", callback_data="menu:userbots")]
@@ -778,3 +798,77 @@ class UserbotsHandler:
                 )
             except:
                 pass
+    
+    async def start_set_userbot_name(self, query: types.CallbackQuery, userbot_id: int, state: FSMContext):
+        """Start userbot name setting process"""
+        try:
+            userbot = await self.bot_model.get_by_id(userbot_id)
+            if not userbot:
+                await query.answer("Userbot not found!")
+                return
+            
+            current_name = userbot.get('display_name') or userbot['session_name']
+            
+            await query.message.edit_text(
+                f"<b>✏️ Set Userbot Name</b>\n\n"
+                f"Current name: <b>{current_name}</b>\n\n"
+                f"Enter a new custom name for this userbot:\n\n"
+                f"Type /cancel to abort.",
+                reply_markup=self.keyboards.cancel_button(f"userbot:view:{userbot_id}")
+            )
+            
+            await state.set_state(ManagementStates.userbot_set_name)
+            await state.update_data(
+                userbot_id=userbot_id,
+                message_id=query.message.message_id
+            )
+            
+        except Exception as e:
+            logger.error(f"Error starting userbot name setting: {e}")
+            await query.answer("❌ Error starting name setting")
+    
+    async def process_userbot_name_input(self, message: types.Message, state: FSMContext):
+        """Process userbot name input"""
+        if message.text == '/cancel':
+            data = await state.get_data()
+            userbot_id = data.get('userbot_id')
+            await message.answer("❌ Name setting cancelled.")
+            await state.clear()
+            if userbot_id:
+                await self.show_userbot_details(message, userbot_id)
+            return
+        
+        new_name = message.text.strip()
+        await message.delete()  # Clean up user input
+        
+        # Validate name
+        if not new_name or len(new_name) > 50:
+            await message.answer("❌ Name must be 1-50 characters long.")
+            return
+        
+        try:
+            data = await state.get_data()
+            userbot_id = data.get('userbot_id')
+            
+            if not userbot_id:
+                await message.answer("❌ Session data lost. Please try again.")
+                await state.clear()
+                return
+            
+            # Update userbot name in database (direct SQL to avoid updated_at requirement)
+            await self.db.execute(
+                "UPDATE bots SET display_name = $1 WHERE id = $2",
+                new_name, userbot_id
+            )
+            
+            await message.answer(
+                f"✅ <b>Name Updated Successfully!</b>\n\n"
+                f"Userbot name set to: <b>{new_name}</b>"
+            )
+            
+            await state.clear()
+            
+        except Exception as e:
+            logger.error(f"Error updating userbot name: {e}")
+            await message.answer(f"❌ Error updating name: {str(e)}")
+            await state.clear()

@@ -33,14 +33,14 @@ class GroupModel(BaseModel):
                    COUNT(DISTINCT t.id) as targets_count,
                    COUNT(DISTINCT s.id) as schedules_count,
                    ua.userbot_id,
-                   b.session_name as userbot_name,
+                   COALESCE(b.display_name, b.session_name) as userbot_name,
                    (SELECT COUNT(*) FROM calls WHERE group_id = g.id AND sent_at > CURRENT_DATE) as calls_today
             FROM groups g
             LEFT JOIN targets t ON t.group_id = g.id
             LEFT JOIN group_schedules s ON s.group_id = g.id
             LEFT JOIN userbot_assignments ua ON ua.group_id = g.id
             LEFT JOIN bots b ON b.id = ua.userbot_id
-            GROUP BY g.id, ua.userbot_id, b.session_name
+            GROUP BY g.id, ua.userbot_id, b.session_name, b.display_name
             ORDER BY g.enabled DESC, g.id DESC
         """
         return await self.db.fetch(query)
