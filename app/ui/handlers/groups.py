@@ -33,8 +33,9 @@ class GroupsHandler:
                 for g in groups_list[:5]:  # Show first 5 in detail
                     status = "✅" if g['enabled'] else "🔴"
                     bot_icon = "🤖" if g['userbot_id'] else "⚠️"
+                    display_name = g.get('display_name') or g['title'] or f"Chat {g['tg_chat_id']}"
                     text += (
-                        f"{status} <b>{g['title'] or f'Chat {g['tg_chat_id']}'}</b>\n"
+                        f"{status} <b>{display_name}</b>\n"
                         f"  ├ Quota: {g['daily_cap'] or '∞'}/day\n"
                         f"  ├ Targets: {g['targets_count']} | Schedules: {g['schedules_count']}\n"
                         f"  └ {bot_icon} {g['userbot_name'] if g['userbot_id'] else 'Userbot needed'}\n\n"
@@ -73,6 +74,9 @@ class GroupsHandler:
         elif action == 'stats':
             group_id = int(parts[2])
             await self.show_group_stats(query, group_id)
+        elif action == 'set_name':
+            group_id = int(parts[2])
+            await self.start_set_group_name(query, group_id, state)
     
     async def start_add_group(self, query: types.CallbackQuery, state: FSMContext):
         """Start the add group process"""
@@ -494,3 +498,75 @@ class GroupsHandler:
             return "Weekends"
         else:
             return ", ".join([day_names[d-1] for d in sorted(weekdays)])
+    
+    async def start_set_group_name(self, query: types.CallbackQuery, group_id: int, state: FSMContext):
+        """Start group name setting process"""
+        try:
+            group = await self.group_model.get_by_id(group_id)
+            if not group:
+                await query.answer("Group not found!")
+                return
+            
+            current_name = group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}"
+            
+            await query.message.edit_text(
+                f"<b>✏️ Set Group Name</b>\n\n"
+                f"Current name: <b>{current_name}</b>\n\n"
+                f"Enter a new custom name for this group:\n\n"
+                f"Type /cancel to abort.",
+                reply_markup=self.keyboards.cancel_button(f"group:view:{group_id}")
+            )
+            
+            await state.set_state(ManagementStates.group_set_name)
+            await state.update_data(
+                group_id=group_id,
+                message_id=query.message.message_id
+            )
+            
+        except Exception as e:
+            logger.error(f"Error starting group name setting: {e}")
+            await query.answer("❌ Error starting name setting")
+    
+    async def process_group_name_input(self, message: types.Message, state: FSMContext):
+        """Process group name input"""
+        if message.text == '/cancel':
+            data = await state.get_data()
+            group_id = data.get('group_id')
+            await message.answer("❌ Name setting cancelled.")
+            await state.clear()
+            return
+        
+        new_name = message.text.strip()
+        await message.delete()  # Clean up user input
+        
+        # Validate name
+        if not new_name or len(new_name) > 50:
+            await message.answer("❌ Name must be 1-50 characters long.")
+            return
+        
+        try:
+            data = await state.get_data()
+            group_id = data.get('group_id')
+            
+            if not group_id:
+                await message.answer("❌ Session data lost. Please try again.")
+                await state.clear()
+                return
+            
+            # Update group name in database (direct SQL to avoid updated_at requirement)
+            await self.db.execute(
+                "UPDATE groups SET display_name = $1 WHERE id = $2",
+                new_name, group_id
+            )
+            
+            await message.answer(
+                f"✅ <b>Group Name Updated Successfully!</b>\n\n"
+                f"Group name set to: <b>{new_name}</b>"
+            )
+            
+            await state.clear()
+            
+        except Exception as e:
+            logger.error(f"Error updating group name: {e}")
+            await message.answer(f"❌ Error updating name: {str(e)}")
+            await state.clear()

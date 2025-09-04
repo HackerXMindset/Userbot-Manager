@@ -40,7 +40,7 @@ class GroupModel(BaseModel):
             LEFT JOIN group_schedules s ON s.group_id = g.id
             LEFT JOIN userbot_assignments ua ON ua.group_id = g.id
             LEFT JOIN bots b ON b.id = ua.userbot_id
-            GROUP BY g.id, ua.userbot_id, b.session_name, b.display_name
+            GROUP BY g.id, g.display_name, ua.userbot_id, b.session_name, b.display_name
             ORDER BY g.enabled DESC, g.id DESC
         """
         return await self.db.fetch(query)

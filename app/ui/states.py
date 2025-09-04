@@ -7,6 +7,7 @@ class ManagementStates(StatesGroup):
     adding_group = State()
     setting_quota = State()
     setting_cooldown = State()
+    group_set_name = State()
     
     # Schedule management
     setting_schedule_time = State()

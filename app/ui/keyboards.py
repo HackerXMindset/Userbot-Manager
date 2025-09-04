@@ -34,10 +34,10 @@ class Keyboards:
         
         for group in groups[:10]:  # Limit to 10 for UI
             status = "✅" if group['enabled'] else "❌"
-            title = group['title'][:20] if group['title'] else f"ID: {group['tg_chat_id']}"
+            display_name = (group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}")[:20]
             keyboard.append([
                 InlineKeyboardButton(
-                    text=f"{status} {title}",
+                    text=f"{status} {display_name}",
                     callback_data=f"group:view:{group['id']}"
                 )
             ])
@@ -60,6 +60,7 @@ class Keyboards:
         return InlineKeyboardMarkup(inline_keyboard=[
             [status_btn],
             [
+                InlineKeyboardButton(text="✏️ Set Name", callback_data=f"group:set_name:{group['id']}"),
                 InlineKeyboardButton(text="📅 Schedules", callback_data=f"group:schedules:{group['id']}")
             ],
             [
