@@ -3,11 +3,12 @@ Message Handler - Handles message processing and event routing
 """
 
 import logging
+import time
 from typing import Dict, Any, List, Optional
 from telethon import events
 
 from app.db import db
-from app.models import BotModel
+from app.models import BotModel, GroupModel, ScheduleModel
 from .token_monitor import TokenMonitor
 from .call_executor import CallExecutor
 from .source_manager import SourceManager
@@ -23,6 +24,10 @@ class MessageHandler:
         self.userbot_id = userbot_id
         self.session_manager = session_manager
         self.bot_model = BotModel(db)
+        self.group_model = GroupModel(db)
+        self.schedule_model = ScheduleModel(db)
+        self.cache = {}
+        self.cache_time = {}
         
         # Initialize components
         self.token_monitor = TokenMonitor(userbot_id)
@@ -67,6 +72,59 @@ class MessageHandler:
         
         logger.info(f"Setup handlers for {len(group_ids)} groups and {len(source_chat_ids)} global source chats")
     
+    def is_fresh(self, key, seconds=600):
+        """Check if cache entry is fresh (default 10 minutes)"""
+        return key in self.cache_time and time.time() - self.cache_time[key] < seconds
+    
+    async def _can_group_accept_calls(self, tg_chat_id: int) -> bool:
+        """Check if group can accept calls at current time/day"""
+        try:
+            # Get current time info for cache key
+            from app.config import settings
+            now = settings.get_local_time()
+            current_day = now.weekday() + 1  # Monday = 1
+            current_hour = now.hour
+            
+            # Check cache first
+            cache_key = f"schedule_{tg_chat_id}_{current_day}_{current_hour}"
+            if self.is_fresh(cache_key):
+                return self.cache[cache_key]
+            
+            # Get group record
+            group = await self.group_model.get_by_chat_id(tg_chat_id)
+            if not group or not group['enabled']:
+                result = False
+                self.cache[cache_key] = result
+                self.cache_time[cache_key] = time.time()
+                return result
+            
+            current_time = now.time()
+            
+            # Check if group has any schedules at all
+            all_schedules = await self.schedule_model.get_by_group(group['id'])
+            
+            # If no schedules defined, allow by default (schedules are optional)
+            if not all_schedules:
+                result = True
+            else:
+                # Group has schedules - check if any are currently active
+                active_schedules = await self.schedule_model.get_active_schedules(current_day, current_time)
+                result = False
+                for schedule in active_schedules:
+                    if schedule['tg_chat_id'] == tg_chat_id:
+                        result = True
+                        break
+            
+            # Cache result for 10 minutes
+            self.cache[cache_key] = result
+            self.cache_time[cache_key] = time.time()
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error checking schedule for group {tg_chat_id}: {e}")
+            # Default to allow if schedule check fails
+            return True
+    
     async def _handle_source_message(self, event, is_edit: bool = False):
         """Handle messages from source chats - extract tokens and route to targets"""
         try:
@@ -96,6 +154,11 @@ class MessageHandler:
                 total_failed = 0
                 
                 for target_group in target_groups:
+                    # Check if group can accept calls at current time/day
+                    if not await self._can_group_accept_calls(target_group['tg_chat_id']):
+                        logger.info(f"Skipping group {target_group['tg_chat_id']} - outside schedule window")
+                        continue
+                    
                     group_sent = 0
                     group_failed = 0
                     

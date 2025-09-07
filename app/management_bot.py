@@ -16,7 +16,7 @@ from app.ui.keyboards import Keyboards
 from app.ui.states import ManagementStates
 from app.ui.handlers import (
     MenuHandler, GroupsHandler, UserbotsHandler, 
-    AlertsHandler, SchedulesHandler, SourcesHandler
+    SchedulesHandler, SourcesHandler, AlertsHandler
 )
 
 logger = logging.getLogger(__name__)
@@ -31,9 +31,9 @@ class ManagementBot:
         self.menu_handler = MenuHandler(db, self.keyboards)
         self.groups_handler = GroupsHandler(db, self.keyboards)
         self.userbots_handler = UserbotsHandler(db, self.keyboards)
-        self.alerts_handler = AlertsHandler(db, self.keyboards)
         self.schedules_handler = SchedulesHandler(db, self.keyboards)
         self.sources_handler = SourcesHandler(db, self.keyboards)
+        self.alerts_handler = AlertsHandler(db, self.keyboards)
         
         self.setup_handlers()
     
@@ -82,52 +82,7 @@ class ManagementBot:
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
-        # Alerts
-        self.dp.callback_query.register(
-            self.alerts_handler.handle_alerts_action,
-            F.data.startswith('alerts:'),
-            F.from_user.id.in_(settings.admin_telegram_ids_list)
-        )
         
-        # Gain threshold management
-        self.dp.callback_query.register(
-            self.handle_gain_action,
-            F.data.startswith('gain:'),
-            F.from_user.id.in_(settings.admin_telegram_ids_list)
-        )
-        
-        # Drop threshold management
-        self.dp.callback_query.register(
-            self.handle_drop_action,
-            F.data.startswith('drop:'),
-            F.from_user.id.in_(settings.admin_telegram_ids_list)
-        )
-        
-        # Group-specific alerts
-        self.dp.callback_query.register(
-            self.handle_group_alerts,
-            F.data.startswith('group_alerts:'),
-            F.from_user.id.in_(settings.admin_telegram_ids_list)
-        )
-        
-        # Group-specific alert actions
-        self.dp.callback_query.register(
-            self.handle_group_alert_actions,
-            F.data.startswith('group_gain:'),
-            F.from_user.id.in_(settings.admin_telegram_ids_list)
-        )
-        
-        self.dp.callback_query.register(
-            self.handle_group_alert_actions,
-            F.data.startswith('group_drop:'),
-            F.from_user.id.in_(settings.admin_telegram_ids_list)
-        )
-        
-        self.dp.callback_query.register(
-            self.handle_group_alert_actions,
-            F.data.startswith('group_reset:'),
-            F.from_user.id.in_(settings.admin_telegram_ids_list)
-        )
         
         # Tracking actions
         self.dp.callback_query.register(
@@ -150,24 +105,6 @@ class ManagementBot:
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
-        # Group-specific alert value actions
-        self.dp.callback_query.register(
-            self.handle_group_alert_values,
-            F.data.startswith('group_gain_add:'),
-            F.from_user.id.in_(settings.admin_telegram_ids_list)
-        )
-        
-        self.dp.callback_query.register(
-            self.handle_group_alert_values,
-            F.data.startswith('group_gain_remove:'),
-            F.from_user.id.in_(settings.admin_telegram_ids_list)
-        )
-        
-        self.dp.callback_query.register(
-            self.handle_group_alert_values,
-            F.data.startswith('group_drop_set:'),
-            F.from_user.id.in_(settings.admin_telegram_ids_list)
-        )
         
         
         
@@ -175,6 +112,25 @@ class ManagementBot:
         self.dp.callback_query.register(
             self.sources_handler.handle_sources_action,
             F.data.startswith('sources:'),
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+        
+        # Alerts
+        self.dp.callback_query.register(
+            self.alerts_handler.handle_alerts_action,
+            F.data.startswith('alerts:'),
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+        
+        self.dp.callback_query.register(
+            self.alerts_handler.handle_gains_preset,
+            F.data.startswith('gains:'),
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+        
+        self.dp.callback_query.register(
+            self.alerts_handler.handle_drop_setting,
+            F.data.startswith('drop:'),
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
@@ -336,398 +292,6 @@ class ManagementBot:
         
         await query.answer()
     
-    async def handle_gain_action(self, query: types.CallbackQuery):
-        """Handle gain threshold actions"""
-        try:
-            # Parse callback: gain:action:value
-            parts = query.data.split(':')
-            action = parts[1]
-            value = int(parts[2])
-            
-            # Get current gains
-            gains = await db.fetchval(
-                "SELECT value FROM settings WHERE key = 'gain_multipliers'"
-            )
-            import json
-            if gains:
-                try:
-                    current_gains = json.loads(gains) if isinstance(gains, str) else gains
-                except:
-                    current_gains = [5, 10, 15]
-            else:
-                current_gains = [5, 10, 15]
-            
-            if action == 'add':
-                if value not in current_gains:
-                    current_gains.append(value)
-                    current_gains.sort()
-                    await self.alerts_handler.update_gain_thresholds(current_gains)
-                    await query.answer(f"✅ Added {value}x threshold")
-                else:
-                    await query.answer(f"❌ {value}x already exists")
-                    
-            elif action == 'remove':
-                if value in current_gains and len(current_gains) > 1:
-                    current_gains.remove(value)
-                    await self.alerts_handler.update_gain_thresholds(current_gains)
-                    await query.answer(f"✅ Removed {value}x threshold")
-                else:
-                    await query.answer(f"❌ Cannot remove {value}x")
-            
-            # Go back to gains interface
-            await self.alerts_handler.show_add_gain(query)
-            
-        except Exception as e:
-            logger.error(f"Error handling gain action: {e}")
-            await query.answer("❌ Error updating gain threshold")
-    
-    async def handle_drop_action(self, query: types.CallbackQuery):
-        """Handle drop threshold actions"""
-        try:
-            # Parse callback: drop:action:value
-            parts = query.data.split(':')
-            action = parts[1]
-            
-            if action == 'set':
-                value = float(parts[2])
-                await self.alerts_handler.update_drop_threshold(value)
-                await query.answer(f"✅ Drop threshold set to {value*100:.0f}%")
-                await self.alerts_handler.show_alerts_menu(query)
-                
-                
-        except Exception as e:
-            logger.error(f"Error handling drop action: {e}")
-            await query.answer("❌ Error updating drop threshold")
-    
-    async def handle_group_alerts(self, query: types.CallbackQuery):
-        """Handle group-specific alert configuration"""
-        try:
-            # Parse callback: group_alerts:group_id
-            group_id = int(query.data.split(':', 1)[1])
-            
-            # Get group info
-            group = await db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
-            if not group:
-                await query.answer("❌ Group not found")
-                return
-            
-            # Get group-specific settings
-            group_gains = await db.fetchval(
-                f"SELECT value FROM settings WHERE key = 'group_{group_id}_gains'"
-            )
-            group_drop = await db.fetchval(
-                f"SELECT value FROM settings WHERE key = 'group_{group_id}_drop'"
-            )
-            
-            # Use global defaults if no group-specific settings
-            global_gains = await db.fetchval(
-                "SELECT value FROM settings WHERE key = 'gain_multipliers'"
-            )
-            global_drop = await db.fetchval(
-                "SELECT value FROM settings WHERE key = 'drop_percentage'"
-            )
-            
-            current_gains = group_gains or global_gains or [5, 10, 15]
-            current_drop = float(group_drop) if group_drop else (float(global_drop) if global_drop else 0.70)
-            
-            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
-            
-            text = f"<b>🎯 Alerts for {group_name}</b>\n\n"
-            text += f"<b>Current Settings:</b>\n"
-            text += f"├ Gain Thresholds: {', '.join([f'{g}x' for g in current_gains])}\n"
-            text += f"└ Drop Threshold: {current_drop*100:.0f}%\n\n"
-            text += f"These override global settings for this group only."
-            
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="📈 Edit Gains", callback_data=f"group_gain:{group_id}"),
-                    InlineKeyboardButton(text="📉 Edit Drop", callback_data=f"group_drop:{group_id}")
-                ],
-                [
-                    InlineKeyboardButton(text="🔄 Use Global", callback_data=f"group_reset:{group_id}")
-                ],
-                [
-                    InlineKeyboardButton(text="🔙 Back", callback_data="alerts:per_group")
-                ]
-            ])
-            
-            await query.message.edit_text(text, reply_markup=keyboard)
-            
-        except Exception as e:
-            logger.error(f"Error handling group alerts: {e}")
-            await query.answer("❌ Error loading group alerts")
-    
-    async def handle_group_alert_actions(self, query: types.CallbackQuery):
-        """Handle group-specific alert actions"""
-        try:
-            # Parse callback data
-            parts = query.data.split(':', 1)
-            action_type = parts[0]  # group_gain, group_drop, group_reset
-            group_id = int(parts[1])
-            
-            # Get group info
-            group = await db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
-            if not group:
-                await query.answer("❌ Group not found")
-                return
-            
-            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
-            
-            if action_type == 'group_gain':
-                await self.show_group_gain_editor(query, group_id, group_name)
-            elif action_type == 'group_drop':
-                await self.show_group_drop_editor(query, group_id, group_name)
-            elif action_type == 'group_reset':
-                await self.reset_group_alerts(query, group_id, group_name)
-                
-        except Exception as e:
-            logger.error(f"Error handling group alert action: {e}")
-            await query.answer("❌ Error processing group alert action")
-    
-    async def show_group_gain_editor(self, query: types.CallbackQuery, group_id: int, group_name: str):
-        """Show gain threshold editor for specific group"""
-        try:
-            # Get current group-specific gains or use global
-            group_gains = await db.fetchval(f"SELECT value FROM settings WHERE key = 'group_{group_id}_gains'")
-            global_gains = await db.fetchval("SELECT value FROM settings WHERE key = 'gain_multipliers'")
-            
-            import json
-            if group_gains:
-                try:
-                    current_gains = json.loads(group_gains) if isinstance(group_gains, str) else group_gains
-                except:
-                    current_gains = [5, 10, 15]
-            elif global_gains:
-                try:
-                    current_gains = json.loads(global_gains) if isinstance(global_gains, str) else global_gains
-                except:
-                    current_gains = [5, 10, 15]
-            else:
-                current_gains = [5, 10, 15]
-            
-            text = f"<b>📈 Gains for {group_name}</b>\n\n"
-            text += f"Current: {', '.join([f'{g}x' for g in current_gains])}\n\n"
-            text += f"<b>Add new threshold:</b>"
-            
-            # Available thresholds
-            all_options = [2, 3, 4, 5, 7, 10, 15, 20, 25, 30, 50, 100]
-            available = [x for x in all_options if x not in current_gains]
-            
-            keyboard_rows = []
-            for i in range(0, len(available), 4):
-                row = []
-                for j in range(i, min(i + 4, len(available))):
-                    threshold = available[j]
-                    row.append(InlineKeyboardButton(
-                        text=f"{threshold}x",
-                        callback_data=f"group_gain_add:{group_id}:{threshold}"
-                    ))
-                keyboard_rows.append(row)
-            
-            # Remove options
-            if len(current_gains) > 1:
-                keyboard_rows.append([
-                    InlineKeyboardButton(text="─────── Remove ───────", callback_data="ignore")
-                ])
-                for threshold in current_gains:
-                    keyboard_rows.append([
-                        InlineKeyboardButton(
-                            text=f"🗑️ Remove {threshold}x",
-                            callback_data=f"group_gain_remove:{group_id}:{threshold}"
-                        )
-                    ])
-            
-            keyboard_rows.append([
-                InlineKeyboardButton(text="🔙 Back", callback_data=f"group_alerts:{group_id}")
-            ])
-            
-            keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
-            await query.message.edit_text(text, reply_markup=keyboard)
-            
-        except Exception as e:
-            logger.error(f"Error showing group gain editor: {e}")
-            await query.answer("❌ Error loading group gain editor")
-    
-    async def show_group_drop_editor(self, query: types.CallbackQuery, group_id: int, group_name: str):
-        """Show drop threshold editor for specific group"""
-        try:
-            text = f"<b>📉 Drop Threshold for {group_name}</b>\n\n"
-            text += f"Select the drop percentage for this group:"
-            
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="40%", callback_data=f"group_drop_set:{group_id}:0.40"),
-                    InlineKeyboardButton(text="50%", callback_data=f"group_drop_set:{group_id}:0.50"),
-                    InlineKeyboardButton(text="60%", callback_data=f"group_drop_set:{group_id}:0.60")
-                ],
-                [
-                    InlineKeyboardButton(text="70%", callback_data=f"group_drop_set:{group_id}:0.70"),
-                    InlineKeyboardButton(text="75%", callback_data=f"group_drop_set:{group_id}:0.75"),
-                    InlineKeyboardButton(text="80%", callback_data=f"group_drop_set:{group_id}:0.80")
-                ],
-                [
-                    InlineKeyboardButton(text="85%", callback_data=f"group_drop_set:{group_id}:0.85"),
-                    InlineKeyboardButton(text="90%", callback_data=f"group_drop_set:{group_id}:0.90"),
-                    InlineKeyboardButton(text="95%", callback_data=f"group_drop_set:{group_id}:0.95")
-                ],
-                [
-                    InlineKeyboardButton(text="🔙 Back", callback_data=f"group_alerts:{group_id}")
-                ]
-            ])
-            
-            await query.message.edit_text(text, reply_markup=keyboard)
-            
-        except Exception as e:
-            logger.error(f"Error showing group drop editor: {e}")
-            await query.answer("❌ Error loading group drop editor")
-    
-    async def reset_group_alerts(self, query: types.CallbackQuery, group_id: int, group_name: str):
-        """Reset group alerts to use global settings"""
-        try:
-            # Delete group-specific settings
-            await db.execute(f"DELETE FROM settings WHERE key = 'group_{group_id}_gains'")
-            await db.execute(f"DELETE FROM settings WHERE key = 'group_{group_id}_drop'")
-            
-            await query.answer(f"✅ {group_name} now uses global alert settings")
-            await self.handle_group_alerts(query)
-            
-        except Exception as e:
-            logger.error(f"Error resetting group alerts: {e}")
-            await query.answer("❌ Error resetting group alerts")
-    
-    async def handle_group_alert_values(self, query: types.CallbackQuery):
-        """Handle group-specific alert value changes"""
-        try:
-            # Parse callback: group_gain_add:123:5 or group_drop_set:123:0.70
-            parts = query.data.split(':')
-            action = parts[0]  # group_gain_add, group_gain_remove, group_drop_set
-            group_id = int(parts[1])
-            value = parts[2]
-            
-            # Get group info
-            group = await db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
-            if not group:
-                await query.answer("❌ Group not found")
-                return
-            
-            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
-            
-            if action == 'group_gain_add':
-                await self.add_group_gain_threshold(query, group_id, group_name, int(value))
-            elif action == 'group_gain_remove':
-                await self.remove_group_gain_threshold(query, group_id, group_name, int(value))
-            elif action == 'group_drop_set':
-                await self.set_group_drop_threshold(query, group_id, group_name, float(value))
-                
-        except Exception as e:
-            logger.error(f"Error handling group alert values: {e}")
-            await query.answer("❌ Error updating group alert values")
-    
-    async def add_group_gain_threshold(self, query: types.CallbackQuery, group_id: int, group_name: str, new_threshold: int):
-        """Add a gain threshold to a specific group"""
-        try:
-            # Get current group-specific gains or use global
-            group_gains = await db.fetchval(f"SELECT value FROM settings WHERE key = 'group_{group_id}_gains'")
-            
-            import json
-            if group_gains:
-                try:
-                    current_gains = json.loads(group_gains) if isinstance(group_gains, str) else group_gains
-                except:
-                    current_gains = [5, 10, 15]
-            else:
-                # Use global gains as starting point
-                global_gains = await db.fetchval("SELECT value FROM settings WHERE key = 'gain_multipliers'")
-                if global_gains:
-                    try:
-                        current_gains = json.loads(global_gains) if isinstance(global_gains, str) else global_gains
-                    except:
-                        current_gains = [5, 10, 15]
-                else:
-                    current_gains = [5, 10, 15]
-            
-            if new_threshold not in current_gains:
-                current_gains.append(new_threshold)
-                current_gains.sort()
-                
-                # Save group-specific setting
-                await db.execute(
-                    f"INSERT INTO settings (key, value) VALUES ('group_{group_id}_gains', $1) ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()",
-                    json.dumps(current_gains)
-                )
-                
-                await query.answer(f"✅ Added {new_threshold}x threshold to {group_name}")
-            else:
-                await query.answer(f"❌ {new_threshold}x already exists for {group_name}")
-            
-            # Refresh the editor
-            await self.show_group_gain_editor(query, group_id, group_name)
-            
-        except Exception as e:
-            logger.error(f"Error adding group gain threshold: {e}")
-            await query.answer("❌ Error adding gain threshold")
-    
-    async def remove_group_gain_threshold(self, query: types.CallbackQuery, group_id: int, group_name: str, threshold: int):
-        """Remove a gain threshold from a specific group"""
-        try:
-            # Get current group-specific gains
-            group_gains = await db.fetchval(f"SELECT value FROM settings WHERE key = 'group_{group_id}_gains'")
-            
-            import json
-            if group_gains:
-                try:
-                    current_gains = json.loads(group_gains) if isinstance(group_gains, str) else group_gains
-                except:
-                    current_gains = [5, 10, 15]
-            else:
-                # Use global gains as starting point
-                global_gains = await db.fetchval("SELECT value FROM settings WHERE key = 'gain_multipliers'")
-                if global_gains:
-                    try:
-                        current_gains = json.loads(global_gains) if isinstance(global_gains, str) else global_gains
-                    except:
-                        current_gains = [5, 10, 15]
-                else:
-                    current_gains = [5, 10, 15]
-            
-            if threshold in current_gains and len(current_gains) > 1:
-                current_gains.remove(threshold)
-                
-                # Save group-specific setting
-                await db.execute(
-                    f"INSERT INTO settings (key, value) VALUES ('group_{group_id}_gains', $1) ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()",
-                    json.dumps(current_gains)
-                )
-                
-                await query.answer(f"✅ Removed {threshold}x threshold from {group_name}")
-            else:
-                await query.answer(f"❌ Cannot remove {threshold}x from {group_name}")
-            
-            # Refresh the editor
-            await self.show_group_gain_editor(query, group_id, group_name)
-            
-        except Exception as e:
-            logger.error(f"Error removing group gain threshold: {e}")
-            await query.answer("❌ Error removing gain threshold")
-    
-    async def set_group_drop_threshold(self, query: types.CallbackQuery, group_id: int, group_name: str, percentage: float):
-        """Set drop threshold for a specific group"""
-        try:
-            # Save group-specific drop setting
-            await db.execute(
-                f"INSERT INTO settings (key, value) VALUES ('group_{group_id}_drop', $1) ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()",
-                str(percentage)
-            )
-            
-            await query.answer(f"✅ Set {group_name} drop threshold to {percentage*100:.0f}%")
-            
-            # Go back to group alerts overview
-            await self.handle_group_alerts(query)
-            
-        except Exception as e:
-            logger.error(f"Error setting group drop threshold: {e}")
-            await query.answer("❌ Error setting drop threshold")
-    
     async def handle_tracking_action(self, query: types.CallbackQuery):
         """Handle tracking-related actions"""
         try:
@@ -754,7 +318,6 @@ class ManagementBot:
                 f"This will remove:\n"
                 f"• Stopped tokens (older than 24h)\n"
                 f"• Failed call records (older than 7 days)\n"
-                f"• Old alert records (older than 30 days)\n\n"
                 f"<b>⚠️ This action cannot be undone!</b>\n"
                 f"Are you sure you want to proceed?"
             )
@@ -786,10 +349,6 @@ class ManagementBot:
                 WHERE status != 'sent' AND created_at < NOW() - INTERVAL '7 days'
             """)
             
-            old_alerts = await db.fetchval("""
-                SELECT COUNT(*) FROM alerts 
-                WHERE triggered_at < NOW() - INTERVAL '30 days'
-            """)
             
             # Perform cleanup
             await db.execute("""
@@ -802,19 +361,14 @@ class ManagementBot:
                 WHERE status != 'sent' AND created_at < NOW() - INTERVAL '7 days'
             """)
             
-            await db.execute("""
-                DELETE FROM alerts 
-                WHERE triggered_at < NOW() - INTERVAL '30 days'
-            """)
             
-            total_cleaned = stopped_tokens + old_calls + old_alerts
+            total_cleaned = stopped_tokens + old_calls
             
             text = (
                 f"✅ <b>Cleanup Completed</b>\n\n"
                 f"<b>Items Removed:</b>\n"
                 f"├ Stopped Tokens: {stopped_tokens}\n"
                 f"├ Failed Calls: {old_calls}\n"
-                f"├ Old Alerts: {old_alerts}\n"
                 f"└ Total: {total_cleaned} records\n\n"
                 f"Database cleanup successful!"
             )

@@ -65,12 +65,27 @@ After tagging, use Task tool with separate verification agent:
 3. Always split work into small steps (plan → draft → refine). Never overload with one giant dump.  
 4. Claude must self-rate solutions 1–10 for correctness & simplicity. If <9, improve before showing output.  
 
+## Code Change Safety Rules
+
+### MANDATORY Before Any Code Changes:
+1. **GREP FIRST** - Find existing usage: `grep -r "method_name\|table_name" app/`
+2. **COPY PATTERNS** - Use exact same pattern found in working code  
+3. **ONE CHANGE ONLY** - Single fix, not complex refactors
+4. **NO ASSUMPTIONS** - Never assume method names, params, or schema
+
+### Red Flags - ASK FIRST:
+- "I assume this method/table..."
+- Accessing `._private` attributes  
+- Writing >20 lines to fix simple issue
+- Can't find existing pattern in codebase
+
+**Rule: If no working example exists, investigate before coding.**
+
 ---
 
 ## Coding Directives
 1. Always output fully working code, never pseudo unless explicitly asked.  
 2. Prefer minimal, direct, working solutions over theory or style debates.  
-3. If context is unclear, make smart assumptions and proceed.  
 4. Never leave TODOs — always fill with the simplest working code.  
 5. Always include test/example usage for any code written.  
 6. Optimize for speed of building, not elegance (unless asked otherwise).  

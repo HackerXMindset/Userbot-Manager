@@ -58,19 +58,11 @@ class TokenModel(BaseModel):
         query = "UPDATE tokens_tracked SET last_hit_multiplier = $1 WHERE id = $2"
         await self.db.execute(query, multiplier, token_id)
     
-    async def get_tokens_for_alert_check(self) -> List[asyncpg.Record]:
-        """Get tokens that need alert checking"""
-        query = """
-            SELECT t.*, g.tg_chat_id as group_chat_id, g.title as group_title
-            FROM tokens_tracked t
-            LEFT JOIN groups g ON g.id = t.source_group_id
-            WHERE t.status = 'active' 
-            AND t.first_seen_mc IS NOT NULL 
-            AND t.last_mc IS NOT NULL
-            AND t.first_seen_mc > 0
-            ORDER BY t.last_checked_at ASC
-        """
-        return await self.db.fetch(query)
+    async def update_peak_mc(self, token_id: int, peak_mc: Decimal) -> None:
+        """Update peak market cap"""
+        query = "UPDATE tokens_tracked SET peak_mc = $1 WHERE id = $2"
+        await self.db.execute(query, peak_mc, token_id)
+    
     
     async def get_token_stats(self) -> Dict[str, Any]:
         """Get token statistics"""

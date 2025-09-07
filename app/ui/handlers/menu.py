@@ -104,10 +104,7 @@ class MenuHandler:
                 WHERE created_at > NOW() - INTERVAL '1 hour'
             """)
             
-            recent_alerts = await self.db.fetchval("""
-                SELECT COUNT(*) FROM alerts 
-                WHERE triggered_at > NOW() - INTERVAL '1 hour'
-            """)
+            recent_alerts = 0
             
             text = (
                 f"<b>📊 Detailed System Status</b>\n\n"
@@ -159,7 +156,6 @@ class MenuHandler:
                 f"├ Tokens Tracked: {stats['tokens_tracked']}\n"
                 f"├ Average Performance: {stats['avg_multiplier']:.2f}x\n"
                 f"├ Success Rate: {stats['success_rate']:.1f}%\n"
-                f"├ Alerts Triggered: {stats['alerts_count']}\n"
                 f"├ Calls Sent: {stats['calls_sent']}\n"
                 f"└ Top Performer: {stats['top_multiplier']:.2f}x\n\n"
             )
@@ -318,11 +314,8 @@ class MenuHandler:
                         OR tt.last_checked_at >= (SELECT start_time FROM time_period)
                     ) as success_rate,
                     
-                    -- Alert count
-                    (SELECT COUNT(*) 
-                     FROM alerts a 
-                     WHERE a.triggered_at >= (SELECT start_time FROM time_period)
-                    ) as alerts_count,
+                    -- Alert count (disabled)
+                    0 as alerts_count,
                     
                     -- Calls sent (check multiple status values and time fields)
                     (SELECT COUNT(*) 
@@ -429,7 +422,6 @@ class MenuHandler:
                 "<b>⚠️ Database Cleanup Confirmation</b>\n\n"
                 "This will permanently delete:\n"
                 "• All tracked tokens\n"
-                "• All alert history\n"
                 "• All call records\n\n"
                 "<b>This action cannot be undone!</b>\n\n"
                 "Are you sure you want to proceed?"
@@ -454,7 +446,6 @@ class MenuHandler:
         try:
             # Delete all data
             token_count = await self.db.fetchval("DELETE FROM tokens_tracked")
-            await self.db.execute("DELETE FROM alerts")
             await self.db.execute("DELETE FROM calls")
             
             # Clear cache
@@ -464,7 +455,6 @@ class MenuHandler:
                 "<b>✅ Cleanup Complete</b>\n\n"
                 f"Successfully deleted:\n"
                 f"• {token_count or 0} tokens\n"
-                f"• All alerts\n"
                 f"• All calls\n\n"
                 "Database has been reset."
             )

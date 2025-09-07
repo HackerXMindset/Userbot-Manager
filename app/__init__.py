@@ -2,8 +2,8 @@
 Telegram Bot Management System
 
 A sophisticated management bot + userbot workers system for monitoring 
-Telegram groups and forwarding Solana addresses with advanced scheduling, 
-quotas, and alerts.
+Telegram groups and forwarding Solana addresses with advanced scheduling 
+and quotas.
 """
 
 __version__ = "1.0.0"

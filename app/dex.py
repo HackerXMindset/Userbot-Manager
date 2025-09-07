@@ -8,6 +8,7 @@ from datetime import datetime
 from app.config import settings
 from app.db import db
 from app.models import TokenModel
+from app.userbot.session_manager import SessionManager
 
 logger = logging.getLogger(__name__)
 
@@ -277,6 +278,12 @@ class DexScreenerService:
             # Update token in database
             await self.token_model.update_market_cap(token['id'], new_mc)
             
+            # Check for gain alerts after market cap update
+            await self._check_gain_alerts(token, new_mc)
+            
+            # Check for drop alerts after market cap update
+            await self._check_drop_alerts(token, new_mc)
+            
             # Stop monitoring tokens below $8K market cap
             if new_mc < 8000:
                 await self.token_model.set_status(token['id'], 'stopped')
@@ -286,6 +293,111 @@ class DexScreenerService:
             
         except Exception as e:
             logger.error(f"Error updating token from API data: {e}")
+    
+    async def _check_gain_alerts(self, token: Dict[str, Any], new_mc: Decimal):
+        """Check for gain alerts using existing working pattern"""
+        try:
+            if not token.get('first_seen_mc') or token['first_seen_mc'] <= 0:
+                return
+                
+            current_multiplier = new_mc / token['first_seen_mc']
+            last_hit = token.get('last_hit_multiplier', 1)
+            
+            # Get gain thresholds from settings 
+            gain_settings = await db.fetchval("SELECT value FROM settings WHERE key = 'gain_multipliers'")
+            if not gain_settings:
+                return
+                
+            import json
+            gain_multipliers = json.loads(gain_settings)
+            
+            # Check each threshold
+            for threshold in sorted(gain_multipliers):
+                threshold_decimal = Decimal(str(threshold))
+                if current_multiplier >= threshold_decimal and Decimal(str(last_hit)) < threshold_decimal:
+                    await self._queue_pnl_command(token, threshold_decimal)
+                    await self.token_model.update_hit_multiplier(token['id'], threshold_decimal)
+                    break
+                    
+        except Exception as e:
+            logger.error(f"Error checking gain alerts: {e}")
+    
+    async def _queue_pnl_command(self, token: Dict[str, Any], threshold: Decimal):
+        """Send /pnl command directly via userbot client"""
+        try:
+            if not token.get('source_group_id'):
+                return
+                
+            # Get userbot assigned to this group with session string
+            userbot = await db.fetchrow("""
+                SELECT b.id, b.session_string FROM bots b
+                JOIN userbot_assignments ua ON b.id = ua.userbot_id
+                WHERE ua.group_id = $1 AND b.kind = 'userbot' AND b.session_string IS NOT NULL
+                LIMIT 1
+            """, token['source_group_id'])
+            
+            if not userbot:
+                logger.warning(f"No userbot with session found for group {token['source_group_id']}")
+                return
+            
+            # Get target groups for this source group
+            targets = await db.fetch("""
+                SELECT dest_chat_id FROM targets WHERE group_id = $1
+            """, token['source_group_id'])
+            
+            if not targets:
+                logger.warning(f"No target groups found for source group {token['source_group_id']}")
+                return
+                
+            # Send PNL command directly via userbot client
+            session_manager = SessionManager(userbot['id'], userbot['session_string'])
+            success = await session_manager.initialize_client()
+            
+            if not success:
+                logger.error(f"Failed to initialize userbot {userbot['id']} client")
+                return
+                
+            client = session_manager.get_client()
+            message = f"/pnl {token['address']}"
+            
+            # Send to all target groups
+            for target in targets:
+                try:
+                    sent_message = await client.send_message(target['dest_chat_id'], message)
+                    logger.info(f"Sent /pnl {token['address'][:8]}... to {target['dest_chat_id']} ({threshold}x alert, msg_id: {sent_message.id})")
+                except Exception as send_error:
+                    logger.error(f"Failed to send to {target['dest_chat_id']}: {send_error}")
+            
+        except Exception as e:
+            logger.error(f"Error sending PNL command: {e}")
+    
+    async def _check_drop_alerts(self, token: Dict[str, Any], new_mc: Decimal):
+        """Check for drop alerts using existing working pattern"""
+        try:
+            if not token.get('peak_mc') or token['peak_mc'] <= 0:
+                return
+                
+            # Update peak if new high
+            if new_mc > token['peak_mc']:
+                await self.token_model.update_peak_mc(token['id'], new_mc)
+                return
+                
+            # Get drop threshold from settings 
+            drop_settings = await db.fetchval("SELECT value FROM settings WHERE key = 'drop_percentage'")
+            if not drop_settings:
+                return
+                
+            import json
+            drop_threshold = float(json.loads(drop_settings))
+            
+            # Check drop from peak
+            current_from_peak = new_mc / token['peak_mc']
+            if current_from_peak <= drop_threshold:
+                await self.token_model.set_status(token['id'], 'stopped')
+                logger.info(f"Stopped monitoring {token['address'][:8]}... (dropped {(1-current_from_peak)*100:.1f}% from peak)")
+                    
+        except Exception as e:
+            logger.error(f"Error checking drop alerts: {e}")
     
     async def add_token(self, token_address: str) -> Dict[str, Any]:
         """Add a new token for monitoring"""

@@ -3,17 +3,17 @@
 from .menu import MenuHandler
 from .groups import GroupsHandler
 from .userbots import UserbotsHandler
-from .alerts import AlertsHandler
 from .schedules import SchedulesHandler
 from .targets import TargetsHandler
 from .sources import SourcesHandler
+from .alerts import AlertsHandler
 
 __all__ = [
     "MenuHandler",
     "GroupsHandler", 
     "UserbotsHandler",
-    "AlertsHandler",
     "SchedulesHandler",
     "TargetsHandler",
-    "SourcesHandler"
+    "SourcesHandler",
+    "AlertsHandler"
 ]

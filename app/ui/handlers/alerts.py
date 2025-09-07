@@ -1,494 +1,324 @@
 from aiogram import types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from typing import List
 import logging
-import time
-
-from app.ui.keyboards import Keyboards
-from app.models import AlertModel
+import json
+from app.userbot.session_manager import SessionManager
 
 logger = logging.getLogger(__name__)
 
 class AlertsHandler:
-    """Handler for alerts configuration"""
+    """Alert configuration handler - now re-enabled"""
     
-    def __init__(self, db, keyboards: Keyboards):
+    def __init__(self, db, keyboards):
         self.db = db
         self.keyboards = keyboards
-        self.alert_model = AlertModel(db)
-        self.cache = {}
-        self.cache_time = {}
-    
-    def is_fresh(self, key, seconds=300):
-        """Check if cache entry is fresh (default 5 minutes)"""
-        return key in self.cache_time and time.time() - self.cache_time[key] < seconds
-    
-    async def get_cached_alert_settings(self):
-        """Get alert settings using caching"""
-        if self.is_fresh("alert_settings"):
-            return self.cache["alert_settings"]
-        
-        import json
-        gains = await self.db.fetchval(
-            "SELECT value FROM settings WHERE key = 'gain_multipliers'"
-        )
-        drop = await self.db.fetchval(
-            "SELECT value FROM settings WHERE key = 'drop_percentage'"
-        )
-        alerts_today = await self.db.fetchval("""
-            SELECT COUNT(*) FROM alerts 
-            WHERE triggered_at > CURRENT_DATE
-        """)
-        
-        settings = {
-            'gains': gains,
-            'drop': drop,
-            'alerts_today': alerts_today or 0
-        }
-        
-        self.cache["alert_settings"] = settings
-        self.cache_time["alert_settings"] = time.time()
-        return settings
-    
-    def clear_cache(self):
-        """Clear all cached data"""
-        self.cache.clear()
-        self.cache_time.clear()
+        logger.info("AlertsHandler enabled - alert configuration available")
     
     async def show_alerts_menu(self, query: types.CallbackQuery):
-        """Display alerts configuration"""
+        """Show alerts configuration menu"""
         try:
-            # Get current settings using cache
-            cached_settings = await self.get_cached_alert_settings()
+            # Get current thresholds
+            gain_settings = await self.db.fetchval("SELECT value FROM settings WHERE key = 'gain_multipliers'")
+            drop_settings = await self.db.fetchval("SELECT value FROM settings WHERE key = 'drop_percentage'")
             
-            import json
-            if cached_settings['gains']:
-                try:
-                    current_gains = json.loads(cached_settings['gains']) if isinstance(cached_settings['gains'], str) else cached_settings['gains']
-                except:
-                    current_gains = [5, 10, 15]
-            else:
-                current_gains = [5, 10, 15]
-            try:
-                drop_pct = float(cached_settings['drop']) if cached_settings['drop'] else 0.70
-            except (ValueError, TypeError):
-                drop_pct = 0.70
+            gain_multipliers = json.loads(gain_settings) if gain_settings else [2, 7, 25]
+            drop_percentage = float(json.loads(drop_settings)) if drop_settings else 0.70
             
-            alerts_today = cached_settings['alerts_today']
+            # Format thresholds display
+            thresholds_text = ", ".join([f"{x}x" for x in sorted(gain_multipliers)])
+            drop_text = f"{drop_percentage*100:.0f}%"
             
             text = (
-                f"<b>🚨 Alerts Configuration</b>\n\n"
-                f"<b>Current Settings:</b>\n"
-                f"├ Gain Thresholds: {', '.join([f'{g}x' for g in current_gains])}\n"
-                f"├ Drop Threshold: {drop_pct*100:.0f}%\n"
-                f"└ Alerts Today: {alerts_today}\n\n"
-                f"<b>How it works:</b>\n"
-                f"• Post /pnl when token hits gain thresholds\n"
-                f"• Stop tracking globally at {drop_pct*100:.0f}% drop\n"
-                f"• Each threshold fires once per token"
+                f"<b>🚨 Alert Configuration</b>\n\n"
+                f"<b>📈 Gain Thresholds:</b>\n"
+                f"├ Current: {thresholds_text}\n"
+                f"└ Triggers /pnl when tokens hit these multipliers\n\n"
+                f"<b>📉 Stop-Loss Threshold:</b>\n"
+                f"├ Current: -{drop_text} from peak\n"
+                f"└ Stops monitoring when tokens drop this much\n\n"
+                f"<b>💡 Status:</b> ✅ Active"
             )
             
-            await query.message.edit_text(
-                text,
-                reply_markup=self.keyboards.alerts_config(current_gains, drop_pct)
-            )
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="📈 Configure Gains", callback_data="alerts:gains"),
+                    InlineKeyboardButton(text="📉 Configure Drop", callback_data="alerts:drop")
+                ],
+                [InlineKeyboardButton(text="🧪 Test Alert", callback_data="alerts:test")],
+                [InlineKeyboardButton(text="🔙 Back", callback_data="menu:main")]
+            ])
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
             
         except Exception as e:
             logger.error(f"Error showing alerts menu: {e}")
-            await query.answer("❌ Error loading alerts configuration")
+            await query.message.edit_text(
+                "❌ Error loading alerts configuration",
+                reply_markup=self.keyboards.back_button("menu:main")
+            )
     
     async def handle_alerts_action(self, query: types.CallbackQuery):
-        """Handle alerts-related callbacks"""
-        parts = query.data.split(':')
-        action = parts[1]
-        
-        if action == 'gains':
-            await self.show_add_gain(query)
-        elif action == 'drop':
-            await self.show_drop_editor(query)
-        elif action == 'add_gain':
-            await self.show_add_gain(query)
-        elif action == 'remove_gain':
-            await self.show_remove_gain(query)
-        elif action == 'set_drop':
-            await self.show_drop_editor(query)
-        elif action == 'per_group':
-            await self.show_per_group_alerts(query)
-        elif action == 'reset_gains':
-            await self.reset_gains_to_default(query)
-    
-    async def show_gains_editor(self, query: types.CallbackQuery):
-        """Show gain thresholds editor"""
+        """Handle alerts configuration actions"""
         try:
-            gains = await self.db.fetchval(
-                "SELECT value FROM settings WHERE key = 'gain_multipliers'"
-            )
-            import json
-            if gains:
-                try:
-                    current_gains = json.loads(gains) if isinstance(gains, str) else gains
-                except:
-                    current_gains = [5, 10, 15]
+            action = query.data.split(':', 1)[1]
+            
+            if action == "gains":
+                await self.show_gains_config(query)
+            elif action == "drop": 
+                await self.show_drop_config(query)
+            elif action == "test":
+                await self.test_alert_system(query)
+            elif action == "menu":
+                await self.show_alerts_menu(query)
             else:
-                current_gains = [5, 10, 15]
+                await query.answer("❌ Unknown action")
+                
+        except Exception as e:
+            logger.error(f"Error handling alerts action: {e}")
+            await query.answer("❌ Error processing action")
+    
+    async def show_gains_config(self, query: types.CallbackQuery):
+        """Show gain thresholds configuration"""
+        try:
+            gain_settings = await self.db.fetchval("SELECT value FROM settings WHERE key = 'gain_multipliers'")
+            gain_multipliers = json.loads(gain_settings) if gain_settings else [2, 7, 25]
+            
+            # Available threshold options
+            available_thresholds = [2, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80, 90, 100]
             
             text = (
-                f"<b>📈 Gain Thresholds</b>\n\n"
-                f"Current: {', '.join([f'{g}x' for g in current_gains])}\n\n"
-                f"These are the multipliers that trigger alerts.\n"
-                f"Each threshold fires once per token."
+                f"<b>📈 Gain Alert Thresholds</b>\n\n"
+                f"<b>Selected:</b> {', '.join([f'{x}x' for x in sorted(gain_multipliers)])}\n\n"
+                f"✅ = Enabled  ❌ = Disabled\n"
+                f"Tap any threshold to toggle on/off:\n\n"
             )
             
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="➕ Add Threshold", callback_data="alerts:add_gain"),
-                    InlineKeyboardButton(text="➖ Remove Threshold", callback_data="alerts:remove_gain")
-                ],
-                [
-                    InlineKeyboardButton(text="🔄 Reset to Default", callback_data="alerts:reset_gains")
-                ],
-                [InlineKeyboardButton(text="🔙 Back", callback_data="menu:alerts")]
-            ])
-            
-            await query.message.edit_text(text, reply_markup=keyboard)
-            
-        except Exception as e:
-            logger.error(f"Error showing gains editor: {e}")
-            await query.answer("❌ Error loading gains settings")
-    
-    async def show_drop_editor(self, query: types.CallbackQuery):
-        """Show drop threshold editor"""
-        try:
-            drop = await self.db.fetchval(
-                "SELECT value FROM settings WHERE key = 'drop_percentage'"
-            )
-            try:
-                drop_pct = float(drop) if drop else 0.70
-            except (ValueError, TypeError):
-                drop_pct = 0.70
-            
-            text = (
-                f"<b>📉 Drop Threshold</b>\n\n"
-                f"Current: {drop_pct*100:.0f}%\n\n"
-                f"When a token drops by this percentage from its peak,\n"
-                f"it will be stopped globally across all groups."
-            )
-            
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="40%", callback_data="drop:set:0.40"),
-                    InlineKeyboardButton(text="50%", callback_data="drop:set:0.50"),
-                    InlineKeyboardButton(text="60%", callback_data="drop:set:0.60")
-                ],
-                [
-                    InlineKeyboardButton(text="70%", callback_data="drop:set:0.70"),
-                    InlineKeyboardButton(text="75%", callback_data="drop:set:0.75"),
-                    InlineKeyboardButton(text="80%", callback_data="drop:set:0.80")
-                ],
-                [
-                    InlineKeyboardButton(text="85%", callback_data="drop:set:0.85"),
-                    InlineKeyboardButton(text="90%", callback_data="drop:set:0.90"),
-                    InlineKeyboardButton(text="95%", callback_data="drop:set:0.95")
-                ],
-                [InlineKeyboardButton(text="🔙 Back", callback_data="menu:alerts")]
-            ])
-            
-            await query.message.edit_text(text, reply_markup=keyboard)
-            
-        except Exception as e:
-            logger.error(f"Error showing drop editor: {e}")
-            await query.answer("❌ Error loading drop settings")
-    
-    async def show_recent_alerts(self, query: types.CallbackQuery):
-        """Show recent alerts"""
-        try:
-            recent_alerts = await self.alert_model.get_recent_alerts(hours=24)
-            
-            text = "<b>🚨 Recent Alerts (24h)</b>\n\n"
-            
-            if not recent_alerts:
-                text += "No alerts in the last 24 hours."
-            else:
-                for alert in recent_alerts[:10]:
-                    address_short = f"{alert['address'][:8]}...{alert['address'][-8:]}"
-                    multiplier = alert['multiplier']
-                    time_str = alert['triggered_at'].strftime('%H:%M')
-                    text += f"• {time_str}: {address_short} hit {multiplier}x\n"
-            
-            await query.message.edit_text(
-                text,
-                reply_markup=self.keyboards.back_button("menu:alerts")
-            )
-            
-        except Exception as e:
-            logger.error(f"Error showing recent alerts: {e}")
-            await query.answer("❌ Error loading recent alerts")
-    
-    async def update_gain_thresholds(self, thresholds: List[int]):
-        """Update gain thresholds in database with validation"""
-        try:
-            # Validate thresholds
-            if not thresholds:
-                raise ValueError("Must have at least one gain threshold")
-            
-            # Ensure all values are positive integers
-            validated = []
-            for t in thresholds:
-                if not isinstance(t, (int, float)) or t <= 0:
-                    raise ValueError(f"Invalid threshold: {t}. Must be positive number")
-                if t > 1000:
-                    raise ValueError(f"Threshold {t} too large. Maximum is 1000x")
-                validated.append(int(t))
-            
-            # Remove duplicates and sort
-            validated = sorted(list(set(validated)))
-            
-            import json
-            await self.db.execute(
-                "INSERT INTO settings (key, value) VALUES ('gain_multipliers', $1) ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()",
-                json.dumps(validated)
-            )
-        except Exception as e:
-            logger.error(f"Error updating gain thresholds: {e}")
-            raise
-    
-    async def update_drop_threshold(self, percentage: float):
-        """Update drop threshold in database with validation"""
-        try:
-            # Validate percentage
-            if not isinstance(percentage, (int, float)):
-                raise ValueError(f"Invalid percentage: {percentage}. Must be a number")
-            
-            if percentage <= 0 or percentage >= 1:
-                raise ValueError(f"Drop percentage {percentage*100:.1f}% invalid. Must be between 1% and 99%")
-            
-            await self.db.execute(
-                "INSERT INTO settings (key, value) VALUES ('drop_percentage', $1) ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()",
-                str(float(percentage))
-            )
-        except Exception as e:
-            logger.error(f"Error updating drop threshold: {e}")
-            raise
-    
-    async def show_add_gain(self, query: types.CallbackQuery):
-        """Show interface to add a new gain threshold"""
-        try:
-            gains = await self.db.fetchval(
-                "SELECT value FROM settings WHERE key = 'gain_multipliers'"
-            )
-            import json
-            if gains:
-                try:
-                    current_gains = json.loads(gains) if isinstance(gains, str) else gains
-                except:
-                    current_gains = [5, 10, 15]
-            else:
-                current_gains = [5, 10, 15]
-            
-            text = (
-                f"<b>📈 Gain Thresholds</b>\n\n"
-                f"Current: {', '.join([f'{g}x' for g in current_gains])}\n\n"
-                f"<b>Add new threshold:</b>"
-            )
-            
-            # Suggest common thresholds that aren't already added
-            all_options = [2, 3, 4, 5, 7, 10, 15, 20, 25, 30, 50, 100]
-            available = [x for x in all_options if x not in current_gains]
-            
+            # Create keyboard with threshold buttons (4 per row)
             keyboard_rows = []
-            for i in range(0, len(available), 4):
+            for i in range(0, len(available_thresholds), 4):
                 row = []
-                for j in range(i, min(i + 4, len(available))):
-                    threshold = available[j]
-                    row.append(InlineKeyboardButton(
-                        text=f"{threshold}x",
-                        callback_data=f"gain:add:{threshold}"
-                    ))
+                for threshold in available_thresholds[i:i+4]:
+                    is_enabled = threshold in gain_multipliers
+                    status = "✅" if is_enabled else "❌"
+                    button_text = f"{status} {threshold}x"
+                    callback_data = f"gains:toggle:{threshold}"
+                    row.append(InlineKeyboardButton(text=button_text, callback_data=callback_data))
                 keyboard_rows.append(row)
             
-            # Add remove options if there are current gains
-            if len(current_gains) > 1:
-                keyboard_rows.append([
-                    InlineKeyboardButton(text="─────── Remove ───────", callback_data="ignore")
-                ])
-                for threshold in current_gains:
-                    keyboard_rows.append([
-                        InlineKeyboardButton(
-                            text=f"🗑️ Remove {threshold}x",
-                            callback_data=f"gain:remove:{threshold}"
-                        )
-                    ])
-            
-            # Reset and back buttons
+            # Add control buttons
             keyboard_rows.extend([
-                [InlineKeyboardButton(text="🔄 Reset to Default", callback_data="alerts:reset_gains")],
-                [InlineKeyboardButton(text="🔙 Back", callback_data="menu:alerts")]
+                [
+                    InlineKeyboardButton(text="🔄 Quick: 2x,5x,10x", callback_data="gains:quick:conservative"),
+                    InlineKeyboardButton(text="🚀 Quick: 2x,25x,100x", callback_data="gains:quick:moon")
+                ],
+                [InlineKeyboardButton(text="🔙 Back", callback_data="alerts:menu")]
             ])
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error showing gains config: {e}")
+            await query.answer("❌ Error loading gains config")
+    
+    async def show_drop_config(self, query: types.CallbackQuery):
+        """Show drop threshold configuration"""  
+        try:
+            drop_settings = await self.db.fetchval("SELECT value FROM settings WHERE key = 'drop_percentage'")
+            drop_percentage = float(json.loads(drop_settings)) if drop_settings else 0.70
+            
+            text = (
+                f"<b>📉 Stop-Loss Configuration</b>\n\n"
+                f"Current: -{drop_percentage*100:.0f}% from peak\n\n"
+                f"When tokens drop this much from their highest multiplier, "
+                f"monitoring will stop to prevent further losses.\n\n"
+                f"<b>Quick Settings:</b>"
+            )
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="-50%", callback_data="drop:set:0.50"),
+                    InlineKeyboardButton(text="-70%", callback_data="drop:set:0.70"),
+                    InlineKeyboardButton(text="-90%", callback_data="drop:set:0.90")
+                ],
+                [InlineKeyboardButton(text="🔙 Back", callback_data="alerts:menu")]
+            ])
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error showing drop config: {e}")
+            await query.answer("❌ Error loading drop config")
+    
+    async def test_alert_system(self, query: types.CallbackQuery):
+        """Test the alert system with a sample token"""
+        try:
+            # Get a sample active token for testing
+            test_token = await self.db.fetchrow("""
+                SELECT * FROM tokens_tracked 
+                WHERE status = 'active' AND first_seen_mc > 0 
+                ORDER BY created_at DESC 
+                LIMIT 1
+            """)
+            
+            if not test_token:
+                await query.answer("❌ No active tokens found for testing")
+                return
+            
+            # Get a working userbot with session string
+            userbot = await self.db.fetchrow("""
+                SELECT id, session_string FROM bots 
+                WHERE kind = 'userbot' AND session_string IS NOT NULL 
+                LIMIT 1
+            """)
+            
+            if not userbot:
+                await query.answer("❌ No userbot available for testing")
+                return
+            
+            # Send test alert directly via userbot client
+            session_manager = SessionManager(userbot['id'], userbot['session_string'])
+            success = await session_manager.initialize_client()
+            
+            if not success:
+                await query.answer("❌ Failed to initialize userbot client")
+                return
+                
+            client = session_manager.get_client()
+            message = f"/pnl {test_token['address']}"
+            target_chat_id = -1001561952101
+            
+            # Send message directly
+            sent_message = await client.send_message(target_chat_id, message)
+            
+            text = (
+                f"<b>🧪 Test Alert SENT</b>\n\n"
+                f"Token: {test_token['address'][:8]}...{test_token['address'][-8:]}\n"
+                f"Command: /pnl {test_token['address']}\n\n"
+                f"✅ Test alert sent directly!\n"
+                f"Message ID: {sent_message.id}"
+            )
             
             await query.message.edit_text(
                 text, 
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+                reply_markup=self.keyboards.back_button("alerts:menu")
             )
             
+            logger.info(f"Test alert sent directly for token {test_token['address'][:8]}... (msg_id: {sent_message.id})")
+            
         except Exception as e:
-            logger.error(f"Error showing add gain: {e}")
-            await query.answer("❌ Error loading add gain interface")
+            logger.error(f"Error testing alert system: {e}")
+            await query.answer("❌ Error sending test alert")
     
-    async def show_remove_gain(self, query: types.CallbackQuery):
-        """Show interface to remove a gain threshold"""
+    async def handle_gains_preset(self, query: types.CallbackQuery):
+        """Handle gain configuration actions"""
         try:
-            gains = await self.db.fetchval(
-                "SELECT value FROM settings WHERE key = 'gain_multipliers'"
-            )
-            import json
-            if gains:
-                try:
-                    current_gains = json.loads(gains) if isinstance(gains, str) else gains
-                except:
-                    current_gains = [5, 10, 15]
-            else:
-                current_gains = [5, 10, 15]
+            logger.info(f"[DEBUG] Gains handler called with: {query.data}")
+            parts = query.data.split(':')
+            action = parts[1]
+            logger.info(f"[DEBUG] Action: {action}, Parts: {parts}")
             
-            if len(current_gains) <= 1:
-                await query.answer("❌ Must have at least one gain threshold")
-                return
+            # Get current settings
+            gain_settings = await self.db.fetchval("SELECT value FROM settings WHERE key = 'gain_multipliers'")
+            current_multipliers = json.loads(gain_settings) if gain_settings else [2, 7, 25]
             
-            text = (
-                f"<b>➖ Remove Gain Threshold</b>\n\n"
-                f"Select a threshold to remove:"
-            )
-            
-            keyboard_rows = []
-            for threshold in current_gains:
-                keyboard_rows.append([
-                    InlineKeyboardButton(
-                        text=f"Remove {threshold}x",
-                        callback_data=f"gain:remove:{threshold}"
-                    )
-                ])
-            
-            keyboard_rows.append([
-                InlineKeyboardButton(text="🔙 Back", callback_data="alerts:gains")
-            ])
-            
-            await query.message.edit_text(
-                text,
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
-            )
+            if action == "toggle":
+                logger.info(f"[DEBUG] Executing toggle branch")
+                # Toggle individual threshold
+                threshold = int(parts[2])
+                logger.info(f"[DEBUG] Threshold: {threshold}")
+                if threshold in current_multipliers:
+                    current_multipliers.remove(threshold)
+                    status_msg = f"❌ Disabled {threshold}x alerts"
+                else:
+                    current_multipliers.append(threshold)
+                    status_msg = f"✅ Enabled {threshold}x alerts"
+                
+                logger.info(f"[DEBUG] New multipliers: {current_multipliers}")
+                
+                # Save changes immediately
+                await self.db.execute("""
+                    INSERT INTO settings (key, value, updated_at) 
+                    VALUES ('gain_multipliers', $1, NOW())
+                    ON CONFLICT (key) DO UPDATE SET 
+                        value = $1, updated_at = NOW()
+                """, json.dumps(current_multipliers))
+                
+                logger.info(f"[DEBUG] Saved to database successfully")
+                await query.answer(status_msg)
+                await self.show_gains_config(query)
+                
+            elif action == "quick":
+                logger.info(f"[DEBUG] Executing quick branch")
+                # Quick preset selection
+                preset = parts[2]
+                logger.info(f"[DEBUG] Preset: {preset}")
+                presets = {
+                    'conservative': [2, 5, 10],
+                    'moon': [2, 25, 100]
+                }
+                
+                if preset in presets:
+                    multipliers = presets[preset]
+                    logger.info(f"[DEBUG] Setting multipliers to: {multipliers}")
+                    
+                    # Save immediately
+                    await self.db.execute("""
+                        INSERT INTO settings (key, value, updated_at) 
+                        VALUES ('gain_multipliers', $1, NOW())
+                        ON CONFLICT (key) DO UPDATE SET 
+                            value = $1, updated_at = NOW()
+                    """, json.dumps(multipliers))
+                    
+                    logger.info(f"[DEBUG] Quick preset saved successfully")
+                    await query.answer(f"✅ Quick set: {', '.join([f'{x}x' for x in multipliers])}")
+                    await self.show_gains_config(query)
+                else:
+                    logger.error(f"[DEBUG] Unknown preset: {preset}")
+                    
+            elif action == "preset":
+                # Legacy preset support
+                preset = parts[2]
+                presets = {
+                    'conservative': [2, 5, 10],
+                    'aggressive': [2, 7, 25], 
+                    'moon': [5, 20, 100]
+                }
+                
+                if preset in presets:
+                    multipliers = presets[preset]
+                    await self.db.execute("""
+                        INSERT INTO settings (key, value, updated_at) 
+                        VALUES ('gain_multipliers', $1, NOW())
+                        ON CONFLICT (key) DO UPDATE SET 
+                            value = $1, updated_at = NOW()
+                    """, json.dumps(multipliers))
+                    
+                    await query.answer(f"✅ Set to {preset}: {', '.join([f'{x}x' for x in multipliers])}")
+                    await self.show_gains_config(query)
             
         except Exception as e:
-            logger.error(f"Error showing remove gain: {e}")
-            await query.answer("❌ Error loading remove gain interface")
+            logger.error(f"[DEBUG] Exception in gains handler: {e}")
+            logger.error(f"[DEBUG] Callback data was: {query.data}")
+            await query.answer("❌ Error setting preset")
     
-    async def show_per_group_alerts(self, query: types.CallbackQuery):
-        """Show per-group alerts configuration"""
+    async def handle_drop_setting(self, callback_data: str, query: types.CallbackQuery):
+        """Handle drop threshold setting"""
         try:
-            # Get groups with their alert settings  
-            groups = await self.db.fetch("""
-                SELECT g.*, 
-                       s1.value as gain_overrides_raw,
-                       s2.value as drop_override_raw
-                FROM groups g
-                LEFT JOIN settings s1 ON s1.key = 'group_' || g.id || '_gains'
-                LEFT JOIN settings s2 ON s2.key = 'group_' || g.id || '_drop'
-                WHERE g.enabled = true
-                ORDER BY g.title
-            """)
+            threshold = float(callback_data.split(':')[2])
             
-            text = "<b>🎯 Per-Group Alert Settings</b>\n\n"
+            # Update settings
+            await self.db.execute("""
+                INSERT INTO settings (key, value, updated_at) 
+                VALUES ('drop_percentage', $1, NOW())
+                ON CONFLICT (key) DO UPDATE SET 
+                    value = $1, updated_at = NOW()
+            """, json.dumps(threshold))
             
-            if not groups:
-                text += "No active groups found."
-            else:
-                text += "Configure different alert thresholds per group:\n\n"
-                
-                # Get global defaults
-                global_gains = await self.db.fetchval(
-                    "SELECT value FROM settings WHERE key = 'gain_multipliers'"
-                )
-                global_drop = await self.db.fetchval(
-                    "SELECT value FROM settings WHERE key = 'drop_percentage'"
-                )
-                
-                import json
-                default_gains = [5, 10, 15]
-                if global_gains:
-                    try:
-                        default_gains = json.loads(global_gains) if isinstance(global_gains, str) else global_gains
-                    except:
-                        pass
-                
-                default_drop = 0.70
-                if global_drop:
-                    try:
-                        default_drop = float(global_drop)
-                    except:
-                        pass
-                
-                for group in groups[:5]:  # Limit display
-                    title = group['title'] or f"Chat {group['tg_chat_id']}"
-                    
-                    # Parse group-specific gains or use global default
-                    group_gains = default_gains
-                    if group['gain_overrides_raw']:
-                        try:
-                            if isinstance(group['gain_overrides_raw'], str):
-                                group_gains = json.loads(group['gain_overrides_raw'])
-                            elif isinstance(group['gain_overrides_raw'], list):
-                                group_gains = group['gain_overrides_raw']
-                            else:
-                                # Handle other types by converting to list
-                                group_gains = list(group['gain_overrides_raw']) if group['gain_overrides_raw'] else default_gains
-                        except (json.JSONDecodeError, TypeError) as e:
-                            logger.error(f"Error parsing group gains for group {group['id']}: {e}")
-                            group_gains = default_gains
-                    
-                    # Parse group-specific drop or use global default  
-                    group_drop = default_drop
-                    if group['drop_override_raw']:
-                        try:
-                            group_drop = float(group['drop_override_raw'])
-                        except:
-                            pass
-                    
-                    # Ensure gains are integers and format properly
-                    try:
-                        gains = ', '.join([f"{int(g)}x" for g in group_gains if isinstance(g, (int, float, str)) and str(g).replace('.','').isdigit()])
-                    except (ValueError, TypeError):
-                        gains = "5x, 10x, 15x"  # Fallback
-                    drop = f"{group_drop*100:.0f}%"
-                    text += f"<b>{title}</b>\n├ Gains: {gains}\n└ Drop: {drop}\n\n"
-            
-            keyboard_rows = []
-            for group in groups[:5]:
-                title = group['display_name'] or group['title'] or f"ID: {group['tg_chat_id']}"
-                keyboard_rows.append([
-                    InlineKeyboardButton(
-                        text=f"⚙️ {title}",
-                        callback_data=f"group_alerts:{group['id']}"
-                    )
-                ])
-            
-            keyboard_rows.append([
-                InlineKeyboardButton(text="🔙 Back", callback_data="menu:alerts")
-            ])
-            
-            await query.message.edit_text(
-                text,
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
-            )
+            await query.answer(f"✅ Stop-loss set to -{threshold*100:.0f}%")
+            await self.show_drop_config(query)
             
         except Exception as e:
-            logger.error(f"Error showing per-group alerts: {e}")
-            await query.answer("❌ Error loading per-group alerts")
-    
-    async def reset_gains_to_default(self, query: types.CallbackQuery):
-        """Reset gain thresholds to default values"""
-        try:
-            default_gains = [5, 10, 15]
-            await self.update_gain_thresholds(default_gains)
-            await query.answer("✅ Reset gains to default: 5x, 10x, 15x")
-            await self.show_add_gain(query)
-        except Exception as e:
-            logger.error(f"Error resetting gains: {e}")
-            await query.answer("❌ Error resetting gains")
+            logger.error(f"Error setting drop threshold: {e}")
+            await query.answer("❌ Error setting threshold")

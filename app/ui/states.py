@@ -22,10 +22,6 @@ class ManagementStates(StatesGroup):
     userbot_login_2fa = State()
     userbot_set_name = State()
     
-    # Alerts
-    adding_gain_threshold = State()
-    setting_drop_percentage = State()
-    custom_drop_input = State()
     
     # Targets
     adding_target = State()

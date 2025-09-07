@@ -17,9 +17,7 @@ class Keyboards:
                 InlineKeyboardButton(text="🤖 Userbots", callback_data="menu:userbots")
             ],
             [
-                InlineKeyboardButton(text="📡 Sources", callback_data="menu:sources")
-            ],
-            [
+                InlineKeyboardButton(text="📡 Sources", callback_data="menu:sources"),
                 InlineKeyboardButton(text="🚨 Alerts", callback_data="menu:alerts")
             ],
             [
@@ -129,20 +127,6 @@ class Keyboards:
         ])
         
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
-    
-    @staticmethod
-    def alerts_config(current_gains: List[int], drop_pct: float) -> InlineKeyboardMarkup:
-        """Alerts configuration menu"""
-        gains_text = ", ".join([f"{g}x" for g in current_gains])
-        
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"📈 Gains: {gains_text}", callback_data="alerts:gains")],
-            [InlineKeyboardButton(text=f"📉 Drop: {drop_pct*100:.0f}%", callback_data="alerts:drop")],
-            [
-                InlineKeyboardButton(text="⚙️ Per-Group", callback_data="alerts:per_group")
-            ],
-            [InlineKeyboardButton(text="🔙 Back", callback_data="menu:main")]
-        ])
     
     @staticmethod
     def confirm_action(action: str, item_id: Any) -> InlineKeyboardMarkup:

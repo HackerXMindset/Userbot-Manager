@@ -20,7 +20,6 @@ from app.db import db
 from app.logging_conf import setup_logging
 from app.management_bot import ManagementBot
 from app.scheduler import Scheduler
-from app.alerts import AlertSystem
 from app.events import EventRouter
 from app.dex import get_dex_service
 from app.userbot_worker import UserbotManager
@@ -54,8 +53,6 @@ class SystemManager:
             # DexScreener service
             self.components['dex_service'] = get_dex_service()
             
-            # Alert system
-            self.components['alert_system'] = AlertSystem()
             
             # Scheduler
             self.components['scheduler'] = Scheduler()
@@ -85,7 +82,6 @@ class SystemManager:
             start_order = [
                 'event_router',
                 'dex_service', 
-                'alert_system',
                 'scheduler',
                 'userbot_manager'
             ]
@@ -129,7 +125,6 @@ class SystemManager:
             stop_order = [
                 'userbot_manager',
                 'scheduler',
-                'alert_system', 
                 'dex_service',
                 'event_router'
             ]
