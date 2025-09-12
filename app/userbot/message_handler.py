@@ -273,7 +273,7 @@ class MessageHandler:
                         await db.execute("""
                             INSERT INTO pnl_tracked_messages (rule_id, original_message_id, chat_id, sender_id, status)
                             VALUES ($1, $2, $3, $4, 'tracking')
-                            ON CONFLICT (original_message_id, chat_id) DO NOTHING
+                            ON CONFLICT (original_message_id, chat_id, rule_id) DO NOTHING
                         """, rule['id'], event.message.id, event.chat_id, event.sender_id)
                         
                         logger.info(f"[MessageHandler] Successfully tracking /pnl command: "
