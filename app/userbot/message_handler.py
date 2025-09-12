@@ -225,6 +225,17 @@ class MessageHandler:
         except Exception as e:
             logger.error(f"Error handling source message: {e}")
 
+    async def _get_cached_pnl_rules(self, group_id: int, seconds: int = 60) -> List[Dict[str, Any]]:
+        """Get PNL forwarding rules for a group, with caching."""
+        cache_key = f"pnl_rules_{group_id}"
+        if self.is_fresh(cache_key, seconds=seconds):
+            return self.cache[cache_key]
+
+        rules = await self.pnl_model.get_enabled_rules_for_group(group_id)
+        self.cache[cache_key] = rules
+        self.cache_time[cache_key] = time.time()
+        return rules
+
     async def _handle_pnl_command(self, event):
         """Handle /pnl commands in monitored source groups with comprehensive debugging."""
         try:
@@ -237,7 +248,7 @@ class MessageHandler:
                 logger.debug(f"[MessageHandler] No group found for chat {event.chat_id}, ignoring /pnl command")
                 return
 
-            rules = await self.pnl_model.get_enabled_rules_for_group(group['id'])
+            rules = await self._get_cached_pnl_rules(group['id'])
             logger.debug(f"[MessageHandler] Found {len(rules)} enabled rules for chat {event.chat_id}")
             
             if not rules:
@@ -250,6 +261,11 @@ class MessageHandler:
                 logger.debug(f"[MessageHandler] Rule {rule['id']} allowed users: {allowed_users}")
                 
                 if not allowed_users or event.sender_id in allowed_users:
+                    # Only the designated userbot should track the command
+                    if self.userbot_id != rule.get('forwarding_userbot_id'):
+                        logger.debug(f"[MessageHandler] Skipping /pnl tracking for rule {rule['id']}: not the designated userbot")
+                        continue
+
                     logger.info(f"[MessageHandler] User {event.sender_id} authorized for rule {rule['id']}, tracking /pnl command")
                     
                     try:
@@ -286,44 +302,45 @@ class MessageHandler:
                         f"sender_id={event.sender_id}, reply_to={event.message.reply_to_msg_id}")
             
             # Check if this is a reply to a tracked /pnl message
-            tracked = await db.fetchrow("""
+            tracked_messages = await db.fetch("""
                 SELECT * FROM pnl_tracked_messages 
                 WHERE original_message_id = $1 AND chat_id = $2 AND status = 'tracking'
                 AND created_at > NOW() - INTERVAL '3 minutes'
             """, event.message.reply_to_msg_id, event.chat_id)
             
-            if not tracked:
+            if not tracked_messages:
                 return  # Not replying to a tracked /pnl message
             
-            logger.debug(f"[MessageHandler] Found tracked PNL message {tracked['id']} for reply")
+            logger.debug(f"[MessageHandler] Found {len(tracked_messages)} tracked PNL messages for reply")
             
-            # Get the rule
-            rule = await self.pnl_model.get_by_id(tracked['rule_id'])
-            if not rule or not rule['enabled']:
-                return
-            
-            # Only designated userbot should attempt forwarding
-            if self.userbot_id != rule.get('forwarding_userbot_id'):
-                logger.debug(f"[MessageHandler] Userbot {self.userbot_id} not designated for rule {rule['id']} (need {rule.get('forwarding_userbot_id')})")
-                return
-            
-            # Filter out flex generation messages
-            if "💪 Generating flex.." in event.message.text:
-                logger.debug(f"[MessageHandler] Skipping flex generation message {event.message.id}")
-                return
-            
-            allowed_reply_users = rule.get('allowed_reply_user_ids', [])
-            
-            if not allowed_reply_users or event.sender_id in allowed_reply_users:
-                logger.info(f"[MessageHandler] Valid PNL reply detected from user {event.sender_id}, forwarding immediately")
+            for tracked in tracked_messages:
+                # Get the rule
+                rule = await self.pnl_model.get_by_id(tracked['rule_id'])
+                if not rule or not rule['enabled']:
+                    continue
                 
-                # Forward the message using the designated forwarding userbot
-                success = await self._forward_pnl_reply(rule, event.message)
-                if success:
-                    logger.info(f"[MessageHandler] Successfully forwarded PNL reply {event.message.id} for tracking {tracked['id']}")
-                else:
-                    logger.error(f"[MessageHandler] Failed to forward PNL reply {event.message.id} for tracking {tracked['id']}")
+                # Only designated userbot should attempt forwarding
+                if self.userbot_id != rule.get('forwarding_userbot_id'):
+                    logger.debug(f"[MessageHandler] Userbot {self.userbot_id} not designated for rule {rule['id']} (need {rule.get('forwarding_userbot_id')})")
+                    continue
+                
+                # Filter out flex generation messages
+                if "💪 Generating flex.." in event.message.text:
+                    logger.debug(f"[MessageHandler] Skipping flex generation message {event.message.id}")
+                    continue
+                
+                allowed_reply_users = rule.get('allowed_reply_user_ids', [])
+                
+                if not allowed_reply_users or event.sender_id in allowed_reply_users:
+                    logger.info(f"[MessageHandler] Valid PNL reply detected from user {event.sender_id}, forwarding immediately for rule {rule['id']}")
                     
+                    # Forward the message using the designated forwarding userbot
+                    success = await self._forward_pnl_reply(rule, event.message)
+                    if success:
+                        logger.info(f"[MessageHandler] Successfully forwarded PNL reply {event.message.id} for tracking {tracked['id']}")
+                    else:
+                        logger.error(f"[MessageHandler] Failed to forward PNL reply {event.message.id} for tracking {tracked['id']}")
+                        
         except Exception as e:
             logger.error(f"[MessageHandler] Error handling potential PNL reply: {e}")
             logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
