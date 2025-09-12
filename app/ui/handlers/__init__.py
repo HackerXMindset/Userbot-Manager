@@ -7,6 +7,7 @@ from .schedules import SchedulesHandler
 from .targets import TargetsHandler
 from .sources import SourcesHandler
 from .alerts import AlertsHandler
+from .pnl import PnlHandler
 
 __all__ = [
     "MenuHandler",
@@ -15,5 +16,6 @@ __all__ = [
     "SchedulesHandler",
     "TargetsHandler",
     "SourcesHandler",
-    "AlertsHandler"
+    "AlertsHandler",
+    "PnlHandler",
 ]

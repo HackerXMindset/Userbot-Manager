@@ -16,7 +16,7 @@ from app.ui.keyboards import Keyboards
 from app.ui.states import ManagementStates
 from app.ui.handlers import (
     MenuHandler, GroupsHandler, UserbotsHandler, 
-    SchedulesHandler, SourcesHandler, AlertsHandler
+    SchedulesHandler, SourcesHandler, AlertsHandler, PnlHandler
 )
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,7 @@ class ManagementBot:
         self.schedules_handler = SchedulesHandler(db, self.keyboards)
         self.sources_handler = SourcesHandler(db, self.keyboards)
         self.alerts_handler = AlertsHandler(db, self.keyboards)
+        self.pnl_handler = PnlHandler(db, self.keyboards)
         
         self.setup_handlers()
     
@@ -133,6 +134,15 @@ class ManagementBot:
             F.data.startswith('drop:'),
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
+
+        # PNL
+        self.dp.callback_query.register(
+            self.pnl_handler.handle_pnl_action,
+            F.data.startswith('pnl:'),
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        
         
         # Schedule management (schedule:add, schedule:delete)
         self.dp.callback_query.register(
@@ -227,6 +237,26 @@ class ManagementBot:
             ManagementStates.source_set_name,
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
+
+        self.dp.message.register(
+            self.pnl_handler.wizard_process_user_id_input,
+            ManagementStates.pnl_add_monitored_user_id,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.pnl_handler.wizard_process_destination_input,
+            ManagementStates.pnl_add_rule_destination,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.pnl_handler.wizard_process_user_id_input,
+            ManagementStates.pnl_add_replying_user_id,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        
         
         
         # Custom schedule input handlers
@@ -287,6 +317,8 @@ class ManagementBot:
             await self.alerts_handler.show_alerts_menu(query)
         elif action == 'tracking':
             await self.menu_handler.show_tracking_menu(query)
+        elif action == 'pnl':
+            await self.pnl_handler.show_rules_list(query)
         elif action == 'close':
             await query.message.delete()
         
@@ -339,27 +371,35 @@ class ManagementBot:
         """Actually perform the cleanup"""
         try:
             # Count items to be cleaned
-            stopped_tokens = await db.fetchval("""
+            stopped_tokens = await db.fetchval(
+                """
                 SELECT COUNT(*) FROM tokens_tracked 
                 WHERE status = 'stopped' AND first_seen_at < NOW() - INTERVAL '1 day'
-            """)
+                """
+            )
             
-            old_calls = await db.fetchval("""
+            old_calls = await db.fetchval(
+                """
                 SELECT COUNT(*) FROM calls 
                 WHERE status != 'sent' AND created_at < NOW() - INTERVAL '7 days'
-            """)
+                """
+            )
             
             
             # Perform cleanup
-            await db.execute("""
+            await db.execute(
+                """
                 DELETE FROM tokens_tracked 
                 WHERE status = 'stopped' AND first_seen_at < NOW() - INTERVAL '1 day'
-            """)
+                """
+            )
             
-            await db.execute("""
+            await db.execute(
+                """
                 DELETE FROM calls 
                 WHERE status != 'sent' AND created_at < NOW() - INTERVAL '7 days'
-            """)
+                """
+            )
             
             
             total_cleaned = stopped_tokens + old_calls
@@ -1273,10 +1313,12 @@ class ManagementBot:
     
     async def _create_custom_schedule(self, group_id: int, days: list, start_time, end_time, max_calls):
         """Helper to create custom schedule in database"""
-        await db.execute("""
-            INSERT INTO group_schedules (group_id, start_time, end_time, weekdays, max_calls_in_window)
+        await db.execute (
+            """INSERT INTO group_schedules (group_id, start_time, end_time, weekdays, max_calls_in_window)
             VALUES ($1, $2, $3, $4, $5)
-        """, group_id, start_time, end_time, days, max_calls)
+            """,
+            group_id, start_time, end_time, days, max_calls
+        )
     
     async def create_schedule_from_template(self, query: types.CallbackQuery, group_id: int, template: str):
         """Create a schedule from a predefined template"""
@@ -1303,11 +1345,13 @@ class ManagementBot:
             end_time = time.fromisoformat(template_data['end'])
             
             # Create the schedule in database
-            await db.execute("""
-                INSERT INTO group_schedules (group_id, start_time, end_time, weekdays, max_calls_in_window)
+            await db.execute (
+                """INSERT INTO group_schedules (group_id, start_time, end_time, weekdays, max_calls_in_window)
                 VALUES ($1, $2, $3, $4, $5)
-            """, group_id, start_time, end_time, 
-                template_data['weekdays'], None)
+                """,
+                group_id, start_time, end_time, 
+                template_data['weekdays'], None
+            )
             
             # Get group info for confirmation
             group = await db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
@@ -1344,12 +1388,14 @@ class ManagementBot:
         """Confirm schedule deletion"""
         try:
             # Get schedule info
-            schedule = await db.fetchrow("""
-                SELECT s.*, g.title as group_title, g.tg_chat_id, g.id as group_id
+            schedule = await db.fetchrow (
+                """SELECT s.*, g.title as group_title, g.tg_chat_id, g.id as group_id
                 FROM group_schedules s
                 JOIN groups g ON g.id = s.group_id
                 WHERE s.id = $1
-            """, schedule_id)
+                """,
+                schedule_id
+            )
             
             if not schedule:
                 await query.answer("❌ Schedule not found")
@@ -1381,12 +1427,14 @@ class ManagementBot:
         """Actually delete the schedule"""
         try:
             # Get schedule and group info before deletion
-            schedule = await db.fetchrow("""
-                SELECT s.*, g.id as group_id 
+            schedule = await db.fetchrow (
+                """SELECT s.*, g.id as group_id 
                 FROM group_schedules s
                 JOIN groups g ON g.id = s.group_id
                 WHERE s.id = $1
-            """, schedule_id)
+                """,
+                schedule_id
+            )
             
             if not schedule:
                 await query.answer("❌ Schedule not found")
@@ -1427,13 +1475,14 @@ class ManagementBot:
     async def show_quotas_menu(self, query: types.CallbackQuery):
         """Show quotas overview"""
         try:
-            groups = await db.fetch("""
-                SELECT g.*, 
+            groups = await db.fetch (
+                """SELECT g.*, 
                        (SELECT COUNT(*) FROM calls WHERE group_id = g.id AND sent_at > CURRENT_DATE) as calls_today
                 FROM groups g
                 WHERE g.enabled = true
                 ORDER BY g.title
-            """)
+                """
+            )
             
             text = "<b>📦 Daily Quotas</b>\n\n"
             
@@ -1672,10 +1721,12 @@ class ManagementBot:
             text += f"Chat ID: <code>{source['source_chat_id']}</code>\n"
             
             keyboard_rows = [
-                [InlineKeyboardButton(
-                    text="🔄 Toggle Enable/Disable",
-                    callback_data=f"sources:toggle:{source_id}"
-                )]
+                [
+                    InlineKeyboardButton(
+                        text="🔄 Toggle Enable/Disable",
+                        callback_data=f"sources:toggle:{source_id}"
+                    )
+                ]
             ]
             
             if source['source_type'] == 'group':
@@ -1687,10 +1738,12 @@ class ManagementBot:
                 ])
             
             keyboard_rows.extend([
-                [InlineKeyboardButton(
-                    text="🗑️ Remove Source",
-                    callback_data=f"sources:remove:{source_id}"
-                )],
+                [
+                    InlineKeyboardButton(
+                        text="🗑️ Remove Source",
+                        callback_data=f"sources:remove:{source_id}"
+                    )
+                ],
                 [InlineKeyboardButton(text="🔙 Back", callback_data="sources:manage")]
             ])
             

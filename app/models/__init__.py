@@ -5,6 +5,7 @@ from .bot import BotModel
 from .group import GroupModel, ScheduleModel
 from .token import TokenModel
 from .event import EventModel
+from .pnl_forwarding import PnlForwardingRuleModel
 
 __all__ = [
     "BaseModel",
@@ -13,4 +14,5 @@ __all__ = [
     "ScheduleModel",
     "TokenModel",
     "EventModel",
+    "PnlForwardingRuleModel",
 ]

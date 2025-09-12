@@ -11,6 +11,7 @@ from app.models import BotModel, GroupModel
 from .session_manager import SessionManager
 from .message_handler import MessageHandler
 from .event_processor import EventProcessor
+from .pnl_tracker import PnlTracker
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ class UserbotWorker:
         self.session_manager = SessionManager(userbot_id, session_string)
         self.message_handler = MessageHandler(userbot_id, self.session_manager)
         self.event_processor = EventProcessor(userbot_id)
+        self.pnl_tracker = PnlTracker(userbot_id, self.session_manager)
     
     async def start(self):
         """Start the userbot worker"""
@@ -52,6 +54,9 @@ class UserbotWorker:
             
             # Setup message handlers
             await self.message_handler.setup_event_handlers(assigned_groups)
+            
+            # Start PNL tracker
+            await self.pnl_tracker.start()
             
             # Update bot status
             await self.bot_model.set_status(self.userbot_id, 'active')
@@ -90,6 +95,9 @@ class UserbotWorker:
         
         try:
             self.running = False
+            
+            # Stop PNL tracker
+            await self.pnl_tracker.stop()
             
             # Disconnect session
             await self.session_manager.disconnect_client()

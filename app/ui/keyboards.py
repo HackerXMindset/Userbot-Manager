@@ -21,6 +21,9 @@ class Keyboards:
                 InlineKeyboardButton(text="🚨 Alerts", callback_data="menu:alerts")
             ],
             [
+                InlineKeyboardButton(text="💸 PNL Forwarding", callback_data="menu:pnl"),
+            ],
+            [
                 InlineKeyboardButton(text="❌ Close", callback_data="menu:close")
             ]
         ])
@@ -92,7 +95,7 @@ class Keyboards:
                 ],
                 [
                     InlineKeyboardButton(text="✅ Continue", callback_data=f"sched:next:{group_id}"),
-                    InlineKeyboardButton(text="❌ Cancel", callback_data=f"group:schedules:{group_id}")
+                    InlineKeyboardButton(text="❌ Cancel", callback_data=f"group:schedules:{group['id']}")
                 ]
             ])
         
@@ -184,3 +187,133 @@ class Keyboards:
             buttons.append(InlineKeyboardButton(text="➡️", callback_data=f"{prefix}:page:{page+1}"))
         
         return buttons
+
+    @staticmethod
+    def pnl_rules_list(rules: List[Dict]) -> InlineKeyboardMarkup:
+        keyboard = []
+        for rule in rules[:10]:
+            status = "✅" if rule['enabled'] else "❌"
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"{status} {rule['source_group_title']} -> {rule['destination_channel_title']}",
+                    callback_data=f"pnl:view:{rule['id']}"
+                )
+            ])
+        keyboard.append([InlineKeyboardButton(text="➕ Add New Rule", callback_data="pnl:add")])
+        keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data="menu:main")])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def pnl_rule_details_menu(rule: Dict) -> InlineKeyboardMarkup:
+        status_btn = InlineKeyboardButton(
+            text="🔴 Disable" if rule['enabled'] else "🟢 Enable",
+            callback_data=f"pnl:toggle:{rule['id']}"
+        )
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [status_btn],
+            [
+                InlineKeyboardButton(text="👥 Manage Command Users", callback_data=f"pnl:manage_command_users:{rule['id']}"),
+            ],
+            [
+                InlineKeyboardButton(text="👥 Manage Reply Users", callback_data=f"pnl:manage_reply_users:{rule['id']}")
+            ],
+            [InlineKeyboardButton(text="🤖 Set Forwarding Bot", callback_data=f"pnl:set_fwd_bot:{rule['id']}")],
+            [InlineKeyboardButton(text="🗑️ Delete Rule", callback_data=f"pnl:delete:{rule['id']}")],
+            [InlineKeyboardButton(text="🔙 Back to List", callback_data="pnl:list")]
+        ])
+
+    @staticmethod
+    def pnl_select_source_group_keyboard(groups: List[Dict]) -> InlineKeyboardMarkup:
+        keyboard = []
+        for group in groups:
+            display_name = (group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}")[:20]
+            keyboard.append([
+                InlineKeyboardButton(text=display_name, callback_data=f"pnl:wizard_source_group:{group['id']}")
+            ])
+        keyboard.append([InlineKeyboardButton(text="❌ Cancel", callback_data="pnl:list")])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def pnl_manage_users_keyboard(user_ids: List[int], user_type: str, rule_id: int = None) -> InlineKeyboardMarkup:
+        keyboard = []
+        for user_id in user_ids:
+            keyboard.append([
+                InlineKeyboardButton(text=f"🗑️ Remove {user_id}", callback_data=f"pnl:wizard_remove_{user_type}:{user_id}")
+            ])
+        
+        add_callback = f"pnl:wizard_add_{user_type}"
+        
+        keyboard.append([InlineKeyboardButton(text=f"➕ Add {user_type.replace('_', ' ').title()}", callback_data=add_callback)])
+        
+        if rule_id:
+            keyboard.append([InlineKeyboardButton(text="🔙 Back to Rule", callback_data=f"pnl:view:{rule_id}")])
+        else:
+            next_callback = f"pnl:wizard_next_to_fwd_bot" if user_type == "monitored" else f"pnl:wizard_next_to_summary"
+            keyboard.append([InlineKeyboardButton(text="➡️ Continue", callback_data=next_callback)])
+            keyboard.append([InlineKeyboardButton(text="❌ Cancel", callback_data="pnl:list")])
+            
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def pnl_select_forwarding_bot_keyboard(userbots: List[Dict]) -> InlineKeyboardMarkup:
+        keyboard = []
+        for bot in userbots:
+            keyboard.append([
+                InlineKeyboardButton(text=(bot.get('display_name') or bot['session_name']), callback_data=f"pnl:wizard_fwd_bot:{bot['id']}")
+            ])
+        keyboard.append([InlineKeyboardButton(text="❌ Cancel", callback_data="pnl:list")])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def pnl_confirm_delete(rule_id: int) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Yes, Delete", callback_data=f"pnl:confirm_delete:{rule_id}"),
+                InlineKeyboardButton(text="❌ Cancel", callback_data=f"pnl:view:{rule_id}")
+            ]
+        ])
+
+    @staticmethod
+    def pnl_rule_summary_keyboard() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Save Rule", callback_data="pnl:wizard_save")],
+            [InlineKeyboardButton(text="❌ Cancel", callback_data="pnl:list")]
+        ])
+
+    @staticmethod
+    def pnl_rule_details_text(rule: Dict, source_group: Dict, dest_channel_info: Dict, fwd_bot: Dict) -> str:
+        status = '✅ Enabled' if rule['enabled'] else '❌ Disabled'
+        
+        source_title = source_group['title'] if source_group else 'N/A'
+        dest_title = dest_channel_info['title']
+        bot_name = fwd_bot['display_name'] if fwd_bot else 'Not Set'
+        
+        command_users = rule.get('allowed_pnl_command_user_ids', []) or []
+        reply_users = rule.get('allowed_reply_user_ids', []) or []
+
+        text = (
+            f"<b>💸 PNL Forwarding Rule Details</b>\n\n"
+            f"<b>Status: {status}</b>\n\n"
+            f"<b>Source Group:</b>\n"
+            f"  └ {source_title}\n\n"
+            f"<b>Destination Channel:</b>\n"
+            f"  └ {dest_title}\n\n"
+            f"<b>Forwarding Userbot:</b>\n"
+            f"  └ {bot_name}\n\n"
+            f"<b>Permissions:</b>\n"
+            f"  ├ <b>Command Users:</b> {len(command_users) if command_users else 'Anyone'}\n"
+            f"  └ <b>Reply Users:</b> {len(reply_users) if reply_users else 'Anyone'}"
+        )
+        
+        # Optionally, list some of the user IDs
+        if command_users:
+            text += "\n\n<b>Command User IDs:</b>\n" + ", ".join(map(str, command_users[:5]))
+            if len(command_users) > 5:
+                text += "..."
+        
+        if reply_users:
+            text += "\n\n<b>Reply User IDs:</b>\n" + ", ".join(map(str, reply_users[:5]))
+            if len(reply_users) > 5:
+                text += "..."
+                
+        return text

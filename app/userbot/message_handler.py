@@ -4,17 +4,22 @@ Message Handler - Handles message processing and event routing
 
 import logging
 import time
+import traceback
 from typing import Dict, Any, List, Optional
 from telethon import events
 
 from app.db import db
-from app.models import BotModel, GroupModel, ScheduleModel
+from app.models import BotModel, GroupModel, ScheduleModel, PnlForwardingRuleModel
 from .token_monitor import TokenMonitor
 from .call_executor import CallExecutor
 from .source_manager import SourceManager
 from .utils import UserbotUtils
+from telethon.tl.types import PeerChannel, PeerChat, PeerUser
 
 logger = logging.getLogger(__name__)
+
+# Set detailed logging for message handler PNL operations
+logging.getLogger(__name__).setLevel(logging.DEBUG)
 
 
 class MessageHandler:
@@ -29,6 +34,8 @@ class MessageHandler:
         self.cache = {}
         self.cache_time = {}
         
+        self.pnl_model = PnlForwardingRuleModel(db)
+
         # Initialize components
         self.token_monitor = TokenMonitor(userbot_id)
         self.call_executor = CallExecutor(userbot_id, session_manager)
@@ -71,6 +78,21 @@ class MessageHandler:
             await self._track_outgoing_message(event)
         
         logger.info(f"Setup handlers for {len(group_ids)} groups and {len(source_chat_ids)} global source chats")
+
+        pnl_rules = await self.pnl_model.get_all_with_details()
+        pnl_source_chat_ids = list(set(rule['source_group_chat_id'] for rule in pnl_rules))
+        
+        logger.info(f"Found {len(pnl_rules)} PNL rules, monitoring {len(pnl_source_chat_ids)} source chats")
+        logger.debug(f"PNL source chat IDs: {pnl_source_chat_ids}")
+
+        if pnl_source_chat_ids:
+            @client.on(events.NewMessage(chats=pnl_source_chat_ids, pattern=r'/pnl.*'))
+            async def handle_pnl_command(event):
+                await self._handle_pnl_command(event)
+            
+            @client.on(events.NewMessage(chats=pnl_source_chat_ids))
+            async def handle_pnl_replies(event):
+                await self._handle_potential_pnl_reply(event)
     
     def is_fresh(self, key, seconds=600):
         """Check if cache entry is fresh (default 10 minutes)"""
@@ -202,6 +224,169 @@ class MessageHandler:
             
         except Exception as e:
             logger.error(f"Error handling source message: {e}")
+
+    async def _handle_pnl_command(self, event):
+        """Handle /pnl commands in monitored source groups with comprehensive debugging."""
+        try:
+            logger.debug(f"[MessageHandler] PNL command received: chat_id={event.chat_id}, "
+                        f"sender_id={event.sender_id}, message_id={event.message.id}, "
+                        f"text='{event.message.text[:100]}'")
+            
+            group = await self.group_model.get_by_chat_id(event.chat_id)
+            if not group:
+                logger.debug(f"[MessageHandler] No group found for chat {event.chat_id}, ignoring /pnl command")
+                return
+
+            rules = await self.pnl_model.get_enabled_rules_for_group(group['id'])
+            logger.debug(f"[MessageHandler] Found {len(rules)} enabled rules for chat {event.chat_id}")
+            
+            if not rules:
+                logger.debug(f"[MessageHandler] No rules found for chat {event.chat_id}, ignoring /pnl command")
+                return
+
+            for rule in rules:
+                logger.debug(f"[MessageHandler] Processing rule {rule['id']} for /pnl command")
+                allowed_users = rule.get('allowed_pnl_command_user_ids', [])
+                logger.debug(f"[MessageHandler] Rule {rule['id']} allowed users: {allowed_users}")
+                
+                if not allowed_users or event.sender_id in allowed_users:
+                    logger.info(f"[MessageHandler] User {event.sender_id} authorized for rule {rule['id']}, tracking /pnl command")
+                    
+                    try:
+                        # This command is from an authorized user, track it.
+                        await db.execute("""
+                            INSERT INTO pnl_tracked_messages (rule_id, original_message_id, chat_id, sender_id, status)
+                            VALUES ($1, $2, $3, $4, 'tracking')
+                            ON CONFLICT (original_message_id, chat_id) DO NOTHING
+                        """, rule['id'], event.message.id, event.chat_id, event.sender_id)
+                        
+                        logger.info(f"[MessageHandler] Successfully tracking /pnl command: "
+                                   f"message_id={event.message.id}, rule_id={rule['id']}, "
+                                   f"chat_id={event.chat_id}, sender_id={event.sender_id}")
+                    except Exception as db_err:
+                        logger.error(f"[MessageHandler] Database error tracking /pnl command: {db_err}")
+                        logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
+                else:
+                    logger.debug(f"[MessageHandler] User {event.sender_id} not authorized for rule {rule['id']} "
+                               f"(allowed: {allowed_users})")
+
+        except Exception as e:
+            logger.error(f"[MessageHandler] Error handling /pnl command: {e}")
+            logger.error(f"[MessageHandler] Event details: chat_id={event.chat_id}, "
+                        f"sender_id={event.sender_id}, message_id={event.message.id}")
+            logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
+
+    async def _handle_potential_pnl_reply(self, event):
+        """Handle potential replies to /pnl commands in real-time."""
+        try:
+            if not event.message.reply_to_msg_id:
+                return  # Not a reply
+            
+            logger.debug(f"[MessageHandler] Potential PNL reply: chat_id={event.chat_id}, "
+                        f"sender_id={event.sender_id}, reply_to={event.message.reply_to_msg_id}")
+            
+            # Check if this is a reply to a tracked /pnl message
+            tracked = await db.fetchrow("""
+                SELECT * FROM pnl_tracked_messages 
+                WHERE original_message_id = $1 AND chat_id = $2 AND status = 'tracking'
+                AND created_at > NOW() - INTERVAL '3 minutes'
+            """, event.message.reply_to_msg_id, event.chat_id)
+            
+            if not tracked:
+                return  # Not replying to a tracked /pnl message
+            
+            logger.debug(f"[MessageHandler] Found tracked PNL message {tracked['id']} for reply")
+            
+            # Get the rule
+            rule = await self.pnl_model.get_by_id(tracked['rule_id'])
+            if not rule or not rule['enabled']:
+                return
+            
+            # Only designated userbot should attempt forwarding
+            if self.userbot_id != rule.get('forwarding_userbot_id'):
+                logger.debug(f"[MessageHandler] Userbot {self.userbot_id} not designated for rule {rule['id']} (need {rule.get('forwarding_userbot_id')})")
+                return
+            
+            # Filter out flex generation messages
+            if "💪 Generating flex.." in event.message.text:
+                logger.debug(f"[MessageHandler] Skipping flex generation message {event.message.id}")
+                return
+            
+            allowed_reply_users = rule.get('allowed_reply_user_ids', [])
+            
+            if not allowed_reply_users or event.sender_id in allowed_reply_users:
+                logger.info(f"[MessageHandler] Valid PNL reply detected from user {event.sender_id}, forwarding immediately")
+                
+                # Forward the message using the designated forwarding userbot
+                success = await self._forward_pnl_reply(rule, event.message)
+                if success:
+                    logger.info(f"[MessageHandler] Successfully forwarded PNL reply {event.message.id} for tracking {tracked['id']}")
+                else:
+                    logger.error(f"[MessageHandler] Failed to forward PNL reply {event.message.id} for tracking {tracked['id']}")
+                    
+        except Exception as e:
+            logger.error(f"[MessageHandler] Error handling potential PNL reply: {e}")
+            logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
+
+    async def _forward_pnl_reply(self, rule: dict, message) -> bool:
+        """Forward a PNL reply message to the destination channel."""
+        try:
+            # Check if this userbot is the designated forwarding userbot
+            if self.userbot_id != rule.get('forwarding_userbot_id'):
+                logger.debug(f"[MessageHandler] Userbot {self.userbot_id} not designated for forwarding (need {rule.get('forwarding_userbot_id')})")
+                return False
+            
+            client = self.session_manager.get_client()
+            if not client:
+                logger.error("[MessageHandler] No client available for PNL forwarding")
+                return False
+            
+            logger.debug(f"[MessageHandler] Forwarding PNL reply message {message.id} to channel {rule['destination_channel_id']}")
+            
+            # Resolve entity using same pattern as call_executor.py
+            entity = await self._resolve_entity_safely(client, rule['destination_channel_id'])
+            
+            await client.forward_messages(
+                entity=entity,
+                messages=message
+            )
+            
+            logger.info(f"[MessageHandler] Successfully forwarded PNL reply to channel {rule['destination_channel_id']}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[MessageHandler] Error forwarding PNL reply: {e}")
+            logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
+            return False
+
+    async def _resolve_entity_safely(self, client, target_chat_id: int):
+        """Safely resolve entity with fallback strategies"""
+        try:
+            # First try: Direct entity resolution
+            entity = await client.get_entity(target_chat_id)
+            return entity
+        except Exception as resolve_error:
+            # Log as debug since this isn't a real error if sending still works
+            logger.debug(f"Entity resolution failed for {target_chat_id}: {resolve_error}")
+            
+            # Fallback: Construct peer directly based on chat ID pattern
+            try:
+                if target_chat_id < 0:
+                    # Supergroup/channel (starts with -100)
+                    if str(target_chat_id).startswith('-100'):
+                        channel_id = abs(target_chat_id) - 1000000000000
+                        return PeerChannel(channel_id)
+                    # Regular group (negative but not starting with -100)
+                    else:
+                        chat_id = abs(target_chat_id)
+                        return PeerChat(chat_id)
+                else:
+                    # User
+                    return PeerUser(target_chat_id)
+            except Exception as peer_error:
+                logger.debug(f"Peer construction failed for {target_chat_id}: {peer_error}")
+                # Return original ID as final fallback
+                return target_chat_id
     
     async def _track_outgoing_message(self, event):
         """Track outgoing messages for reply detection"""

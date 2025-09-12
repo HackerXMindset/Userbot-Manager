@@ -30,5 +30,18 @@ class ManagementStates(StatesGroup):
     adding_source_chat_id = State()
     adding_source_user_id = State()
     source_set_name = State()
+
+    # PNL Forwarding
+    pnl_waiting_for_source_forward = State()
+    pnl_waiting_for_destination_forward = State()
+    pnl_waiting_for_user_forward = State()
+    pnl_add_rule_source_group = State()
+    pnl_add_rule_monitored_users = State()
+    pnl_add_rule_forwarding_bot = State()
+    pnl_add_rule_destination = State()
+    pnl_add_rule_replying_users = State()
+    pnl_add_monitored_user_id = State()
+    pnl_add_replying_user_id = State()
+    pnl_add_rule_summary = State()
     
     

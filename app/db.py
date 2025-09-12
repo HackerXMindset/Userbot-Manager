@@ -82,24 +82,32 @@ class Database:
                             applied_at TIMESTAMPTZ DEFAULT NOW()
                         )
                     """)
-                
-                # Run initial migration
-                migration_name = '001_initial'
-                applied = await conn.fetchval(
-                    "SELECT EXISTS(SELECT 1 FROM migrations WHERE name = $1)",
-                    migration_name
-                ) if exists else False
-                
-                if not applied:
-                    logger.info(f"Running migration: {migration_name}")
-                    with open('migrations/001_initial.sql', 'r') as f:
-                        await conn.execute(f.read())
-                    await conn.execute(
-                        "INSERT INTO migrations (name) VALUES ($1)",
+                    logger.info("Created migrations table.")
+
+                # Get all migration files
+                import os
+                migration_files = sorted([f for f in os.listdir('migrations') if f.endswith('.sql')])
+
+                for migration_file in migration_files:
+                    migration_name = migration_file.rsplit('.', 1)[0]
+                    
+                    applied = await conn.fetchval(
+                        "SELECT EXISTS(SELECT 1 FROM migrations WHERE name = $1)",
                         migration_name
                     )
-                    logger.info(f"Migration {migration_name} completed")
-                    
+
+                    if not applied:
+                        logger.info(f"Running migration: {migration_name}")
+                        with open(f'migrations/{migration_file}', 'r') as f:
+                            await conn.execute(f.read())
+                        await conn.execute(
+                            "INSERT INTO migrations (name) VALUES ($1)",
+                            migration_name
+                        )
+                        logger.info(f"Migration {migration_name} completed")
+                    else:
+                        logger.debug(f"Migration {migration_name} already applied.")
+
         except Exception as e:
             logger.error(f"Migration error: {e}")
             raise
