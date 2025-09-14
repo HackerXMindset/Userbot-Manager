@@ -22,7 +22,7 @@ from app.management_bot import ManagementBot
 from app.scheduler import Scheduler
 from app.events import EventRouter
 from app.dex import get_dex_service
-from app.userbot_worker import UserbotManager
+from app.userbot.manager import UserbotManager
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,7 @@ class SystemManager:
             # Management bot (last, depends on others)
             self.components['management_bot'] = ManagementBot()
             self.components['event_router'].set_management_bot(self.components['management_bot'])
+            self.components['management_bot'].set_system_manager(self)
             
             logger.info("All components initialized successfully")
             

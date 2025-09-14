@@ -125,9 +125,13 @@ class AlertsHandler:
     async def show_drop_config(self, query: types.CallbackQuery):
         """Show drop threshold configuration"""  
         try:
+            logger.debug("Entering show_drop_config")
             drop_settings = await self.db.fetchval("SELECT value FROM settings WHERE key = 'drop_percentage'")
-            drop_percentage = float(json.loads(drop_settings)) if drop_settings else 0.70
+            logger.debug(f"Fetched drop_settings from DB: {drop_settings}")
             
+            drop_percentage = float(json.loads(drop_settings)) if drop_settings else 0.70
+            logger.debug(f"Calculated drop_percentage: {drop_percentage}")
+
             text = (
                 f"<b>📉 Stop-Loss Configuration</b>\n\n"
                 f"Current: -{drop_percentage*100:.0f}% from peak\n\n"
@@ -145,6 +149,7 @@ class AlertsHandler:
                 [InlineKeyboardButton(text="🔙 Back", callback_data="alerts:menu")]
             ])
             
+            logger.debug("Displaying drop config menu")
             await query.message.edit_text(text, reply_markup=keyboard)
             
         except Exception as e:
@@ -303,20 +308,26 @@ class AlertsHandler:
             logger.error(f"[DEBUG] Callback data was: {query.data}")
             await query.answer("❌ Error setting preset")
     
-    async def handle_drop_setting(self, callback_data: str, query: types.CallbackQuery):
+    async def handle_drop_setting(self, query: types.CallbackQuery):
         """Handle drop threshold setting"""
         try:
-            threshold = float(callback_data.split(':')[2])
-            
+            logger.debug(f"handle_drop_setting received callback: {query.data}")
+            threshold = float(query.data.split(':')[2])
+            logger.debug(f"Parsed threshold value: {threshold}")
+
             # Update settings
+            logger.debug("Updating drop_percentage in database...")
             await self.db.execute("""
                 INSERT INTO settings (key, value, updated_at) 
                 VALUES ('drop_percentage', $1, NOW())
                 ON CONFLICT (key) DO UPDATE SET 
                     value = $1, updated_at = NOW()
             """, json.dumps(threshold))
+            logger.debug("Database update complete.")
             
             await query.answer(f"✅ Stop-loss set to -{threshold*100:.0f}%")
+
+            logger.debug("Refreshing drop config view.")
             await self.show_drop_config(query)
             
         except Exception as e:

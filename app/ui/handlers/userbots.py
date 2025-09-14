@@ -23,10 +23,11 @@ logger = logging.getLogger(__name__)
 class UserbotsHandler:
     """Handler for userbot management operations"""
     
-    def __init__(self, db, keyboards: Keyboards):
+    def __init__(self, db, keyboards: Keyboards, management_bot):
         self.db = db
         self.keyboards = keyboards
         self.bot_model = BotModel(db)
+        self.management_bot = management_bot
         self.cache = {}
         self.cache_time = {}
     
@@ -131,6 +132,15 @@ class UserbotsHandler:
         elif action == 'set_name':
             userbot_id = int(parts[2])
             await self.start_set_userbot_name(query, userbot_id, state)
+        elif action == 'start':
+            userbot_id = int(parts[2])
+            await self.start_worker(query, userbot_id)
+        elif action == 'stop':
+            userbot_id = int(parts[2])
+            await self.stop_worker(query, userbot_id)
+        elif action == 'restart':
+            userbot_id = int(parts[2])
+            await self.restart_worker(query, userbot_id)
     
     async def start_userbot_login(self, query: types.CallbackQuery, state: FSMContext):
         """Start userbot login process"""
@@ -534,18 +544,23 @@ class UserbotsHandler:
             if not userbot:
                 await query.answer("Userbot not found!")
                 return
-            
+
+            userbot_manager = self.management_bot.system_manager.components.get('userbot_manager')
+            worker = userbot_manager.get_worker(userbot_id) if userbot_manager else None
+            is_running = worker and worker.running
+
+            db_status = userbot.get('status', 'inactive')
             status_icon = {
                 'active': '🟢',
                 'inactive': '🟡', 
                 'error': '🔴'
-            }.get(userbot['status'], '⚪')
+            }.get(db_status, '⚪')
             
             display_name = userbot.get('display_name') or userbot['session_name']
             text = (
                 f"<b>🤖 Userbot Details</b>\n\n"
                 f"<b>{display_name}</b>\n"
-                f"Status: {status_icon} {userbot['status'].title()}\n"
+                f"Status: {status_icon} {db_status.title()}\n"
                 f"Last Seen: {userbot['last_seen'] or 'Never'}\n\n"
                 f"<b>Assignments:</b>\n"
             )
@@ -556,17 +571,25 @@ class UserbotsHandler:
                 text = text.rstrip('\n') + "\n"
             else:
                 text += "└ No groups assigned\n"
-                
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✏️ Set Name", callback_data=f"userbot:set_name:{userbot_id}"),
-                    InlineKeyboardButton(text="🔄 Check Status", callback_data=f"userbot:check:{userbot_id}")
-                ],
-                [
-                    InlineKeyboardButton(text="🗑 Delete", callback_data=f"userbot:delete:{userbot_id}")
-                ],
-                [InlineKeyboardButton(text="🔙 Back", callback_data="menu:userbots")]
+
+            keyboard_rows = []
+            action_buttons = []
+
+            if is_running:
+                action_buttons.append(InlineKeyboardButton(text="🛑 Stop", callback_data=f"userbot:stop:{userbot_id}"))
+                action_buttons.append(InlineKeyboardButton(text="🔄 Restart", callback_data=f"userbot:restart:{userbot_id}"))
+            else:
+                action_buttons.append(InlineKeyboardButton(text="▶️ Start", callback_data=f"userbot:start:{userbot_id}"))
+
+            keyboard_rows.append(action_buttons)
+            keyboard_rows.append([
+                InlineKeyboardButton(text="✏️ Set Name", callback_data=f"userbot:set_name:{userbot_id}"),
+                InlineKeyboardButton(text="🔎 Check Status", callback_data=f"userbot:check:{userbot_id}")
             ])
+            keyboard_rows.append([InlineKeyboardButton(text="🗑 Delete", callback_data=f"userbot:delete:{userbot_id}")])
+            keyboard_rows.append([InlineKeyboardButton(text="🔙 Back", callback_data="menu:userbots")])
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
             
             await query.message.edit_text(text, reply_markup=keyboard)
             
@@ -605,162 +628,84 @@ class UserbotsHandler:
     async def refresh_all_sources(self, query: types.CallbackQuery):
         """Refresh source monitoring for all userbots"""
         try:
-            # Import the legacy userbot manager
-            from app.userbot_worker import UserbotManager
-            
-            # Since we can't easily access the running instance, 
-            # we'll create a temporary instance to access worker functionality
-            # This is not ideal but works for the refresh functionality
-            temp_manager = UserbotManager()
-            
-            # Get all active userbots from database
-            userbots = await self.get_cached_active_userbots()
-            
-            if not userbots:
-                await query.answer("❌ No active userbots found")
+            userbot_manager = self.management_bot.system_manager.components.get('userbot_manager')
+            if not userbot_manager:
+                await query.answer("❌ Userbot manager not available.")
                 return
-            
+
             await query.message.edit_text(
                 "<b>🔄 Refreshing Sources</b>\n\n"
-                "Please wait while we refresh source monitoring for all userbots...",
+                "Please wait while we refresh source monitoring for all active userbots...",
                 reply_markup=None
             )
-            
-            # Refresh sources by creating temporary workers for each active userbot
-            refreshed_count = 0
-            failed_count = 0
-            
-            for userbot in userbots:
-                userbot_id = userbot['id']
-                session_string = userbot.get('session_string')
-                
-                if not session_string:
-                    logger.warning(f"No session string for userbot {userbot_id}")
-                    failed_count += 1
-                    continue
-                
-                try:
-                    # Create a temporary worker instance for refresh
-                    from app.userbot_worker import UserbotWorker
-                    temp_worker = UserbotWorker(userbot_id, session_string)
-                    
-                    # Initialize the session to allow refresh
-                    if await temp_worker._modular_worker.session_manager.initialize_client():
-                        await temp_worker.refresh_sources()
-                        refreshed_count += 1
-                        logger.info(f"Refreshed sources for userbot {userbot_id}")
-                        
-                        # Clean up the temporary session
-                        await temp_worker._modular_worker.session_manager.disconnect_client()
-                    else:
-                        failed_count += 1
-                        logger.error(f"Failed to initialize session for userbot {userbot_id}")
-                        
-                except Exception as worker_error:
-                    failed_count += 1
-                    logger.error(f"Failed to refresh sources for userbot {userbot_id}: {worker_error}")
-            
-            # Show results
-            if refreshed_count > 0:
-                text = f"✅ <b>Sources Refreshed Successfully</b>\n\n"
-                text += f"Refreshed source monitoring for {refreshed_count} userbot(s)\n"
-                if failed_count > 0:
-                    text += f"Failed to refresh {failed_count} userbot(s)\n"
-                text += "\nNew sources and routing rules are now active!"
-                
-                await query.answer("✅ Sources refreshed successfully")
-            else:
-                text = f"⚠️ <b>Refresh Completed</b>\n\n"
-                text += "No active userbots found to refresh.\n"
-                text += f"Failed attempts: {failed_count}"
-                
-                await query.answer("⚠️ No userbots to refresh")
-            
+
+            await userbot_manager.sync_workers_with_database()
+
+            text = "✅ <b>Sources Refreshed Successfully</b>\n\n"
+            text += "Running userbots have been synced with the latest source configurations."
+
             await query.message.edit_text(
                 text,
                 reply_markup=self.keyboards.back_button("menu:userbots")
             )
-            
+            await query.answer("✅ Sources refreshed successfully")
+
         except Exception as e:
             logger.error(f"Error refreshing sources: {e}")
             await query.answer("❌ Error refreshing sources")
-            
-            try:
-                await query.message.edit_text(
-                    f"❌ <b>Refresh Failed</b>\n\n"
-                    f"Error: {str(e)}\n\n"
-                    f"Please try again or restart the bot.",
-                    reply_markup=self.keyboards.back_button("menu:userbots")
-                )
-            except:
-                pass
     
     async def check_individual_userbot(self, query: types.CallbackQuery, userbot_id: int):
         """Check status of individual userbot"""
         try:
+            userbot_manager = self.management_bot.system_manager.components.get('userbot_manager')
+            if not userbot_manager:
+                await query.answer("❌ Userbot manager not available.")
+                return
+
             userbot = await self.bot_model.get_by_id(userbot_id)
             if not userbot:
                 await query.answer("Userbot not found!")
                 return
-            
-            # Test the userbot connection
-            from app.userbot.session_manager import SessionManager
-            session_manager = SessionManager(userbot_id, userbot['session_string'])
-            
+
             await query.message.edit_text(
                 "<b>🔄 Checking Userbot Status...</b>\n\n"
-                "Please wait while we test the connection...",
+                "Please wait while we check the live worker status...",
                 reply_markup=None
             )
-            
-            # Initialize and test connection
-            success = await session_manager.initialize_client()
-            
-            if success:
-                health = await session_manager.health_check()
-                user_info = session_manager.get_user_info()
-                
-                await session_manager.disconnect_client()
-                
-                if health['healthy']:
+
+            worker = userbot_manager.get_worker(userbot_id)
+            if worker and worker.running:
+                health = await worker.health_check()
+                if health.get('healthy'):
                     status_icon = "✅"
-                    status_text = "Connected and working"
-                    details = f"User ID: {user_info.get('user_id')}\nUsername: @{user_info.get('username') or 'none'}"
+                    status_text = "Running and Healthy"
+                    details = f"User ID: {health['session']['user_id']}\nUsername: @{health['session']['username'] or 'none'}"
                 else:
-                    status_icon = "❌"
-                    status_text = f"Connection issues: {health.get('error', 'Unknown error')}"
-                    details = "Health check failed"
+                    status_icon = "🔴"
+                    status_text = "Running but Unhealthy"
+                    details = f"Error: {health.get('error', 'Unknown error')}"
             else:
-                status_icon = "❌"
-                status_text = "Failed to initialize"
-                details = "Could not connect to Telegram"
-            
+                status_icon = "🟡"
+                status_text = "Inactive / Not Running"
+                details = "The userbot worker is not currently running."
+
             text = (
                 f"<b>🔍 Userbot Status Check</b>\n\n"
-                f"<b>{userbot['session_name']}</b>\n\n"
+                f"<b>{userbot.get('display_name') or userbot['session_name']}</b>\n\n"
                 f"Status: {status_icon} {status_text}\n"
                 f"Details: {details}\n\n"
-                f"✅ Check completed successfully"
+                f"✅ Check completed."
             )
-            
+
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 Back", callback_data=f"userbot:view:{userbot_id}")]
             ])
-            
+
             await query.message.edit_text(text, reply_markup=keyboard)
-            
+
         except Exception as e:
             logger.error(f"Error checking individual userbot: {e}")
             await query.answer("❌ Error checking userbot status")
-            
-            try:
-                await query.message.edit_text(
-                    f"❌ <b>Status Check Failed</b>\n\n"
-                    f"Error: {str(e)}",
-                    reply_markup=self.keyboards.back_button(f"userbot:view:{userbot_id}")
-                )
-            except:
-                pass
     
     async def delete_userbot(self, query: types.CallbackQuery, userbot_id: int):
         """Delete userbot with confirmation"""
@@ -925,3 +870,43 @@ class UserbotsHandler:
             logger.error(f"Error updating userbot name: {e}")
             await message.answer(f"❌ Error updating name: {str(e)}")
             await state.clear()
+
+    async def start_worker(self, query: types.CallbackQuery, userbot_id: int):
+        """Start a userbot worker."""
+        await query.message.edit_text("▶️ Starting worker...")
+        try:
+            userbot_manager = self.management_bot.system_manager.components.get('userbot_manager')
+            userbot = await self.bot_model.get_by_id(userbot_id)
+            if userbot and userbot.get('session_string'):
+                await userbot_manager.start_worker(userbot_id, userbot['session_string'])
+                await query.answer("✅ Worker started!")
+            else:
+                await query.answer("❌ Could not find userbot or session string.")
+        except Exception as e:
+            logger.error(f"Error starting worker {userbot_id}: {e}")
+            await query.answer(f"❌ Error: {e}")
+        await self.show_userbot_details(query, userbot_id)
+
+    async def stop_worker(self, query: types.CallbackQuery, userbot_id: int):
+        """Stop a userbot worker."""
+        await query.message.edit_text("🛑 Stopping worker...")
+        try:
+            userbot_manager = self.management_bot.system_manager.components.get('userbot_manager')
+            await userbot_manager.stop_worker(userbot_id)
+            await query.answer("✅ Worker stopped!")
+        except Exception as e:
+            logger.error(f"Error stopping worker {userbot_id}: {e}")
+            await query.answer(f"❌ Error: {e}")
+        await self.show_userbot_details(query, userbot_id)
+
+    async def restart_worker(self, query: types.CallbackQuery, userbot_id: int):
+        """Restart a userbot worker."""
+        await query.message.edit_text("🔄 Restarting worker...")
+        try:
+            userbot_manager = self.management_bot.system_manager.components.get('userbot_manager')
+            await userbot_manager.restart_worker(userbot_id)
+            await query.answer("✅ Worker restarted!")
+        except Exception as e:
+            logger.error(f"Error restarting worker {userbot_id}: {e}")
+            await query.answer(f"❌ Error: {e}")
+        await self.show_userbot_details(query, userbot_id)

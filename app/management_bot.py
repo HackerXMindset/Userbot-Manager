@@ -27,11 +27,12 @@ class ManagementBot:
         self.bot = Bot(token=settings.mgmt_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         self.dp = Dispatcher(storage=MemoryStorage())
         self.keyboards = Keyboards()
+        self.system_manager = None
         
         # Initialize handlers
         self.menu_handler = MenuHandler(db, self.keyboards)
         self.groups_handler = GroupsHandler(db, self.keyboards)
-        self.userbots_handler = UserbotsHandler(db, self.keyboards)
+        self.userbots_handler = UserbotsHandler(db, self.keyboards, self)
         self.schedules_handler = SchedulesHandler(db, self.keyboards)
         self.sources_handler = SourcesHandler(db, self.keyboards)
         self.alerts_handler = AlertsHandler(db, self.keyboards)
@@ -40,6 +41,10 @@ class ManagementBot:
         self.auto_click_handler = AutoClickHandler(db, self.keyboards)
         
         self.setup_handlers()
+
+    def set_system_manager(self, manager):
+        """Set the SystemManager instance."""
+        self.system_manager = manager
     
     def setup_handlers(self):
         """Register all handlers"""
