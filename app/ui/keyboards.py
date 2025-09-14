@@ -29,11 +29,11 @@ class Keyboards:
         ])
     
     @staticmethod
-    def groups_menu(groups: List[Dict]) -> InlineKeyboardMarkup:
+    def groups_menu(groups: List[Dict], page: int, total_pages: int) -> InlineKeyboardMarkup:
         """Groups management menu"""
         keyboard = []
         
-        for group in groups[:10]:  # Limit to 10 for UI
+        for group in groups:
             status = "✅" if group['enabled'] else "❌"
             display_name = (group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}")[:20]
             keyboard.append([
@@ -43,6 +43,9 @@ class Keyboards:
                 )
             ])
         
+        if total_pages > 1:
+            keyboard.append(Keyboards.pagination("groups_page", page, total_pages))
+
         keyboard.append([
             InlineKeyboardButton(text="➕ Add Group", callback_data="group:add"),
             InlineKeyboardButton(text="🔙 Back", callback_data="menu:main")
@@ -102,11 +105,11 @@ class Keyboards:
         return InlineKeyboardMarkup(inline_keyboard=[])
     
     @staticmethod
-    def userbots_menu(userbots: List[Dict]) -> InlineKeyboardMarkup:
+    def userbots_menu(userbots: List[Dict], page: int, total_pages: int) -> InlineKeyboardMarkup:
         """Userbots management menu"""
         keyboard = []
         
-        for bot in userbots[:8]:
+        for bot in userbots:
             status_icon = "🟢" if bot['status'] == 'active' else "🔴"
             name = (bot.get('display_name') or bot['session_name'])[:20]
             keyboard.append([
@@ -116,6 +119,9 @@ class Keyboards:
                 )
             ])
         
+        if total_pages > 1:
+            keyboard.append(Keyboards.pagination("userbots_page", page, total_pages))
+
         keyboard.extend([
             [
                 InlineKeyboardButton(text="➕ Add Userbot", callback_data="userbot:add"),

@@ -59,17 +59,23 @@ class UserbotsHandler:
         self.cache.clear()
         self.cache_time.clear()
     
-    async def show_userbots_menu(self, query: types.CallbackQuery):
+    async def show_userbots_menu(self, query: types.CallbackQuery, page: int = 1):
         """Display userbots management menu"""
         try:
             userbots = await self.get_cached_userbots_with_assignments()
+            PAGE_SIZE = 5
+            
+            total_pages = (len(userbots) + PAGE_SIZE - 1) // PAGE_SIZE
+            start = (page - 1) * PAGE_SIZE
+            end = start + PAGE_SIZE
+            paginated_userbots = userbots[start:end]
             
             text = "<b>🤖 Userbots Management</b>\n\n"
             
             if not userbots:
                 text += "No userbots configured.\nClick 'Add Userbot' to create one."
             else:
-                for bot in userbots[:5]:
+                for bot in paginated_userbots:
                     status_icon = {
                         'active': '🟢',
                         'inactive': '🟡',
@@ -85,7 +91,7 @@ class UserbotsHandler:
             
             await query.message.edit_text(
                 text,
-                reply_markup=self.keyboards.userbots_menu([dict(bot) for bot in userbots])
+                reply_markup=self.keyboards.userbots_menu([dict(bot) for bot in paginated_userbots], page, total_pages)
             )
         except Exception as e:
             logger.error(f"Error showing userbots menu: {e}")
@@ -94,6 +100,14 @@ class UserbotsHandler:
     async def handle_userbot_action(self, query: types.CallbackQuery, state: FSMContext):
         """Handle userbot-related callbacks"""
         parts = query.data.split(':')
+        
+        # Handle pagination
+        if parts[0] == 'userbots_page':
+            if parts[1] == 'page':
+                page = int(parts[2])
+                await self.show_userbots_menu(query, page=page)
+                return
+
         action = parts[1]
         
         if action == 'add':
