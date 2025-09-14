@@ -24,29 +24,31 @@ class TokenModel(BaseModel):
         """
         return await self.db.fetch(query)
     
-    async def create_or_update(self, address: str, market_cap: Decimal) -> asyncpg.Record:
-        """Create new token or update existing"""
+    async def create_or_update(self, address: str, market_cap: Decimal, ticker: Optional[str] = None) -> asyncpg.Record:
+        """Create new token or update existing, initializing peak_mc."""
         query = """
-            INSERT INTO tokens_tracked (address, first_seen_mc, last_mc, last_checked_at)
-            VALUES ($1, $2, $2, NOW())
+            INSERT INTO tokens_tracked (address, first_seen_mc, last_mc, peak_mc, ticker, last_checked_at)
+            VALUES ($1, $2, $2, $2, $3, NOW())
             ON CONFLICT (address) DO UPDATE SET
                 last_mc = $2,
+                ticker = COALESCE($3, tokens_tracked.ticker),
                 last_checked_at = NOW()
             RETURNING *
         """
-        return await self.db.fetchrow(query, address, market_cap)
+        return await self.db.fetchrow(query, address, market_cap, ticker)
     
-    async def update_market_cap(self, token_id: int, market_cap: Decimal) -> asyncpg.Record:
-        """Update token's market cap"""
+    async def update_market_cap(self, token_id: int, market_cap: Decimal, ticker: Optional[str] = None) -> asyncpg.Record:
+        """Update token's market cap and optionally its ticker."""
         query = """
             UPDATE tokens_tracked 
             SET last_mc = $1, 
                 first_seen_mc = COALESCE(first_seen_mc, $1),
+                ticker = COALESCE($3, ticker),
                 last_checked_at = NOW()
             WHERE id = $2
             RETURNING *
         """
-        return await self.db.fetchrow(query, market_cap, token_id)
+        return await self.db.fetchrow(query, market_cap, token_id, ticker)
     
     async def set_status(self, token_id: int, status: str) -> None:
         """Update token status"""

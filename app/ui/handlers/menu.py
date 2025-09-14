@@ -163,8 +163,8 @@ class MenuHandler:
             if stats['top_tokens']:
                 text += f"<b>🏆 Top 5 Performers ({timeframe_labels.get(timeframe)}):</b>\n"
                 for i, token in enumerate(stats['top_tokens'], 1):
-                    address_short = f"{token['address'][:8]}...{token['address'][-8:]}"
-                    text += f"{i}. {address_short}: {token['multiplier']:.2f}x\n"
+                    display_name = f"${token['ticker']}" if token['ticker'] else f"{token['address'][:8]}..."
+                    text += f"{i}. {display_name}: {token['multiplier']:.2f}x\n"
             else:
                 text += "No tokens tracked in this period."
             
@@ -293,8 +293,8 @@ class MenuHandler:
                     
                     -- Top multiplier
                     (SELECT COALESCE(MAX(CASE 
-                        WHEN first_seen_mc > 0 AND last_mc > 0 
-                        THEN LEAST(last_mc / first_seen_mc, 1000)
+                        WHEN first_seen_mc > 0 AND peak_mc > 0 
+                        THEN LEAST(peak_mc / first_seen_mc, 1000)
                         ELSE 1.0 
                      END), 0.0)
                      FROM tokens_tracked tt 
@@ -339,15 +339,16 @@ class MenuHandler:
                     self.db.fetch(f"""
                         SELECT 
                             address,
+                            ticker,
                             CASE 
-                                WHEN first_seen_mc > 0 AND last_mc > 0 
-                                THEN LEAST(last_mc / first_seen_mc, 1000)
+                                WHEN first_seen_mc > 0 AND peak_mc > 0 
+                                THEN LEAST(peak_mc / first_seen_mc, 1000)
                                 ELSE 1 
                             END as multiplier
                         FROM tokens_tracked
                         WHERE created_at >= NOW() - INTERVAL '{interval}'
                             AND first_seen_mc > 0 
-                            AND last_mc > 0
+                            AND peak_mc > 0
                         ORDER BY multiplier DESC
                         LIMIT 5
                     """), timeout=15.0  # 15 second timeout for smaller query
@@ -367,6 +368,7 @@ class MenuHandler:
                 'top_tokens': [
                     {
                         'address': token['address'], 
+                        'ticker': token['ticker'],
                         'multiplier': float(token['multiplier'])
                     } for token in top_tokens
                 ]

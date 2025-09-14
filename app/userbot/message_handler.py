@@ -82,6 +82,13 @@ class MessageHandler:
             if is_reply_to_me:
                 await self.notification_handler.handle_notification_event(event, "reply")
 
+        # Handle PNL forwarding logic
+        if not is_edit:
+            if event.text and event.text.startswith('/pnl'):
+                await self._handle_pnl_command(event)
+            if event.is_reply:
+                await self._handle_potential_pnl_reply(event)
+
         # Handle source logic
         is_source = await self.source_manager.get_source_by_chat_id(event.chat_id)
         if is_source:

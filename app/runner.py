@@ -59,6 +59,9 @@ class SystemManager:
             
             # Userbot manager
             self.components['userbot_manager'] = UserbotManager()
+
+            # Pass userbot_manager to dex_service
+            self.components['dex_service'].set_userbot_manager(self.components['userbot_manager'])
             
             # Management bot (last, depends on others)
             self.components['management_bot'] = ManagementBot()

@@ -144,3 +144,23 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# Custom ignores
+userbot.db
+.claude/
+sessions/
+package.json
+package-lock.json
+CLAUDE.md
+GEMINI.md
+BOT_FEATURES.txt
+claude_code_power_tips.txt
+CLAUDE.sessions.md
+new3.py
+test_auto_click.py
+*.backup
+*.debug
+.env
+app/.claude/settings.local.json
+runner.log
+test_batch.py

@@ -22,8 +22,6 @@ class Keyboards:
             ],
             [
                 InlineKeyboardButton(text="💸 PNL Forwarding", callback_data="menu:pnl"),
-            ],
-            [
                 InlineKeyboardButton(text="🔔 Notifications", callback_data="menu:notifications"),
             ],
             [

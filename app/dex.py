@@ -32,6 +32,12 @@ class DexScreenerService:
         self.session: Optional[aiohttp.ClientSession] = None
         self.running = False
         self._task: Optional[asyncio.Task] = None
+        self.userbot_manager = None
+
+    def set_userbot_manager(self, manager):
+        """Set the UserbotManager instance."""
+        self.userbot_manager = manager
+        logger.info("UserbotManager instance set in DexScreenerService")
     
     async def start(self):
         """Start the DexScreener monitoring service"""
@@ -81,7 +87,8 @@ class DexScreenerService:
     async def _update_token_prices(self):
         """Update prices for all active tokens"""
         try:
-            active_tokens = await self.token_model.get_active_tokens()
+            active_tokens_records = await self.token_model.get_active_tokens()
+            active_tokens = [dict(t) for t in active_tokens_records]
             
             if not active_tokens:
                 return
@@ -257,26 +264,23 @@ class DexScreenerService:
         
         return None
     
-    async def _update_token_from_data(self, token: Dict[str, Any], api_data: Dict[str, Any]):
+    async def _update_token_from_data(self, token: Dict[str, Any], api_data: List[Dict[str, Any]]):
         """Update token with data from API"""
         try:
-            # New API returns direct array of pairs instead of object with pairs property
-            pairs = api_data if isinstance(api_data, list) else api_data.get('pairs', [])
-            if not pairs:
+            if not api_data:
                 return
             
-            # Just use first pair since liquidity isn't needed
-            best_pair = pairs[0]
+            best_pair = api_data[0]
             
-            # Extract market cap
             market_cap = best_pair.get('marketCap')
             if not market_cap:
                 return
             
             new_mc = Decimal(str(market_cap))
-            
+            ticker = best_pair.get('baseToken', {}).get('symbol')
+
             # Update token in database
-            await self.token_model.update_market_cap(token['id'], new_mc)
+            await self.token_model.update_market_cap(token['id'], new_mc, ticker)
             
             # Check for gain alerts after market cap update
             await self._check_gain_alerts(token, new_mc)
@@ -323,41 +327,45 @@ class DexScreenerService:
             logger.error(f"Error checking gain alerts: {e}")
     
     async def _queue_pnl_command(self, token: Dict[str, Any], threshold: Decimal):
-        """Send /pnl command directly via userbot client"""
+        """Send /pnl command using the managed userbot worker."""
         try:
-            if not token.get('source_group_id'):
+            source_group_id = token.get('source_group_id')
+            if not source_group_id:
                 return
-                
-            # Get userbot assigned to this group with session string
-            userbot = await db.fetchrow("""
-                SELECT b.id, b.session_string FROM bots b
-                JOIN userbot_assignments ua ON b.id = ua.userbot_id
-                WHERE ua.group_id = $1 AND b.kind = 'userbot' AND b.session_string IS NOT NULL
-                LIMIT 1
-            """, token['source_group_id'])
-            
-            if not userbot:
-                logger.warning(f"No userbot with session found for group {token['source_group_id']}")
+
+            # Check if the userbot manager is available
+            if not self.userbot_manager:
+                logger.error("UserbotManager not available in DexScreenerService. Cannot send PNL command.")
+                return
+
+            # Get the userbot assigned to the source group
+            userbot_assignment = await db.fetchrow("""
+                SELECT userbot_id FROM userbot_assignments WHERE group_id = $1
+            """, source_group_id)
+
+            if not userbot_assignment or not userbot_assignment['userbot_id']:
+                logger.warning(f"No userbot assigned to group {source_group_id} for PNL alert.")
                 return
             
+            userbot_id = userbot_assignment['userbot_id']
+
+            # Get the worker instance from the manager
+            worker = self.userbot_manager.get_worker(userbot_id)
+            if not worker:
+                logger.error(f"Userbot worker {userbot_id} not found in manager.")
+                return
+
+            client = worker.session_manager.get_client()
+            if not client or not worker.session_manager.is_connected():
+                logger.error(f"Userbot {userbot_id} is not connected. Cannot send PNL command.")
+                return
+
             # Get target groups for this source group
-            targets = await db.fetch("""
-                SELECT dest_chat_id FROM targets WHERE group_id = $1
-            """, token['source_group_id'])
-            
+            targets = await db.fetch("SELECT dest_chat_id FROM targets WHERE group_id = $1", source_group_id)
             if not targets:
-                logger.warning(f"No target groups found for source group {token['source_group_id']}")
+                logger.warning(f"No target groups found for source group {source_group_id}")
                 return
-                
-            # Send PNL command directly via userbot client
-            session_manager = SessionManager(userbot['id'], userbot['session_string'])
-            success = await session_manager.initialize_client()
-            
-            if not success:
-                logger.error(f"Failed to initialize userbot {userbot['id']} client")
-                return
-                
-            client = session_manager.get_client()
+
             message = f"/pnl {token['address']}"
             
             # Send to all target groups
@@ -366,21 +374,28 @@ class DexScreenerService:
                     sent_message = await client.send_message(target['dest_chat_id'], message)
                     logger.info(f"Sent /pnl {token['address'][:8]}... to {target['dest_chat_id']} ({threshold}x alert, msg_id: {sent_message.id})")
                 except Exception as send_error:
-                    logger.error(f"Failed to send to {target['dest_chat_id']}: {send_error}")
-            
+                    logger.error(f"Failed to send PNL command to {target['dest_chat_id']}: {send_error}")
+
         except Exception as e:
             logger.error(f"Error sending PNL command: {e}")
     
     async def _check_drop_alerts(self, token: Dict[str, Any], new_mc: Decimal):
         """Check for drop alerts using existing working pattern"""
         try:
-            if not token.get('peak_mc') or token['peak_mc'] <= 0:
-                return
-                
-            # Update peak if new high
-            if new_mc > token['peak_mc']:
+            peak_mc = token.get('peak_mc')
+            # Initialize peak_mc if it's not set
+            if not peak_mc or peak_mc <= 0:
                 await self.token_model.update_peak_mc(token['id'], new_mc)
-                return
+                # Update the local token dictionary to avoid re-fetching
+                token['peak_mc'] = new_mc
+                peak_mc = new_mc
+
+            # Update peak if new high
+            if new_mc > peak_mc:
+                await self.token_model.update_peak_mc(token['id'], new_mc)
+                # Update local token for subsequent checks in the same loop
+                token['peak_mc'] = new_mc
+                peak_mc = new_mc # Use the new peak for drop check
                 
             # Get drop threshold from settings 
             drop_settings = await db.fetchval("SELECT value FROM settings WHERE key = 'drop_percentage'")
@@ -391,11 +406,12 @@ class DexScreenerService:
             drop_threshold = float(json.loads(drop_settings))
             
             # Check drop from peak
-            current_from_peak = new_mc / token['peak_mc']
-            if current_from_peak <= drop_threshold:
-                await self.token_model.set_status(token['id'], 'stopped')
-                logger.info(f"Stopped monitoring {token['address'][:8]}... (dropped {(1-current_from_peak)*100:.1f}% from peak)")
-                    
+            if peak_mc > 0: # Avoid division by zero
+                current_from_peak = new_mc / peak_mc
+                if current_from_peak <= drop_threshold:
+                    await self.token_model.set_status(token['id'], 'stopped')
+                    logger.info(f"Stopped monitoring {token['address'][:8]}... (dropped {(1-current_from_peak)*100:.1f}% from peak)")
+                        
         except Exception as e:
             logger.error(f"Error checking drop alerts: {e}")
     
@@ -438,9 +454,10 @@ class DexScreenerService:
                 }
             
             initial_mc = Decimal(str(market_cap))
-            
+            ticker = best_pair.get('baseToken', {}).get('symbol')
+
             # Create token record
-            token = await self.token_model.create_or_update(token_address, initial_mc)
+            token = await self.token_model.create_or_update(token_address, initial_mc, ticker)
             
             logger.info(f"Added token {token_address[:8]}... with initial MC ${initial_mc:,.0f}")
             
