@@ -34,7 +34,7 @@ An enterprise-grade Telegram userbot management system designed for automated So
 - **Customizable Alerts**: Per-group notification preferences
 - **Rich Formatting**: Enhanced message presentation with metadata
 
-### 🤖 **Autopilot Features**
+### 📡 **Auto-Tap Features**
 - **Auto-Click Integration**: Automated interaction with scanner bots
 - **Smart Button Detection**: Intelligent UI element recognition
 - **Response Automation**: Configured automatic responses to common scenarios
@@ -290,6 +290,7 @@ Access via `/menu` command:
 
 #### **👤 Agents (Userbots)**
 - Add new agents via phone authentication
+- **Worker Controls**: Start, stop, and restart individual workers directly from the UI.
 - Monitor connection status
 - Assign to groups
 - View performance metrics
@@ -312,7 +313,7 @@ Access via `/menu` command:
 - Message routing rules
 - Activity logs
 
-#### **🤖 Autopilot**
+#### **📡 Auto-Tap**
 - Auto-click configuration
 - Scanner bot integration
 - Response automation
