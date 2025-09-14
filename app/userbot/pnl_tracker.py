@@ -118,7 +118,12 @@ class PnlTracker:
                 await self._update_status(tracked['id'], 'expired')
                 return
                 
-            if not original_message or not original_message.replies:
+            if not original_message:
+                logger.debug(f"[PnlTracker] Original message {tracked['original_message_id']} is None, skipping.")
+                return
+
+            if not original_message.replies:
+                logger.debug(f"[PnlTracker] Original message {tracked['original_message_id']} has no replies, skipping.")
                 return
 
             allowed_reply_users = rule.get('allowed_reply_user_ids', [])
@@ -126,6 +131,7 @@ class PnlTracker:
 
             replies = await client.get_messages(tracked['chat_id'], reply_to=original_message.id)
             if not replies:
+                logger.debug(f"[PnlTracker] No replies found for message {original_message.id}")
                 return
 
             for reply in replies:

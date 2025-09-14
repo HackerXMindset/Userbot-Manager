@@ -6,6 +6,8 @@ from .group import GroupModel, ScheduleModel
 from .token import TokenModel
 from .event import EventModel
 from .pnl_forwarding import PnlForwardingRuleModel
+from .notification import NotificationSettingsModel, NotificationBlacklistModel
+from .auto_button_click import AutoButtonClickRuleModel
 
 __all__ = [
     "BaseModel",
@@ -15,4 +17,7 @@ __all__ = [
     "TokenModel",
     "EventModel",
     "PnlForwardingRuleModel",
+    "NotificationSettingsModel",
+    "NotificationBlacklistModel",
+    "AutoButtonClickRuleModel",
 ]

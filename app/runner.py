@@ -62,6 +62,7 @@ class SystemManager:
             
             # Management bot (last, depends on others)
             self.components['management_bot'] = ManagementBot()
+            self.components['event_router'].set_management_bot(self.components['management_bot'])
             
             logger.info("All components initialized successfully")
             

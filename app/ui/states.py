@@ -43,5 +43,14 @@ class ManagementStates(StatesGroup):
     pnl_add_monitored_user_id = State()
     pnl_add_replying_user_id = State()
     pnl_add_rule_summary = State()
+
+    # Notifications
+    setting_notification_channel = State()
+    adding_blacklist_user = State()
+
+    # Auto Click
+    adding_auto_click_rule_target = State()
+    adding_auto_click_rule_bot_id = State()
+    adding_auto_click_rule_button_text = State()
     
     

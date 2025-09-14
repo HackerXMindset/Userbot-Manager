@@ -16,7 +16,8 @@ from app.ui.keyboards import Keyboards
 from app.ui.states import ManagementStates
 from app.ui.handlers import (
     MenuHandler, GroupsHandler, UserbotsHandler, 
-    SchedulesHandler, SourcesHandler, AlertsHandler, PnlHandler
+    SchedulesHandler, SourcesHandler, AlertsHandler, PnlHandler,
+    NotificationsHandler, AutoClickHandler
 )
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,8 @@ class ManagementBot:
         self.sources_handler = SourcesHandler(db, self.keyboards)
         self.alerts_handler = AlertsHandler(db, self.keyboards)
         self.pnl_handler = PnlHandler(db, self.keyboards)
+        self.notifications_handler = NotificationsHandler(db, self.keyboards)
+        self.auto_click_handler = AutoClickHandler(db, self.keyboards)
         
         self.setup_handlers()
     
@@ -58,7 +61,7 @@ class ManagementBot:
         # Groups
         self.dp.callback_query.register(
             self.groups_handler.handle_group_action,
-            F.data.startswith('group:'),
+            F.data.startswith(('group:', 'groups_page:')),
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
@@ -139,6 +142,26 @@ class ManagementBot:
         self.dp.callback_query.register(
             self.pnl_handler.handle_pnl_action,
             F.data.startswith('pnl:'),
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        # Notifications
+        self.dp.callback_query.register(
+            self.notifications_handler.handle_notifications_action,
+            F.data.startswith('notifications:'),
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        # Auto Click
+        self.dp.callback_query.register(
+            self.auto_click_handler.handle_auto_click_action,
+            F.data.startswith('auto_click:'),
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+        
+        self.dp.callback_query.register(
+            self.auto_click_handler.wizard_process_target_group,
+            F.data.startswith('auto_click_wizard:'),
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
 
@@ -256,6 +279,30 @@ class ManagementBot:
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
 
+        self.dp.message.register(
+            self.notifications_handler.process_notification_channel_input,
+            ManagementStates.setting_notification_channel,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.notifications_handler.process_blacklist_input,
+            ManagementStates.adding_blacklist_user,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.auto_click_handler.wizard_process_bot_id,
+            ManagementStates.adding_auto_click_rule_bot_id,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.auto_click_handler.wizard_process_button_text,
+            ManagementStates.adding_auto_click_rule_button_text,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
         
         
         
@@ -319,6 +366,10 @@ class ManagementBot:
             await self.menu_handler.show_tracking_menu(query)
         elif action == 'pnl':
             await self.pnl_handler.show_rules_list(query)
+        elif action == 'notifications':
+            await self.notifications_handler.show_notifications_menu(query)
+        elif action == 'auto_click':
+            await self.auto_click_handler.show_auto_click_menu(query)
         elif action == 'close':
             await query.message.delete()
         

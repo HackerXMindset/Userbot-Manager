@@ -48,14 +48,21 @@ class BotModel(BaseModel):
         await self.db.execute(query, status, bot_id)
     
     async def assign_to_group(self, userbot_id: int, group_id: int) -> asyncpg.Record:
-        """Assign userbot to a group"""
-        query = """
-            INSERT INTO userbot_assignments (userbot_id, group_id)
-            VALUES ($1, $2)
-            ON CONFLICT (group_id) DO UPDATE SET userbot_id = $1
-            RETURNING *
-        """
-        return await self.db.fetchrow(query, userbot_id, group_id)
+        """Assign userbot to a group, ensuring the group is only assigned to one userbot."""
+        async with self.db.acquire() as conn:
+            async with conn.transaction():
+                # Remove any existing assignment for this group to enforce a one-to-one mapping
+                await conn.execute(
+                    "DELETE FROM userbot_assignments WHERE group_id = $1",
+                    group_id
+                )
+                # Insert the new assignment
+                query = """
+                    INSERT INTO userbot_assignments (userbot_id, group_id)
+                    VALUES ($1, $2)
+                    RETURNING *
+                """
+                return await conn.fetchrow(query, userbot_id, group_id)
     
     async def unassign_from_group(self, group_id: int) -> bool:
         """Remove userbot assignment from group"""

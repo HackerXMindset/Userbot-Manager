@@ -80,6 +80,9 @@ class CallExecutor:
             # Track sent message for reply detection
             self.message_tracker.track_message(target_chat_id, sent_message.id)
             
+            # Arm auto-click tracking if applicable
+            await self._arm_auto_click_tracking(target_chat_id, sent_message.id)
+            
             logger.info(f"Sent call for {token_address[:8]}... to chat {target_chat_id}")
             
             return {
@@ -95,6 +98,29 @@ class CallExecutor:
                 'success': False,
                 'error': str(e)
             }
+    
+    async def _arm_auto_click_tracking(self, target_chat_id: int, message_id: int):
+        """Check for auto-click rules and create tracking records if they exist."""
+        try:
+            rules = await db.fetch(
+                "SELECT id FROM auto_button_click_rules WHERE target_chat_id = $1 AND enabled = true",
+                target_chat_id
+            )
+            if not rules:
+                return
+
+            logger.info(f"Found {len(rules)} auto-click rule(s) for chat {target_chat_id}. Arming tracking for message {message_id}.")
+            for rule in rules:
+                await db.execute(
+                    """
+                    INSERT INTO autoclick_tracked_messages (rule_id, original_message_id, chat_id, status)
+                    VALUES ($1, $2, $3, 'tracking')
+                    ON CONFLICT (original_message_id, chat_id, rule_id) DO NOTHING
+                    """,
+                    rule['id'], message_id, target_chat_id
+                )
+        except Exception as e:
+            logger.error(f"Error arming auto-click tracking for message {message_id}: {e}")
     
     async def forward_tokens_to_targets(self, group_id: int, addresses: List[str], 
                                        source_event) -> Dict[str, Any]:

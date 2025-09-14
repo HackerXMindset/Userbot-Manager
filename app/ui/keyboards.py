@@ -24,6 +24,10 @@ class Keyboards:
                 InlineKeyboardButton(text="💸 PNL Forwarding", callback_data="menu:pnl"),
             ],
             [
+                InlineKeyboardButton(text="🔔 Notifications", callback_data="menu:notifications"),
+            ],
+            [
+                InlineKeyboardButton(text="🖱️ Auto Click", callback_data="menu:auto_click"),
                 InlineKeyboardButton(text="❌ Close", callback_data="menu:close")
             ]
         ])
@@ -195,6 +199,41 @@ class Keyboards:
         return buttons
 
     @staticmethod
+    def notifications_menu(settings: Dict, blacklist: List[Dict]) -> InlineKeyboardMarkup:
+        """Notifications management menu"""
+        keyboard = [
+            [
+                InlineKeyboardButton(text="📢 Set Channel", callback_data="notifications:set_channel"),
+            ],
+            [
+                InlineKeyboardButton(text=f"🚫 Blacklist ({len(blacklist)})", callback_data="notifications:blacklist"),
+            ],
+            [
+                InlineKeyboardButton(text="🔙 Back", callback_data="menu:main"),
+            ]
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def notification_blacklist_menu(blacklist: List[Dict]) -> InlineKeyboardMarkup:
+        """Notification blacklist management menu"""
+        keyboard = []
+        for user in blacklist:
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"🗑️ Remove {user['user_id']}",
+                    callback_data=f"notifications:remove_blacklist:{user['user_id']}"
+                )
+            ])
+        keyboard.append([
+            InlineKeyboardButton(text="➕ Add User", callback_data="notifications:add_blacklist"),
+        ])
+        keyboard.append([
+            InlineKeyboardButton(text="🔙 Back", callback_data="menu:notifications"),
+        ])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
     def pnl_rules_list(rules: List[Dict]) -> InlineKeyboardMarkup:
         keyboard = []
         for rule in rules[:10]:
@@ -323,3 +362,31 @@ class Keyboards:
                 text += "..."
                 
         return text
+    @staticmethod
+    def auto_click_menu(rules: List[Dict]) -> InlineKeyboardMarkup:
+        """Auto click management menu"""
+        keyboard = []
+        for rule in rules:
+            status = "✅" if rule['enabled'] else "❌"
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"{status} Chat: {rule['target_chat_id']}, Bot: {rule['bot_id']}",
+                    callback_data=f"auto_click:view:{rule['id']}"
+                )
+            ])
+        keyboard.append([InlineKeyboardButton(text="➕ Add New Rule", callback_data="auto_click:add")])
+        keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data="menu:main")])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def auto_click_rule_details(rule: Dict) -> InlineKeyboardMarkup:
+        """Auto click rule details menu"""
+        status_btn = InlineKeyboardButton(
+            text="🔴 Disable" if rule['enabled'] else "🟢 Enable",
+            callback_data=f"auto_click:toggle:{rule['id']}"
+        )
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [status_btn],
+            [InlineKeyboardButton(text="🗑️ Delete Rule", callback_data=f"auto_click:delete:{rule['id']}")],
+            [InlineKeyboardButton(text="🔙 Back to List", callback_data="auto_click:list")]
+        ])

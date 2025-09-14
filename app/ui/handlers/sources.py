@@ -76,7 +76,7 @@ class SourcesHandler:
             keyboard_rows = [
                 [
                     InlineKeyboardButton(text="➕ Add Source", callback_data="sources:add_global"),
-                    InlineKeyboardButton(text="🔄 Routing", callback_data="sources:routing")
+                    InlineKeyboardButton(text="🔄 Routing", callback_data="sources:routing:1")
                 ]
             ]
             
@@ -113,9 +113,11 @@ class SourcesHandler:
         if action == 'add_global':
             await self.start_add_global_source(query, state)
         elif action == 'manage_global':
-            await self.show_manage_global_sources(query)
+            page = int(parts[2]) if len(parts) > 2 else 1
+            await self.show_manage_global_sources(query, page=page)
         elif action == 'routing':
-            await self.show_routing_menu(query)
+            page = int(parts[2]) if len(parts) > 2 else 1
+            await self.show_routing_menu(query, page=page)
         elif action == 'source_details':
             source_id = int(parts[2])
             await self.show_source_details(query, source_id)
@@ -223,17 +225,29 @@ class SourcesHandler:
             logger.error(f"Error showing manage sources: {e}")
             await query.answer("❌ Error loading sources")
     
-    async def show_routing_menu(self, query: types.CallbackQuery):
-        """Show routing rules overview"""
+    async def show_routing_menu(self, query: types.CallbackQuery, page: int = 1):
+        """Show routing rules overview with pagination."""
         try:
-            text = "<b>🔄 Routing Rules</b>\n\n"
+            sources = await self.get_cached_sources()
+            page_size = 9
+
+            if not sources:
+                text = "<b>🔄 Routing Rules</b>\n\nNo sources configured yet to create routing rules for."
+                keyboard_rows = [[InlineKeyboardButton(text="🔙 Back", callback_data="menu:sources")]]
+                await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows))
+                return
+
+            total_pages = (len(sources) + page_size - 1) // page_size
+            start_index = (page - 1) * page_size
+            end_index = start_index + page_size
+            paginated_sources = sources[start_index:end_index]
+
+            text = f"<b>🔄 Routing Rules (Page {page}/{total_pages})</b>\n\n"
             text += "Manage how sources route to target groups.\n\n"
             text += "Select a source to manage its routing:"
             
-            sources = await self.get_cached_sources()
             keyboard_rows = []
-            
-            for source in sources:
+            for source in paginated_sources:
                 type_emojis = {'channel': '📢', 'group': '👥', 'dm': '💬'}
                 type_emoji = type_emojis.get(source['source_type'], '📡')
                 name = source.get('display_name') or source.get('group_display_name') or source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
@@ -246,6 +260,10 @@ class SourcesHandler:
                     )
                 ])
             
+            if total_pages > 1:
+                pagination_buttons = self.keyboards.pagination(f"sources:routing", page, total_pages)
+                keyboard_rows.append(pagination_buttons)
+
             keyboard_rows.append([
                 InlineKeyboardButton(text="🔙 Back", callback_data="menu:sources")
             ])

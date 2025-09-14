@@ -17,6 +17,10 @@ class EventRouter:
         self.event_model = EventModel(db)
         self.running = False
         self._task: Optional[asyncio.Task] = None
+        self.mgmt_bot = None
+    
+    def set_management_bot(self, bot):
+        self.mgmt_bot = bot
     
     async def start(self):
         """Start the event routing system"""
@@ -80,16 +84,14 @@ class EventRouter:
                 logger.warning(f"Event {event.get('id')} has no kind")
                 return
             
-            # Notification system removed - no longer checking blacklist or event type settings
-            
-            # Removed notification event handlers for reply, mention, and dm events
-            
             if event_kind == 'token_call':
                 await self._handle_token_call_event(event)
             elif event_kind == 'source_token_call':
                 await self._handle_token_call_event(event)  # Handle same as token_call
             elif event_kind == 'system':
                 await self._handle_system_event(event)
+            elif event_kind.startswith('notification_'):
+                await self._handle_notification_event(event)
             elif event_kind in ['reply', 'mention', 'dm', 'test']:
                 # These event types are no longer supported (notification feature removed)
                 # Silently mark as processed without logging warnings
@@ -109,6 +111,72 @@ class EventRouter:
         except Exception as e:
             event_id = event.get('id', 'unknown') if isinstance(event, dict) else 'unknown'
             logger.error(f"Error routing event {event_id}: {e}")
+    
+    async def _handle_notification_event(self, event: Dict[str, Any]):
+        """Handle notification events"""
+        try:
+            payload = json.loads(event['payload']) if isinstance(event['payload'], str) else event['payload']
+            
+            # Get notification channel
+            settings = await db.fetchrow("SELECT * FROM notification_settings LIMIT 1")
+            if not settings or not settings['notification_channel_id']:
+                logger.warning("Notification channel not set, cannot send notification")
+                return
+
+            notification_channel_id = settings['notification_channel_id']
+
+            # Format message
+            event_type = payload.get('event_type', 'unknown')
+            user_id = payload.get('user_id')
+            chat_id = payload.get('chat_id')
+            chat_title = payload.get('chat_title')
+            message_id = payload.get('message_id')
+            message_text = payload.get('message_text')
+            userbot_username = payload.get('userbot_username')
+
+            if not self.mgmt_bot:
+                logger.error("Management bot not set in EventRouter, cannot send notification")
+                return
+            
+            bot = self.mgmt_bot.bot
+
+            # Get user and chat info
+            try:
+                user = await bot.get_chat(user_id)
+                user_name = user.full_name
+            except Exception:
+                user_name = f"User {user_id}"
+
+            if not chat_title:
+                try:
+                    chat = await bot.get_chat(chat_id)
+                    chat_title = chat.title
+                except Exception:
+                    chat_title = f"Chat {chat_id}"
+
+            # Format message link
+            if str(chat_id).startswith("-100"):
+                chat_id_stripped = str(chat_id)[4:]
+                message_link = f"https://t.me/c/{chat_id_stripped}/{message_id}"
+            else:
+                # This will not work for private groups without a username
+                message_link = f"https://t.me/c/{abs(chat_id)}/{message_id}"
+
+
+            text = f"- - - - - - - - - - - - - - - - - -\n"
+            text += f"🔔 **New {event_type.title()}**\n"
+            text += f"- - - - - - - - - - - - - - - - - -\n"
+            text += f"**Userbot:** @{userbot_username}\n"
+            text += f"**Group:** {chat_title}\n"
+            text += f"**From:** {user_name} (`{user_id}`)\n"
+            text += f"**Message:**\n> {message_text}\n\n"
+            text += f"[🔗 View Message]({message_link})\n"
+            text += f"- - - - - - - - - - - - -- - - - - -"
+
+            await bot.send_message(notification_channel_id, text, parse_mode="Markdown", disable_web_page_preview=True)
+
+        except Exception as e:
+            logger.error(f"Error handling notification event: {e}")
     
     
     async def _handle_system_event(self, event: Dict[str, Any]):

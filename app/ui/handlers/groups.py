@@ -53,17 +53,22 @@ class GroupsHandler:
         self.cache.clear()
         self.cache_time.clear()
     
-    async def show_groups_menu(self, query: types.CallbackQuery):
+    async def show_groups_menu(self, query: types.CallbackQuery, page: int = 1):
         """Display groups management menu"""
         try:
             groups_list = await self.get_cached_groups_with_stats()
-            
-            text = "<b>👥 Groups Management</b>\n\n"
+            page_size = 5
+            total_pages = (len(groups_list) + page_size - 1) // page_size
+            start_index = (page - 1) * page_size
+            end_index = start_index + page_size
+            paginated_groups = groups_list[start_index:end_index]
+
+            text = f"<b>👥 Groups Management (Page {page}/{total_pages})</b>\n\n"
             
             if not groups_list:
                 text += "No groups configured yet.\nClick 'Add Group' to start."
             else:
-                for g in groups_list[:5]:  # Show first 5 in detail
+                for g in paginated_groups:
                     status = "✅" if g['enabled'] else "🔴"
                     bot_icon = "🤖" if g['userbot_id'] else "⚠️"
                     display_name = g.get('display_name') or g['title'] or f"Chat {g['tg_chat_id']}"
@@ -76,7 +81,11 @@ class GroupsHandler:
             
             await query.message.edit_text(
                 text,
-                reply_markup=self.keyboards.groups_menu([dict(g) for g in groups_list])
+                reply_markup=self.keyboards.groups_menu(
+                    [dict(g) for g in paginated_groups],
+                    page=page,
+                    total_pages=total_pages
+                )
             )
         except Exception as e:
             logger.error(f"Error showing groups menu: {e}")
@@ -85,6 +94,14 @@ class GroupsHandler:
     async def handle_group_action(self, query: types.CallbackQuery, state: FSMContext):
         """Handle group-related callbacks"""
         parts = query.data.split(':')
+        
+        # Handle pagination
+        if parts[0] == 'groups_page':
+            if parts[1] == 'page':
+                page = int(parts[2])
+                await self.show_groups_menu(query, page=page)
+                return
+
         action = parts[1]
         
         if action == 'add':

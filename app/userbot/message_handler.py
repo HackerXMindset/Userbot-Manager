@@ -9,11 +9,12 @@ from typing import Dict, Any, List, Optional
 from telethon import events
 
 from app.db import db
-from app.models import BotModel, GroupModel, ScheduleModel, PnlForwardingRuleModel
+from app.models import BotModel, GroupModel, ScheduleModel, PnlForwardingRuleModel, AutoButtonClickRuleModel
 from .token_monitor import TokenMonitor
 from .call_executor import CallExecutor
 from .source_manager import SourceManager
 from .utils import UserbotUtils
+from .notification_handler import NotificationHandler
 from telethon.tl.types import PeerChannel, PeerChat, PeerUser
 
 logger = logging.getLogger(__name__)
@@ -35,11 +36,13 @@ class MessageHandler:
         self.cache_time = {}
         
         self.pnl_model = PnlForwardingRuleModel(db)
+        self.rule_model = AutoButtonClickRuleModel(db)
 
         # Initialize components
         self.token_monitor = TokenMonitor(userbot_id)
         self.call_executor = CallExecutor(userbot_id, session_manager)
         self.source_manager = SourceManager(userbot_id)
+        self.notification_handler = NotificationHandler(userbot_id, session_manager)
         self.utils = UserbotUtils()
     
     async def setup_event_handlers(self, assigned_groups: List[Dict[str, Any]]):
@@ -48,51 +51,45 @@ class MessageHandler:
         if not client:
             logger.error("Cannot setup handlers - client not available")
             return
-        
-        # Get group IDs for outgoing message tracking
-        group_ids = [g['tg_chat_id'] for g in assigned_groups]
-        
-        # Get ALL sources with routing (not just ones for our groups)
-        # This allows monitoring all sources that might route to any group
-        sources_with_routing = await self.source_manager.get_sources_with_routing()
-        source_chat_ids = [s['source_chat_id'] for s in sources_with_routing if s['target_groups']]
-        
-        # Store assigned groups for reference
-        self.assigned_groups = assigned_groups
-        
-        # Setup global source message monitoring
-        if source_chat_ids:
-            @client.on(events.NewMessage(chats=source_chat_ids))
-            async def handle_source_message(event):
-                await self._handle_source_message(event)
-            
-            @client.on(events.MessageEdited(chats=source_chat_ids))
-            async def handle_source_edited(event):
-                await self._handle_source_message(event, is_edit=True)
-            
-            logger.info(f"Setup global monitoring for {len(source_chat_ids)} source chats")
-        
-        # Setup outgoing message tracking for reply detection
-        @client.on(events.NewMessage(chats=group_ids, outgoing=True))
-        async def track_outgoing_messages(event):
-            await self._track_outgoing_message(event)
-        
-        logger.info(f"Setup handlers for {len(group_ids)} groups and {len(source_chat_ids)} global source chats")
 
-        pnl_rules = await self.pnl_model.get_all_with_details()
-        pnl_source_chat_ids = list(set(rule['source_group_chat_id'] for rule in pnl_rules))
-        
-        logger.info(f"Found {len(pnl_rules)} PNL rules, monitoring {len(pnl_source_chat_ids)} source chats")
-        logger.debug(f"PNL source chat IDs: {pnl_source_chat_ids}")
+        @client.on(events.NewMessage(incoming=True))
+        async def handle_all_incoming(event):
+            await self._process_incoming_event(event)
 
-        if pnl_source_chat_ids:
-            @client.on(events.NewMessage(chats=pnl_source_chat_ids, pattern=r'/pnl.*'))
-            async def handle_pnl_command(event):
-                await self._handle_pnl_command(event)
-            
-            @client.on(events.NewMessage(chats=pnl_source_chat_ids))
-            async def handle_pnl_replies(event):
-                await self._handle_potential_pnl_reply(event)
+        @client.on(events.MessageEdited(incoming=True))
+        async def handle_all_edited(event):
+            await self._process_incoming_event(event, is_edit=True)
+
+        logger.info(f"Setup event handlers for all incoming messages and edits")
+
+    async def _process_incoming_event(self, event, is_edit=False):
+        is_dm = event.is_private
+        is_mention = event.mentioned
+        is_reply_to_me = False
+        if event.is_reply:
+            me = await self.session_manager.get_me()
+            if me:
+                reply_to_msg = await event.get_reply_message()
+                if reply_to_msg and reply_to_msg.sender_id == me.id:
+                    is_reply_to_me = True
+
+        # Handle notifications (only for new messages)
+        if not is_edit:
+            if is_dm:
+                await self.notification_handler.handle_notification_event(event, "dm")
+            if is_mention:
+                await self.notification_handler.handle_notification_event(event, "mention")
+            if is_reply_to_me:
+                await self.notification_handler.handle_notification_event(event, "reply")
+
+        # Handle source logic
+        is_source = await self.source_manager.get_source_by_chat_id(event.chat_id)
+        if is_source:
+            await self._handle_source_message(event, is_edit=is_edit)
+
+        # Handle auto click
+        if not is_edit:
+            await self._handle_auto_click(event)
     
     def is_fresh(self, key, seconds=600):
         """Check if cache entry is fresh (default 10 minutes)"""
@@ -224,6 +221,51 @@ class MessageHandler:
             
         except Exception as e:
             logger.error(f"Error handling source message: {e}")
+
+    async def _handle_auto_click(self, event):
+        if not event.is_reply:
+            return
+
+        reply_to_msg_id = event.message.reply_to_msg_id
+        if not reply_to_msg_id:
+            return
+
+        # Check if this is a reply to a message we are tracking for auto-click
+        tracked_msg = await db.fetchrow(
+            "SELECT * FROM autoclick_tracked_messages WHERE original_message_id = $1 AND chat_id = $2 AND status = 'tracking'",
+            reply_to_msg_id, event.chat_id
+        )
+        if not tracked_msg:
+            return
+
+        # Get the rule associated with this tracked message
+        rule = await self.rule_model.get_by_id(tracked_msg['rule_id'])
+        if not rule or not rule['enabled']:
+            return
+
+        # Check if the reply is from the correct bot
+        if rule['bot_id'] != event.sender_id:
+            return
+            
+        logger.info(f"Valid auto-click reply detected for rule {rule['id']}. Searching for button...")
+
+        # Click the button
+        if event.buttons:
+            for row in event.buttons:
+                for button in row:
+                    if hasattr(button, 'text') and rule['button_text'] in button.text:
+                        try:
+                            await button.click()
+                            logger.info(f"Auto-clicked button '{rule['button_text']}' in chat {event.chat_id} for rule {rule['id']}.")
+                            # Mark as processed
+                            await db.execute("UPDATE autoclick_tracked_messages SET status = 'processed' WHERE id = $1", tracked_msg['id'])
+                            return
+                        except Exception as e:
+                            logger.error(f"Error auto-clicking button for rule {rule['id']}: {e}")
+                            await db.execute("UPDATE autoclick_tracked_messages SET status = 'failed' WHERE id = $1", tracked_msg['id'])
+                            
+        # If we reach here, the button was not found
+        logger.warning(f"Reply from bot {event.sender_id} received, but button '{rule['button_text']}' not found for rule {rule['id']}.")
 
     async def _get_cached_pnl_rules(self, group_id: int, seconds: int = 60) -> List[Dict[str, Any]]:
         """Get PNL forwarding rules for a group, with caching."""
@@ -461,9 +503,9 @@ class MessageHandler:
                         # Mark as sent
                         await db.execute("""
                             UPDATE calls 
-                            SET status = 'sent', sent_at = NOW()
+                            SET status = 'sent', sent_at = NOW(), message_id = $2
                             WHERE id = $1
-                        """, call['id'])
+                        """, call['id'], result['message_id'])
                         processed += 1
                         
                         logger.info(f"Processed scheduled call {call['id']}")

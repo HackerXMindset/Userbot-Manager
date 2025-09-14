@@ -87,6 +87,20 @@ class GroupModel(BaseModel):
         result = await self.db.execute(query, group_id, dest_chat_id)
         return result.split()[-1] == '1'
 
+    async def get_targets_with_group_info(self) -> List[asyncpg.Record]:
+        query = """
+            SELECT 
+                t.*, 
+                g.title as group_title,
+                dest_g.display_name as dest_group_display_name,
+                dest_g.title as dest_group_title
+            FROM targets t
+            JOIN groups g ON g.id = t.group_id
+            LEFT JOIN groups dest_g ON dest_g.tg_chat_id = t.dest_chat_id
+            ORDER BY g.title, t.dest_chat_id
+        """
+        return await self.db.fetch(query)
+
 class ScheduleModel(BaseModel):
     """Model for managing group schedules"""
     
