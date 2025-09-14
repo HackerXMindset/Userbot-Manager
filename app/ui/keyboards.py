@@ -9,24 +9,24 @@ class Keyboards:
         """Main menu keyboard"""
         return InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="📊 Status", callback_data="menu:status"),
+                InlineKeyboardButton(text="🧾 Overview", callback_data="menu:status"),
                 InlineKeyboardButton(text="📈 Tracking", callback_data="menu:tracking")
             ],
             [
                 InlineKeyboardButton(text="👥 Groups", callback_data="menu:groups"),
-                InlineKeyboardButton(text="🤖 Userbots", callback_data="menu:userbots")
+                InlineKeyboardButton(text="👤 Agents", callback_data="menu:userbots")
             ],
             [
                 InlineKeyboardButton(text="📡 Sources", callback_data="menu:sources"),
                 InlineKeyboardButton(text="🚨 Alerts", callback_data="menu:alerts")
             ],
             [
-                InlineKeyboardButton(text="💸 PNL Forwarding", callback_data="menu:pnl"),
-                InlineKeyboardButton(text="🔔 Notifications", callback_data="menu:notifications"),
+                InlineKeyboardButton(text="💹 Profit Logs", callback_data="menu:pnl"),
+                InlineKeyboardButton(text="📬 Inbox", callback_data="menu:notifications"),
             ],
             [
-                InlineKeyboardButton(text="🖱️ Auto Click", callback_data="menu:auto_click"),
-                InlineKeyboardButton(text="❌ Close", callback_data="menu:close")
+                InlineKeyboardButton(text="🤖 Autopilot", callback_data="menu:auto_click"),
+                InlineKeyboardButton(text="🔻 Collapse", callback_data="menu:close")
             ]
         ])
     
