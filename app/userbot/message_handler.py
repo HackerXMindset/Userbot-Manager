@@ -1,3 +1,4 @@
+
 """
 Message Handler - Handles message processing and event routing
 """
@@ -5,11 +6,14 @@ Message Handler - Handles message processing and event routing
 import logging
 import time
 import traceback
+import json
 from typing import Dict, Any, List, Optional
 from telethon import events
 
 from app.db import db
 from app.models import BotModel, GroupModel, ScheduleModel, PnlForwardingRuleModel, AutoButtonClickRuleModel
+from app.models.source_chat import SourceChatModel
+from app.models.call_queue import CallQueueModel
 from .token_monitor import TokenMonitor
 from .call_executor import CallExecutor
 from .source_manager import SourceManager
@@ -37,6 +41,8 @@ class MessageHandler:
         
         self.pnl_model = PnlForwardingRuleModel(db)
         self.rule_model = AutoButtonClickRuleModel(db)
+        self.source_model = SourceChatModel(db)
+        self.call_queue_model = CallQueueModel(db)
 
         # Initialize components
         self.token_monitor = TokenMonitor(userbot_id)
@@ -154,74 +160,147 @@ class MessageHandler:
     async def _handle_source_message(self, event, is_edit: bool = False):
         """Handle messages from source chats - extract tokens and route to targets"""
         try:
+            logger.info(f"[SPLIT-RESP] Processing source message - Chat: {event.chat_id}, Userbot: {self.userbot_id}, Edit: {is_edit}")
+
             # Validate source permissions
             permission_check = await self.source_manager.validate_source_permissions(event)
-            
+
             if not permission_check['allowed']:
-                logger.debug(f"Source message rejected: {permission_check['reason']}")
+                logger.debug(f"[SPLIT-RESP] Source message rejected: {permission_check['reason']}")
                 return
-            
+
             source = permission_check['source']
+            logger.info(f"[SPLIT-RESP] Source validated - ID: {source['id']}, Name: {source.get('name', 'N/A')}")
+
+            # Check if this userbot is assigned to monitor this source
+            routing_rules = await self.source_model.get_routing_rules(source['id'])
+            logger.info(f"[SPLIT-RESP] Found {len(routing_rules)} routing rules for source {source['id']}")
+
+            # Determine the designated monitoring bot for this source
+            designated_monitors = {rule['monitoring_userbot_id'] for rule in routing_rules if rule['monitoring_userbot_id'] is not None}
             
+            monitoring_allowed = False
+            
+            if designated_monitors:
+                # If there are explicit assignments, only ONE bot should monitor.
+                # By convention, we'll deterministically pick the one with the lowest ID.
+                primary_monitor_id = min(designated_monitors)
+                if self.userbot_id == primary_monitor_id:
+                    monitoring_allowed = True
+                    logger.info(f"[SPLIT-RESP] Userbot {self.userbot_id} is the designated primary monitor (min ID) for source {source['id']}")
+            else:
+                # BACKWARD COMPATIBILITY: No explicit monitor is set.
+                # To prevent a race condition, we'll deterministically assign monitoring duty
+                # to the forwarding bot of the *first* routing rule found.
+                if routing_rules and routing_rules[0]['forwarding_userbot_id']:
+                    primary_monitor_id = routing_rules[0]['forwarding_userbot_id']
+                    if self.userbot_id == primary_monitor_id:
+                        monitoring_allowed = True
+                        logger.info(f"[SPLIT-RESP] Userbot {self.userbot_id} assigned as monitor by backward compatibility rule (first forwarder) for source {source['id']}")
+
+            if not monitoring_allowed:
+                logger.info(f"[SPLIT-RESP] Userbot {self.userbot_id} is not the designated primary monitor for source {event.chat_id} - SKIPPING")
+                return
+
             # Get all target groups for this source using routing rules
             target_groups = await self.source_manager.get_target_groups_for_source(event.chat_id)
-            
+
             if not target_groups:
-                logger.warning(f"No target groups found for source {event.chat_id}")
+                logger.warning(f"[SPLIT-RESP] No target groups found for source {event.chat_id}")
                 return
-            
+
+            logger.info(f"[SPLIT-RESP] Found {len(target_groups)} target groups: {[f'{g['title']}({g['id']})' for g in target_groups]}")
+
             # Process message for tokens
             addresses = await self.token_monitor.process_source_message(event, event.chat_id, target_groups)
+
+            if addresses:
+                logger.info(f"[SPLIT-RESP] Extracted {len(addresses)} token addresses: {[addr[:8] + '...' for addr in addresses]}")
+            else:
+                logger.debug(f"[SPLIT-RESP] No token addresses found in message")
             
             if addresses:
-                
-                # Forward tokens to all target groups
-                total_sent = 0
+                logger.info(f"[SPLIT-RESP] Starting job queue population for {len(addresses)} tokens across {len(target_groups)} target groups")
+
+                # Queue tokens for all target groups
+                total_queued = 0
                 total_failed = 0
-                
+
                 for target_group in target_groups:
+                    logger.debug(f"[SPLIT-RESP] Processing target group: {target_group['title']}({target_group['id']})")
+
                     # Check if group can accept calls at current time/day
                     if not await self._can_group_accept_calls(target_group['tg_chat_id']):
-                        logger.info(f"Skipping group {target_group['tg_chat_id']} - outside schedule window")
+                        logger.info(f"[SPLIT-RESP] Skipping group {target_group['tg_chat_id']} - outside schedule window")
                         continue
-                    
-                    group_sent = 0
+
+                    group_queued = 0
                     group_failed = 0
-                    
-                    # Send each token to this target group
+
+                    # Find routing rule and forwarding userbot for this target group
+                    routing_rule = None
+                    forwarding_userbot_id = None
+
+                    for rule in routing_rules:
+                        if rule['target_group_id'] == target_group['id'] and rule['enabled']:
+                            routing_rule = rule
+                            forwarding_userbot_id = rule['forwarding_userbot_id']
+                            logger.debug(f"[SPLIT-RESP] Matched routing rule {rule['id']} for group {target_group['id']}, forwarding_userbot: {forwarding_userbot_id}")
+                            break
+
+                    if not routing_rule:
+                        logger.warning(f"[SPLIT-RESP] No routing rule found for target group {target_group['id']} - SKIPPING")
+                        continue
+
+                    # Use any active userbot if no forwarding userbot assigned (backward compatibility)
+                    if not forwarding_userbot_id:
+                        forwarding_userbot_id = self.userbot_id
+                        logger.info(f"[SPLIT-RESP] No forwarding userbot assigned, using current userbot {self.userbot_id} (backward compatibility)")
+                    else:
+                        logger.info(f"[SPLIT-RESP] Using assigned forwarding userbot {forwarding_userbot_id}")
+
+                    # Queue each token for this target group
                     for address in addresses:
                         try:
                             # Get source info for the call
                             source_info = f"From {source.get('name') or source.get('title') or event.chat_id}"
                             additional_info = self.utils.get_message_text(event.message) if hasattr(event, 'message') else ""
-                            
-                            # Send call message to this target group
-                            result = await self.call_executor.send_call_message(
-                                target_chat_id=target_group['tg_chat_id'],
+
+                            logger.debug(f"[SPLIT-RESP] Queueing token {address[:8]}... for target {target_group['id']} via userbot {forwarding_userbot_id}")
+
+                            # Add job to call queue
+                            job = await self.call_queue_model.add_job(
+                                routing_rule_id=routing_rule['id'],
                                 token_address=address,
-                                additional_info=additional_info,
-                                source_info=source_info
+                                source_message_id=event.id,
+                                source_chat_id=event.chat_id,
+                                target_group_id=target_group['id'],
+                                target_chat_id=target_group['tg_chat_id'],
+                                forwarding_userbot_id=forwarding_userbot_id,
+                                source_info=json.dumps(source_info),
+                                additional_info=json.dumps(additional_info)
                             )
-                            
-                            if result['success']:
-                                group_sent += 1
-                                total_sent += 1
+
+                            if job:
+                                group_queued += 1
+                                total_queued += 1
+                                logger.debug(f"[SPLIT-RESP] ✅ Job {job['id']} created for {address[:8]}... → {target_group['title']}")
                             else:
                                 group_failed += 1
                                 total_failed += 1
-                                logger.warning(f"Failed to send {address[:8]}... to {target_group['title'] or target_group['tg_chat_id']}: {result.get('error')}")
-                                
+                                logger.warning(f"[SPLIT-RESP] ❌ Failed to queue {address[:8]}... for {target_group['title'] or target_group['tg_chat_id']}")
+
                         except Exception as token_error:
                             group_failed += 1
                             total_failed += 1
-                            logger.error(f"Error sending token {address[:8]}... to target {target_group['tg_chat_id']}: {token_error}")
-                    
-                    if group_sent > 0:
-                        logger.debug(f"Sent {group_sent} tokens to {target_group['title'] or target_group['tg_chat_id']}")
+                            logger.error(f"[SPLIT-RESP] ❌ Error queuing token {address[:8]}... for target {target_group['tg_chat_id']}: {token_error}")
+
+                    if group_queued > 0:
+                        logger.info(f"[SPLIT-RESP] ✅ Group {target_group['title']}: {group_queued} tokens queued")
                     if group_failed > 0:
-                        logger.warning(f"Failed {group_failed} tokens to {target_group['title'] or target_group['tg_chat_id']}")
-                
-                logger.info(f"Forwarded {len(addresses)} tokens to {len(target_groups)} target groups: {total_sent} sent, {total_failed} failed")
+                        logger.warning(f"[SPLIT-RESP] ❌ Group {target_group['title']}: {group_failed} tokens failed")
+
+                logger.info(f"[SPLIT-RESP] 🎯 QUEUE SUMMARY: {total_queued} jobs created, {total_failed} failed across {len(target_groups)} target groups")
             
             # Update bot last seen
             await self.bot_model.update_last_seen(self.userbot_id)

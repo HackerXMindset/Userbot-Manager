@@ -23,6 +23,7 @@ from app.scheduler import Scheduler
 from app.events import EventRouter
 from app.dex import get_dex_service
 from app.userbot.manager import UserbotManager
+from app.services.call_dispatcher import CallDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,9 @@ class SystemManager:
             # Userbot manager
             self.components['userbot_manager'] = UserbotManager()
 
+            # Call dispatcher (requires userbot manager)
+            self.components['call_dispatcher'] = CallDispatcher(self.components['userbot_manager'])
+
             # Pass userbot_manager to dex_service
             self.components['dex_service'].set_userbot_manager(self.components['userbot_manager'])
             
@@ -86,9 +90,10 @@ class SystemManager:
             # Start services in order
             start_order = [
                 'event_router',
-                'dex_service', 
+                'dex_service',
                 'scheduler',
-                'userbot_manager'
+                'userbot_manager',
+                'call_dispatcher'
             ]
             
             for component_name in start_order:

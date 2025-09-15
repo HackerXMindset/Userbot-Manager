@@ -3,6 +3,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 import logging
 import time
+from typing import Optional
 
 from app.ui.keyboards import Keyboards
 from app.ui.states import ManagementStates
@@ -107,14 +108,42 @@ class SourcesHandler:
 
     async def handle_sources_action(self, query: types.CallbackQuery, state: FSMContext = None):
         """Handle sources actions"""
+        logger.debug(f"handle_sources_action received callback: {query.data}")
         parts = query.data.split(':')
+        
+        # Handle pagination for manage_global
+        if parts[0] == 'sources_manage_page':
+            if parts[1] == 'page':
+                page = int(parts[2])
+                await self.show_manage_global_sources(query, page=page)
+            return
+
+        # Handle pagination for add_route
+        if parts[0] == 'add_route_page':
+            logger.debug(f"Handling 'add_route_page' pagination. Parts: {parts}")
+            try:
+                source_id = int(parts[1])
+                if parts[2] == 'page':
+                    if len(parts) > 3 and parts[3].isdigit():
+                        page = int(parts[3])
+                        logger.debug(f"Calling show_add_route_menu for source {source_id}, page {page}")
+                        await self.show_add_route_menu(query, source_id, page=page)
+                    else:
+                        logger.debug("Pagination info button clicked. Doing nothing.")
+                        await query.answer()
+                else:
+                    logger.warning(f"Unknown 'add_route_page' action: {parts}")
+            except Exception as e:
+                logger.error(f"Error in 'add_route_page' handler: {e}", exc_info=True)
+                await query.answer("❌ Error processing page change.")
+            return
+
         action = parts[1]
         
         if action == 'add_global':
             await self.start_add_global_source(query, state)
         elif action == 'manage_global':
-            page = int(parts[2]) if len(parts) > 2 else 1
-            await self.show_manage_global_sources(query, page=page)
+            await self.show_manage_global_sources(query, page=1)
         elif action == 'routing':
             page = int(parts[2]) if len(parts) > 2 else 1
             await self.show_routing_menu(query, page=page)
@@ -123,10 +152,24 @@ class SourcesHandler:
             await self.show_source_details(query, source_id)
         elif action == 'add_route':
             source_id = int(parts[2])
-            await self.show_add_route_menu(query, source_id)
+            await self.show_add_route_menu(query, source_id, page=1)
         elif action == 'create_route':
             source_id, group_id = int(parts[2]), int(parts[3])
-            await self.create_routing_rule(query, source_id, group_id)
+            await self.show_userbot_selection(query, source_id, group_id)
+        elif action == 'select_role':
+            source_id, group_id, role, monitor_bot_id, forward_bot_id = int(parts[2]), int(parts[3]), parts[4], int(parts[5]), int(parts[6])
+            await self.show_bot_picker(query, source_id, group_id, role, monitor_bot_id, forward_bot_id)
+        elif action == 'set_bot':
+            source_id, group_id, monitor_bot_id, forward_bot_id = int(parts[2]), int(parts[3]), int(parts[4]), int(parts[5])
+            await self.show_userbot_selection(query, source_id, group_id, monitor_bot_id if monitor_bot_id != 0 else None, forward_bot_id if forward_bot_id != 0 else None)
+        elif action == 'auto_assign':
+            source_id, group_id = int(parts[2]), int(parts[3])
+            await self.handle_auto_assign(query, source_id, group_id)
+        elif action == 'finalize_route':
+            source_id, group_id, monitoring_id, forwarding_id = int(parts[2]), int(parts[3]), parts[4], parts[5]
+            monitoring_userbot_id = int(monitoring_id) if monitoring_id != 'None' else None
+            forwarding_userbot_id = int(forwarding_id) if forwarding_id != 'None' else None
+            await self.create_routing_rule(query, source_id, group_id, monitoring_userbot_id, forwarding_userbot_id)
         elif action == 'remove_route':
             source_id, group_id = int(parts[2]), int(parts[3])
             await self.remove_routing_rule(query, source_id, group_id)
@@ -188,20 +231,30 @@ class SourcesHandler:
             logger.error(f"Error starting add global source: {e}")
             await query.answer("❌ Error starting source setup")
     
-    async def show_manage_global_sources(self, query: types.CallbackQuery):
+    async def show_manage_global_sources(self, query: types.CallbackQuery, page: int = 1):
         """Show all sources for management"""
+        logger.debug(f"Entering show_manage_global_sources, page={page}")
         try:
             sources = await self.get_cached_sources()
+            logger.debug(f"Found {len(sources)} sources from cache.")
             
-            text = "<b>📋 Manage Global Sources</b>\n\n"
+            page_size = 9
+            total_pages = (len(sources) + page_size - 1) // page_size
+            start_index = (page - 1) * page_size
+            end_index = start_index + page_size
+            paginated_sources = sources[start_index:end_index]
+
+            text = f"<b>📋 Manage Global Sources (Page {page}/{total_pages})</b>\n\n"
             
             if not sources:
                 text += "No sources configured yet."
             else:
                 text += "Click a source to view details and manage routing:\n\n"
-                
+            
+            logger.debug("Building keyboard for manage sources.")
             keyboard_rows = []
-            for source in sources:
+            for source in paginated_sources:
+                logger.debug(f"Processing source: {dict(source)}")
                 type_emojis = {'channel': '📢', 'group': '👥', 'dm': '💬'}
                 status = "✅" if source['enabled'] else "❌"
                 type_emoji = type_emojis.get(source['source_type'], '📡')
@@ -214,17 +267,23 @@ class SourcesHandler:
                     )
                 ])
             
+            if total_pages > 1:
+                pagination_buttons = self.keyboards.pagination(f"sources_manage_page", page, total_pages)
+                keyboard_rows.append(pagination_buttons)
+
             keyboard_rows.extend([
                 [InlineKeyboardButton(text="🔙 Back", callback_data="menu:sources")]
             ])
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+            logger.debug("Sending message with keyboard.")
             await query.message.edit_text(text, reply_markup=keyboard)
+            logger.debug("Message sent successfully.")
             
         except Exception as e:
-            logger.error(f"Error showing manage sources: {e}")
+            logger.error(f"Error showing manage sources: {e}", exc_info=True)
             await query.answer("❌ Error loading sources")
-    
+
     async def show_routing_menu(self, query: types.CallbackQuery, page: int = 1):
         """Show routing rules overview with pagination."""
         try:
@@ -288,7 +347,7 @@ class SourcesHandler:
             routes = await self.source_model.get_routing_rules(source_id)
             
             type_emojis = {'channel': '📢', 'group': '👥', 'dm': '💬'}
-            status = "✅ Enabled" if source['enabled'] else "❌ Disabled"
+            status = "✅" if source['enabled'] else "❌"
             type_emoji = type_emojis.get(source['source_type'], '📡')
             name = source.get('display_name') or source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
             
@@ -304,6 +363,18 @@ class SourcesHandler:
                     route_status = "✅" if route['enabled'] else "❌"
                     group_name = route['group_title'] or f"Chat {route['tg_chat_id']}"
                     text += f"{route_status} → <b>{group_name}</b>\n"
+
+                    # Add userbot assignments if present
+                    userbot_info = []
+                    if route['monitoring_userbot_name']:
+                        userbot_info.append(f"👁️ Monitor: {route['monitoring_userbot_name']}")
+                    if route['forwarding_userbot_name']:
+                        userbot_info.append(f"📤 Forward: {route['forwarding_userbot_name']}")
+
+                    if userbot_info:
+                        text += f"     {' | '.join(userbot_info)}\n"
+                    else:
+                        text += f"     🤖 Auto-assigned\n"
             else:
                 text += "📭 <b>No routing rules configured</b>\n"
                 text += "Add routes to forward tokens to target groups."
@@ -330,12 +401,16 @@ class SourcesHandler:
                     InlineKeyboardButton(text="👥 Manage Users", callback_data=f"sources:users:{source_id}")
                 ])
             
-            # Add remove route buttons for existing routes
+            # Add edit/remove route buttons for existing routes
             for route in routes:
-                group_name = (route['group_title'] or f"Chat {route['tg_chat_id']}")[:25]
+                group_name = (route['group_title'] or f"Chat {route['tg_chat_id']}")[:20]
                 keyboard_rows.append([
                     InlineKeyboardButton(
-                        text=f"🗑️ Remove → {group_name}",
+                        text=f"🤖 Edit Bots → {group_name}",
+                        callback_data=f"sources:create_route:{source_id}:{route['target_group_id']}"
+                    ),
+                    InlineKeyboardButton(
+                        text="🗑️",
                         callback_data=f"sources:remove_route:{source_id}:{route['target_group_id']}"
                     )
                 ])
@@ -343,8 +418,8 @@ class SourcesHandler:
             keyboard_rows.extend([
                 [InlineKeyboardButton(text="🗑️ Delete Source", callback_data=f"sources:delete:{source_id}")],
                 [InlineKeyboardButton(text="🔙 Back", callback_data="sources:manage_global")],
-                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]
-            ])
+                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]]
+            )
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
             await query.message.edit_text(text, reply_markup=keyboard)
@@ -353,8 +428,8 @@ class SourcesHandler:
             logger.error(f"Error showing source details: {e}")
             await query.answer("❌ Error loading source details")
     
-    async def show_add_route_menu(self, query: types.CallbackQuery, source_id: int):
-        """Show available groups to route to"""
+    async def show_add_route_menu(self, query: types.CallbackQuery, source_id: int, page: int = 1):
+        """Show available groups to route to with pagination."""
         try:
             # Get source info
             source = await self.db.fetchrow("SELECT * FROM source_chats WHERE id = $1", source_id)
@@ -373,18 +448,24 @@ class SourcesHandler:
             available_groups = [g for g in groups if g['id'] not in existing_group_ids]
             
             source_name = source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
-            text = f"<b>➕ Add Route for {source_name}</b>\n\n"
             
+            # Pagination
+            page_size = 9
+            total_pages = (len(available_groups) + page_size - 1) // page_size
+            start_index = (page - 1) * page_size
+            end_index = start_index + page_size
+            paginated_groups = available_groups[start_index:end_index]
+
+            text = f"<b>➕ Add Route for {source_name} (Page {page}/{total_pages})</b>\n\n"
+            
+            keyboard_rows = []
+
             if not available_groups:
                 text += "No available groups to route to.\nAll groups already have routing rules from this source."
-                keyboard_rows = [
-                    [InlineKeyboardButton(text="🔙 Back", callback_data=f"sources:source_details:{source_id}")]
-                ]
             else:
                 text += "Select target group to route to:"
-                keyboard_rows = []
                 
-                for group in available_groups:
+                for group in paginated_groups:
                     group_name = group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}"
                     status_icon = "✅" if group['enabled'] else "❌"
                     
@@ -394,43 +475,185 @@ class SourcesHandler:
                             callback_data=f"sources:create_route:{source_id}:{group['id']}"
                         )
                     ])
-                
-                keyboard_rows.append([
-                    InlineKeyboardButton(text="🔙 Back", callback_data=f"sources:source_details:{source_id}")
-                ])
+            
+            if total_pages > 1:
+                # Use a unique prefix for this pagination
+                pagination_buttons = self.keyboards.pagination(f"add_route_page:{source_id}", page, total_pages)
+                keyboard_rows.append(pagination_buttons)
+
+            keyboard_rows.append([
+                InlineKeyboardButton(text="🔙 Back", callback_data=f"sources:source_details:{source_id}")
+            ])
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
             await query.message.edit_text(text, reply_markup=keyboard)
+            await query.answer()
             
         except Exception as e:
-            logger.error(f"Error showing add route menu: {e}")
+            logger.error(f"Error showing add route menu: {e}", exc_info=True)
             await query.answer("❌ Error loading available routes")
-    
-    async def create_routing_rule(self, query: types.CallbackQuery, source_id: int, group_id: int):
-        """Create a new routing rule"""
+
+    async def show_userbot_selection(self, query: types.CallbackQuery, source_id: int, group_id: int, monitor_bot_id: Optional[int] = None, forward_bot_id: Optional[int] = None):
+        """Show userbot assignment UI for a route."""
+        try:
+            from app.models.bot import BotModel
+            bot_model = BotModel(self.db)
+            
+            # Get existing route to pre-fill selections
+            route = await self.db.fetchrow("SELECT * FROM routing_rules WHERE source_chat_id = $1 AND target_group_id = $2", source_id, group_id)
+            if route:
+                if monitor_bot_id is None:
+                    monitor_bot_id = route.get('monitoring_userbot_id')
+                if forward_bot_id is None:
+                    forward_bot_id = route.get('forwarding_userbot_id')
+
+            source = await self.db.fetchrow("SELECT * FROM source_chats WHERE id = $1", source_id)
+            group = await self.db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
+
+            source_name = source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
+            group_name = group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}"
+
+            # Get names for selected bots
+            monitor_bot_name = "Not Set"
+            if monitor_bot_id:
+                bot = await bot_model.get_by_id(monitor_bot_id)
+                if bot:
+                    monitor_bot_name = bot.get('display_name') or bot['session_name']
+
+            forward_bot_name = "Not Set"
+            if forward_bot_id:
+                bot = await bot_model.get_by_id(forward_bot_id)
+                if bot:
+                    forward_bot_name = bot.get('display_name') or bot['session_name']
+
+            text = (
+                f"<b>🤖 Assign Userbots</b>\n\n"
+                f"<b>Source:</b> {source_name}\n"
+                f"<b>Target:</b> {group_name}\n\n"
+                "Select userbots for monitoring this source and forwarding calls to the target.\n\n"
+                f"👁️ <b>Monitor Bot:</b> {monitor_bot_name}\n"
+                f"📤 <b>Forward Bot:</b> {forward_bot_name}"
+            )
+
+            keyboard_rows = []
+            
+            # Buttons to change selection
+            keyboard_rows.append([
+                InlineKeyboardButton(text="👁️ Set Monitor", callback_data=f"sources:select_role:{source_id}:{group_id}:monitor:{monitor_bot_id or 0}:{forward_bot_id or 0}"),
+                InlineKeyboardButton(text="📤 Set Forward", callback_data=f"sources:select_role:{source_id}:{group_id}:forward:{monitor_bot_id or 0}:{forward_bot_id or 0}")
+            ])
+
+            # Save button
+            if monitor_bot_id or forward_bot_id:
+                keyboard_rows.append([
+                    InlineKeyboardButton(text="✅ Save Assignment", callback_data=f"sources:finalize_route:{source_id}:{group_id}:{monitor_bot_id or 'None'}:{forward_bot_id or 'None'}")
+                ])
+
+            keyboard_rows.extend([
+                [InlineKeyboardButton(text="⭐ Auto-assign Both", callback_data=f"sources:auto_assign:{source_id}:{group_id}")],
+                [InlineKeyboardButton(text="➡️ Create Without Assignment", callback_data=f"sources:finalize_route:{source_id}:{group_id}:None:None")],
+                [InlineKeyboardButton(text="🔙 Back", callback_data=f"sources:source_details:{source_id}")]
+            ])
+
+            await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows))
+        except Exception as e:
+            logger.error(f"Error in show_userbot_selection: {e}", exc_info=True)
+            await query.answer("❌ Error loading userbot assignment UI")
+
+    async def show_bot_picker(self, query: types.CallbackQuery, source_id: int, group_id: int, role: str, monitor_bot_id: int, forward_bot_id: int):
+        """Show a list of userbots to choose for a role."""
+        try:
+            from app.models.bot import BotModel
+            bot_model = BotModel(self.db)
+            userbots = await bot_model.get_active_userbots()
+
+            text = f"<b>Select {role.title()} Bot</b>"
+            
+            keyboard_rows = []
+            for bot in userbots:
+                bot_name = bot.get('display_name') or bot['session_name']
+                
+                new_monitor_id = bot['id'] if role == 'monitor' else monitor_bot_id
+                new_forward_id = bot['id'] if role == 'forward' else forward_bot_id
+                
+                keyboard_rows.append([
+                    InlineKeyboardButton(text=bot_name, callback_data=f"sources:set_bot:{source_id}:{group_id}:{new_monitor_id}:{new_forward_id}")
+                ])
+
+            # Unset button
+            new_monitor_id = 0 if role == 'monitor' else monitor_bot_id
+            new_forward_id = 0 if role == 'forward' else forward_bot_id
+            keyboard_rows.append([
+                InlineKeyboardButton(text="🚫 Unset", callback_data=f"sources:set_bot:{source_id}:{group_id}:{new_monitor_id}:{new_forward_id}")
+            ])
+
+            # Back button
+            keyboard_rows.append([
+                InlineKeyboardButton(text="🔙 Back", callback_data=f"sources:set_bot:{source_id}:{group_id}:{monitor_bot_id}:{forward_bot_id}")
+            ])
+            
+            await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows))
+        except Exception as e:
+            logger.error(f"Error in show_bot_picker: {e}", exc_info=True)
+            await query.answer("❌ Error loading bot list")
+
+    async def handle_auto_assign(self, query: types.CallbackQuery, source_id: int, group_id: int):
+        """Handle auto-assignment of both monitoring and forwarding to first available userbot"""
+        try:
+            from app.models.bot import BotModel
+            bot_model = BotModel(self.db)
+            userbots = await bot_model.get_active_userbots()
+
+            if not userbots:
+                await query.answer("❌ No active userbots available")
+                return
+
+            # Use first available userbot for both roles
+            first_bot = userbots[0]
+            await self.create_routing_rule(query, source_id, group_id, first_bot['id'], first_bot['id'])
+
+        except Exception as e:
+            logger.error(f"Error handling auto assign: {e}")
+            await query.answer("❌ Error auto-assigning userbots")
+
+    async def create_routing_rule(self, query: types.CallbackQuery, source_id: int, group_id: int,
+                                 monitoring_userbot_id: int = None, forwarding_userbot_id: int = None):
+        """Create a new routing rule with optional userbot assignments"""
         try:
             # Get source and group info
             source = await self.db.fetchrow("SELECT * FROM source_chats WHERE id = $1", source_id)
             group = await self.db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
-            
+
             if not source or not group:
                 await query.answer("❌ Source or group not found")
                 return
-            
-            # Create the routing rule
-            route = await self.source_model.add_routing_rule(source_id, group_id)
-            
+
+            # Create the routing rule with userbot assignments
+            route = await self.source_model.add_routing_rule(source_id, group_id, monitoring_userbot_id, forwarding_userbot_id)
+
             # Clear cache since we added new routing rule
             self.clear_cache()
-            
+
             source_name = source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
             group_name = group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}"
-            
+
             text = f"✅ <b>Routing Rule Created</b>\n\n"
             text += f"<b>Source:</b> {source_name}\n"
             text += f"<b>Target:</b> {group_name}\n\n"
+
+            # Show userbot assignments if any
+            if monitoring_userbot_id or forwarding_userbot_id:
+                text += "<b>Userbot Assignments:</b>\n"
+                if monitoring_userbot_id:
+                    monitor_bot = await self.db.fetchrow("SELECT session_name FROM bots WHERE id = $1", monitoring_userbot_id)
+                    text += f"• Monitor: {monitor_bot['session_name'] if monitor_bot else 'Unknown'}\n"
+                if forwarding_userbot_id:
+                    forward_bot = await self.db.fetchrow("SELECT session_name FROM bots WHERE id = $1", forwarding_userbot_id)
+                    text += f"• Forward: {forward_bot['session_name'] if forward_bot else 'Unknown'}\n"
+                text += "\n"
+
             text += "Tokens detected in this source will now be forwarded to the target group."
-            
+
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [
                     InlineKeyboardButton(text="➕ Add Another Route", callback_data=f"sources:add_route:{source_id}"),
@@ -439,10 +662,10 @@ class SourcesHandler:
                 [InlineKeyboardButton(text="📋 Manage Sources", callback_data="sources:manage_global")],
                 [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]
             ])
-            
+
             await query.message.edit_text(text, reply_markup=keyboard)
             await query.answer("✅ Route created successfully")
-            
+
         except Exception as e:
             logger.error(f"Error creating routing rule: {e}")
             await query.answer("❌ Error creating routing rule")
@@ -845,7 +1068,7 @@ class SourcesHandler:
             text = f"✅ <b>User Added</b>\n\n"
             text += f"Name: {display_name}\n"
             text += f"User ID: <code>{user_id}</code>\n"
-            text += f"This user can now trigger token forwards from this source."
+            text += "This user can now trigger token forwards from this source."
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="👥 Manage Users", callback_data=f"sources:users:{source_id}")],

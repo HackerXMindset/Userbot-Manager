@@ -49,23 +49,32 @@ class SourceChatModel(BaseModel):
         """
         return await self.db.fetchrow(query, source_chat_id, source_type, name, title)
     
-    async def add_routing_rule(self, source_id: int, target_group_id: int) -> asyncpg.Record:
-        """Add a routing rule from source to target group"""
+    async def add_routing_rule(self, source_id: int, target_group_id: int,
+                              monitoring_userbot_id: int = None, forwarding_userbot_id: int = None) -> asyncpg.Record:
+        """Add a routing rule from source to target group with userbot assignments"""
         query = """
-            INSERT INTO routing_rules (source_chat_id, target_group_id)
-            VALUES ($1, $2)
+            INSERT INTO routing_rules (source_chat_id, target_group_id, monitoring_userbot_id, forwarding_userbot_id)
+            VALUES ($1, $2, $3, $4)
             ON CONFLICT (source_chat_id, target_group_id) DO UPDATE SET
-                enabled = true
+                enabled = true,
+                monitoring_userbot_id = $3,
+                forwarding_userbot_id = $4
             RETURNING *
         """
-        return await self.db.fetchrow(query, source_id, target_group_id)
+        return await self.db.fetchrow(query, source_id, target_group_id, monitoring_userbot_id, forwarding_userbot_id)
     
     async def get_routing_rules(self, source_id: int) -> List[asyncpg.Record]:
-        """Get all routing rules for a source"""
+        """Get all routing rules for a source with userbot assignments"""
         query = """
-            SELECT rr.*, COALESCE(g.display_name, g.title) as group_title, g.tg_chat_id
+            SELECT rr.*,
+                   COALESCE(g.display_name, g.title) as group_title,
+                   g.tg_chat_id,
+                   mb.session_name as monitoring_userbot_name,
+                   fb.session_name as forwarding_userbot_name
             FROM routing_rules rr
             JOIN groups g ON g.id = rr.target_group_id
+            LEFT JOIN bots mb ON mb.id = rr.monitoring_userbot_id
+            LEFT JOIN bots fb ON fb.id = rr.forwarding_userbot_id
             WHERE rr.source_chat_id = $1
             ORDER BY rr.enabled DESC, COALESCE(g.display_name, g.title)
         """
@@ -165,3 +174,26 @@ class SourceChatModel(BaseModel):
         """Get source chat by chat ID"""
         query = "SELECT * FROM source_chats WHERE source_chat_id = $1 AND enabled = true"
         return await self.db.fetchrow(query, source_chat_id)
+
+    async def update_routing_rule_userbots(self, routing_rule_id: int,
+                                          monitoring_userbot_id: int = None,
+                                          forwarding_userbot_id: int = None) -> asyncpg.Record:
+        """Update userbot assignments for a routing rule"""
+        query = """
+            UPDATE routing_rules
+            SET monitoring_userbot_id = $2, forwarding_userbot_id = $3
+            WHERE id = $1
+            RETURNING *
+        """
+        return await self.db.fetchrow(query, routing_rule_id, monitoring_userbot_id, forwarding_userbot_id)
+
+    async def get_rules_for_monitoring_userbot(self, userbot_id: int) -> List[asyncpg.Record]:
+        """Get all routing rules assigned to a monitoring userbot"""
+        query = """
+            SELECT rr.*, sc.source_chat_id, sc.source_type, sc.name as source_name
+            FROM routing_rules rr
+            JOIN source_chats sc ON sc.id = rr.source_chat_id
+            WHERE rr.monitoring_userbot_id = $1 AND rr.enabled = true
+            ORDER BY sc.name, rr.created_at
+        """
+        return await self.db.fetch(query, userbot_id)

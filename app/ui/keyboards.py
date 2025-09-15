@@ -1,5 +1,8 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from typing import List, Optional, Dict, Any
+import logging
+
+logger = logging.getLogger(__name__)
 
 class Keyboards:
     """All inline keyboards for the management bot"""
@@ -184,15 +187,20 @@ class Keyboards:
     @staticmethod
     def pagination(prefix: str, page: int, total_pages: int) -> List[InlineKeyboardButton]:
         """Pagination buttons"""
+        logger.debug(f"Generating pagination with prefix='{prefix}', page={page}, total_pages={total_pages}")
         buttons = []
         
         if page > 1:
-            buttons.append(InlineKeyboardButton(text="⬅️", callback_data=f"{prefix}:page:{page-1}"))
+            callback_data = f"{prefix}:page:{page-1}"
+            logger.debug(f"  - Previous button callback: {callback_data}")
+            buttons.append(InlineKeyboardButton(text="⬅️", callback_data=callback_data))
         
         buttons.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data=f"{prefix}:page:info"))
         
         if page < total_pages:
-            buttons.append(InlineKeyboardButton(text="➡️", callback_data=f"{prefix}:page:{page+1}"))
+            callback_data = f"{prefix}:page:{page+1}"
+            logger.debug(f"  - Next button callback: {callback_data}")
+            buttons.append(InlineKeyboardButton(text="➡️", callback_data=callback_data))
         
         return buttons
 

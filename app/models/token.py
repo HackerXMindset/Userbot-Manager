@@ -1,7 +1,10 @@
+import logging
+import asyncpg
 from typing import Dict, Any, Optional, List
 from .base import BaseModel
 from decimal import Decimal
-import asyncpg
+
+logger = logging.getLogger(__name__)
 
 class TokenModel(BaseModel):
     """Model for managing tracked tokens"""
@@ -26,30 +29,58 @@ class TokenModel(BaseModel):
     
     async def create_or_update(self, address: str, market_cap: Decimal, ticker: Optional[str] = None) -> asyncpg.Record:
         """Create new token or update existing, initializing peak_mc."""
-        query = """
-            INSERT INTO tokens_tracked (address, first_seen_mc, last_mc, peak_mc, ticker, last_checked_at)
-            VALUES ($1, $2, $2, $2, $3, NOW())
-            ON CONFLICT (address) DO UPDATE SET
-                last_mc = $2,
-                ticker = COALESCE($3, tokens_tracked.ticker),
-                last_checked_at = NOW()
-            RETURNING *
-        """
-        return await self.db.fetchrow(query, address, market_cap, ticker)
-    
+        try:
+            # First, try the query WITH the ticker column
+            query = """
+                INSERT INTO tokens_tracked (address, first_seen_mc, last_mc, peak_mc, ticker, last_checked_at)
+                VALUES ($1, $2, $2, $2, $3, NOW())
+                ON CONFLICT (address) DO UPDATE SET
+                    last_mc = $2,
+                    ticker = COALESCE($3, tokens_tracked.ticker),
+                    last_checked_at = NOW()
+                RETURNING *
+            """
+            return await self.db.fetchrow(query, address, market_cap, ticker)
+        except asyncpg.exceptions.UndefinedColumnError:
+            logger.warning("tokens_tracked schema appears to be outdated (missing 'ticker' column). Falling back. Please update your database.")
+            # Fallback query WITHOUT the ticker column
+            query_fallback = """
+                INSERT INTO tokens_tracked (address, first_seen_mc, last_mc, peak_mc, last_checked_at)
+                VALUES ($1, $2, $2, $2, NOW())
+                ON CONFLICT (address) DO UPDATE SET
+                    last_mc = $2,
+                    last_checked_at = NOW()
+                RETURNING *
+            """
+            return await self.db.fetchrow(query_fallback, address, market_cap)
+
     async def update_market_cap(self, token_id: int, market_cap: Decimal, ticker: Optional[str] = None) -> asyncpg.Record:
         """Update token's market cap and optionally its ticker."""
-        query = """
-            UPDATE tokens_tracked 
-            SET last_mc = $1, 
-                first_seen_mc = COALESCE(first_seen_mc, $1),
-                ticker = COALESCE($3, ticker),
-                last_checked_at = NOW()
-            WHERE id = $2
-            RETURNING *
-        """
-        return await self.db.fetchrow(query, market_cap, token_id, ticker)
-    
+        try:
+            # First, try the query WITH the ticker column
+            query = """
+                UPDATE tokens_tracked 
+                SET last_mc = $1, 
+                    first_seen_mc = COALESCE(first_seen_mc, $1),
+                    ticker = COALESCE($3, ticker),
+                    last_checked_at = NOW()
+                WHERE id = $2
+                RETURNING *
+            """
+            return await self.db.fetchrow(query, market_cap, token_id, ticker)
+        except asyncpg.exceptions.UndefinedColumnError:
+            logger.warning("tokens_tracked schema appears to be outdated (missing 'ticker' column). Falling back. Please update your database.")
+            # Fallback query WITHOUT the ticker column
+            query_fallback = """
+                UPDATE tokens_tracked 
+                SET last_mc = $1, 
+                    first_seen_mc = COALESCE(first_seen_mc, $1),
+                    last_checked_at = NOW()
+                WHERE id = $2
+                RETURNING *
+            """
+            return await self.db.fetchrow(query_fallback, market_cap, token_id)
+
     async def set_status(self, token_id: int, status: str) -> None:
         """Update token status"""
         query = "UPDATE tokens_tracked SET status = $1 WHERE id = $2"
