@@ -378,6 +378,51 @@ class DexScreenerService:
 
         except Exception as e:
             logger.error(f"Error sending PNL command: {e}")
+
+        # --- NEW LOGIC for Curated Alpha targets ---
+        try:
+            # Find triggered curated rules for this token that want PNL alerts
+            curated_rules = await db.fetch("""
+                SELECT r.destination_chat_id, r.forwarding_userbot_id
+                FROM curated_alpha_rules r
+                JOIN curated_alpha_token_state s ON r.id = s.rule_id
+                WHERE s.token_address = $1
+                AND s.status = 'triggered'
+                AND r.forward_pnl_alerts = true
+            """, token['address'])
+
+            if not curated_rules:
+                return # No curated PNL forwarding for this token
+
+            logger.info(f"[CuratedAlpha] Found {len(curated_rules)} curated PNL rule(s) for token {token['address'][:8]}...")
+
+            message = f"/pnl {token['address']}"
+
+            for rule in curated_rules:
+                userbot_id = rule['forwarding_userbot_id']
+                destination_id = rule['destination_chat_id']
+
+                if not userbot_id or not destination_id:
+                    continue
+
+                worker = self.userbot_manager.get_worker(userbot_id)
+                if not worker:
+                    logger.error(f"[CuratedAlpha] PNL forwarding failed: Userbot worker {userbot_id} not found.")
+                    continue
+
+                client = worker.session_manager.get_client()
+                if not client or not worker.session_manager.is_connected():
+                    logger.error(f"[CuratedAlpha] PNL forwarding failed: Userbot {userbot_id} is not connected.")
+                    continue
+                
+                try:
+                    sent_message = await client.send_message(destination_id, message)
+                    logger.info(f"[CuratedAlpha] Sent PNL alert for {token['address'][:8]}... to curated destination {destination_id} via bot {userbot_id}.")
+                except Exception as send_error:
+                    logger.error(f"[CuratedAlpha] Failed to send PNL alert to {destination_id}: {send_error}")
+
+        except Exception as e:
+            logger.error(f"Error sending Curated Alpha PNL command: {e}")
     
     async def _check_drop_alerts(self, token: Dict[str, Any], new_mc: Decimal):
         """Check for drop alerts using existing working pattern"""

@@ -28,7 +28,10 @@ class Keyboards:
                 InlineKeyboardButton(text="📬 Inbox", callback_data="menu:notifications"),
             ],
             [
-                InlineKeyboardButton(text="📡 Auto-Tap", callback_data="menu:auto_click"),
+                InlineKeyboardButton(text="✨ Curate Alpha", callback_data="menu:curate_alpha"),
+                InlineKeyboardButton(text="📡 Auto-Tap", callback_data="menu:auto_click")
+            ],
+            [
                 InlineKeyboardButton(text="🔻 Collapse", callback_data="menu:close")
             ]
         ])

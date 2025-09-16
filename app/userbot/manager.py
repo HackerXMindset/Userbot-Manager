@@ -299,6 +299,12 @@ class UserbotManager:
         """Get all worker instances"""
         return self.workers.copy()
     
+    def invalidate_all_worker_caches(self):
+        """Invalidates the cache for all running workers."""
+        logger.info(f"Broadcasting cache invalidation to {len(self.workers)} workers...")
+        for worker in self.workers.values():
+            worker.invalidate_cache()
+    
     async def sync_workers_with_database(self):
         """Sync running workers with database configuration"""
         try:

@@ -12,43 +12,84 @@ class CallQueueModel(BaseModel):
         super().__init__(db)
         self.table_name = "call_queue"
 
-    async def add_job(self, routing_rule_id: int, token_address: str,
-                     source_message_id: int, source_chat_id: int,
-                     target_group_id: int, target_chat_id: int,
-                     forwarding_userbot_id: int,
+    async def add_job(self, token_address: str, source_message_id: int,
+                     source_chat_id: int, target_chat_id: int,
+                     forwarding_userbot_id: int, routing_rule_id: int = None,
+                     curated_alpha_rule_id: int = None, target_group_id: int = None,
                      source_info: str = None, additional_info: str = None,
                      priority: int = 0) -> asyncpg.Record:
         """Add a new call job to the queue, with fallback for older schema."""
+        
+        if not routing_rule_id and not curated_alpha_rule_id:
+            raise ValueError("Either routing_rule_id or curated_alpha_rule_id must be provided.")
+
         try:
-            # Try with all columns first
-            query = """
-                INSERT INTO call_queue (
-                    routing_rule_id, token_address, source_message_id, source_chat_id,
-                    target_group_id, target_chat_id, forwarding_userbot_id,
-                    source_info, additional_info, priority
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            # Build the query dynamically for the LATEST schema
+            cols = [
+                "token_address", "source_message_id", "source_chat_id", "target_chat_id",
+                "forwarding_userbot_id", "priority"
+            ]
+            vals = [
+                token_address, source_message_id, source_chat_id, target_chat_id,
+                forwarding_userbot_id, priority
+            ]
+
+            if routing_rule_id:
+                cols.append("routing_rule_id")
+                vals.append(routing_rule_id)
+            if curated_alpha_rule_id:
+                cols.append("curated_alpha_rule_id")
+                vals.append(curated_alpha_rule_id)
+            if target_group_id:
+                cols.append("target_group_id")
+                vals.append(target_group_id)
+            if source_info:
+                cols.append("source_info")
+                vals.append(source_info)
+            if additional_info:
+                cols.append("additional_info")
+                vals.append(additional_info)
+
+            placeholders = ", ".join([f"${i+1}" for i in range(len(vals))])
+            query = f"""
+                INSERT INTO call_queue ({", ".join(cols)})
+                VALUES ({placeholders})
                 RETURNING *
             """
-            return await self.db.fetchrow(query,
-                                         routing_rule_id, token_address, source_message_id,
-                                         source_chat_id, target_group_id, target_chat_id,
-                                         forwarding_userbot_id, source_info, additional_info, priority)
+            return await self.db.fetchrow(query, *vals)
+
         except asyncpg.exceptions.UndefinedColumnError:
-            logger.warning("Call queue schema appears to be outdated (missing source_message_id/source_chat_id). Please ensure migrations are up to date.")
-            # Fallback for schema that has target_chat_id but not source_*_id
-            query_fallback = """
-                INSERT INTO call_queue (
-                    routing_rule_id, token_address, target_group_id, target_chat_id,
-                    forwarding_userbot_id, source_info, additional_info, priority
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            logger.warning("Call queue schema appears to be outdated. Attempting to use fallback query. Please ensure migrations are up to date.")
+            
+            # Build the query dynamically for an OLDER schema
+            cols = [
+                "token_address", "target_chat_id", "forwarding_userbot_id", "priority"
+            ]
+            vals = [
+                token_address, target_chat_id, forwarding_userbot_id, priority
+            ]
+
+            if routing_rule_id:
+                cols.append("routing_rule_id")
+                vals.append(routing_rule_id)
+            # Cannot add curated_alpha_rule_id in fallback as it relies on a migration
+            if target_group_id:
+                cols.append("target_group_id")
+                vals.append(target_group_id)
+            if source_info:
+                cols.append("source_info")
+                vals.append(source_info)
+            if additional_info:
+                cols.append("additional_info")
+                vals.append(additional_info)
+            
+            placeholders = ", ".join([f"${i+1}" for i in range(len(vals))])
+            query_fallback = f"""
+                INSERT INTO call_queue ({", ".join(cols)})
+                VALUES ({placeholders})
                 RETURNING *
             """
-            return await self.db.fetchrow(query_fallback,
-                                         routing_rule_id, token_address, target_group_id, 
-                                         target_chat_id, forwarding_userbot_id,
-                                         source_info, additional_info, priority)
+            return await self.db.fetchrow(query_fallback, *vals)
 
     async def get_pending_jobs(self, limit: int = 10, userbot_id: int = None) -> List[asyncpg.Record]:
         """Get pending jobs from the queue, optionally filtered by userbot"""
@@ -66,12 +107,15 @@ class CallQueueModel(BaseModel):
             return await self.db.fetch(query, userbot_id, limit)
         else:
             query = """
-                SELECT cq.*, rr.id as routing_rule_id, g.tg_chat_id as target_chat_id,
-                       COALESCE(g.display_name, g.title) as target_title,
-                       b.session_name as forwarding_userbot_name
+                SELECT 
+                    cq.*,
+                    rr.id as routing_rule_id,
+                    g.tg_chat_id as target_chat_id_from_group, -- Renamed to avoid conflict
+                    COALESCE(g.display_name, g.title) as target_title,
+                    b.session_name as forwarding_userbot_name
                 FROM call_queue cq
-                JOIN routing_rules rr ON rr.id = cq.routing_rule_id
-                JOIN groups g ON g.id = cq.target_group_id
+                LEFT JOIN routing_rules rr ON rr.id = cq.routing_rule_id
+                LEFT JOIN groups g ON g.id = cq.target_group_id
                 LEFT JOIN bots b ON b.id = cq.forwarding_userbot_id
                 WHERE cq.status = 'pending'
                 ORDER BY cq.priority DESC, cq.created_at ASC

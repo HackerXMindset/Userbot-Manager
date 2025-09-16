@@ -52,5 +52,13 @@ class ManagementStates(StatesGroup):
     adding_auto_click_rule_target = State()
     adding_auto_click_rule_bot_id = State()
     adding_auto_click_rule_button_text = State()
+
+    # Curate Alpha
+    curate_alpha_add_rule_name = State()
+    curate_alpha_select_sources = State()
+    curate_alpha_select_forwarding_bot = State()
+    curate_alpha_set_destination = State()
+    curate_alpha_set_time_window = State()
+    curate_alpha_edit_field = State()
     
     

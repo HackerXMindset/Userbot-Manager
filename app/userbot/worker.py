@@ -87,6 +87,10 @@ class UserbotWorker:
             )
             
             raise
+
+    def invalidate_cache(self):
+        """Invalidates the message handler's cache."""
+        self.message_handler.invalidate_cache()
     
     async def stop(self):
         """Stop the userbot worker"""

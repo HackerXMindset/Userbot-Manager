@@ -11,7 +11,7 @@ from typing import Dict, Any, List, Optional
 from telethon import events
 
 from app.db import db
-from app.models import BotModel, GroupModel, ScheduleModel, PnlForwardingRuleModel, AutoButtonClickRuleModel
+from app.models import BotModel, GroupModel, ScheduleModel, PnlForwardingRuleModel, AutoButtonClickRuleModel, CuratedAlphaRuleModel, CuratedAlphaTokenStateModel
 from app.models.source_chat import SourceChatModel
 from app.models.call_queue import CallQueueModel
 from .token_monitor import TokenMonitor
@@ -43,6 +43,8 @@ class MessageHandler:
         self.rule_model = AutoButtonClickRuleModel(db)
         self.source_model = SourceChatModel(db)
         self.call_queue_model = CallQueueModel(db)
+        self.curated_alpha_rule_model = CuratedAlphaRuleModel(db)
+        self.curated_alpha_token_state_model = CuratedAlphaTokenStateModel(db)
 
         # Initialize components
         self.token_monitor = TokenMonitor(userbot_id)
@@ -107,6 +109,12 @@ class MessageHandler:
     def is_fresh(self, key, seconds=600):
         """Check if cache entry is fresh (default 10 minutes)"""
         return key in self.cache_time and time.time() - self.cache_time[key] < seconds
+    
+    def invalidate_cache(self):
+        """Invalidates the internal cache."""
+        self.cache.clear()
+        self.cache_time.clear()
+        logger.info(f"Cache invalidated for userbot {self.userbot_id}")
     
     async def _can_group_accept_calls(self, tg_chat_id: int) -> bool:
         """Check if group can accept calls at current time/day"""
@@ -214,94 +222,137 @@ class MessageHandler:
             # Process message for tokens
             addresses = await self.token_monitor.process_source_message(event, event.chat_id, target_groups)
 
+            # Handle Curated Alpha logic independently
             if addresses:
-                logger.info(f"[SPLIT-RESP] Extracted {len(addresses)} token addresses: {[addr[:8] + '...' for addr in addresses]}")
-            else:
+                await self._handle_curated_alpha(addresses, event.chat_id, event)
+
+            if not addresses:
                 logger.debug(f"[SPLIT-RESP] No token addresses found in message")
+                return
             
-            if addresses:
-                logger.info(f"[SPLIT-RESP] Starting job queue population for {len(addresses)} tokens across {len(target_groups)} target groups")
+            logger.info(f"[SPLIT-RESP] Extracted {len(addresses)} token addresses: {[addr[:8] + '...' for addr in addresses]}")
 
-                # Queue tokens for all target groups
-                total_queued = 0
-                total_failed = 0
+            # Filter out recently forwarded tokens
+            unseen_addresses = []
+            for address in addresses:
+                recently_forwarded = await db.fetchval("""
+                    SELECT 1 FROM forwarded_tokens_log
+                    WHERE token_address = $1 AND source_chat_id = $2
+                    AND forwarded_at > NOW() - INTERVAL '24 hours'
+                    LIMIT 1
+                """, address, event.chat_id)
 
-                for target_group in target_groups:
-                    logger.debug(f"[SPLIT-RESP] Processing target group: {target_group['title']}({target_group['id']})")
+                if recently_forwarded:
+                    logger.info(f"Token {address[:8]}... from source {event.chat_id} was already forwarded recently. Skipping.")
+                else:
+                    unseen_addresses.append(address)
 
-                    # Check if group can accept calls at current time/day
-                    if not await self._can_group_accept_calls(target_group['tg_chat_id']):
-                        logger.info(f"[SPLIT-RESP] Skipping group {target_group['tg_chat_id']} - outside schedule window")
-                        continue
+            if not unseen_addresses:
+                logger.info("All extracted tokens were recently forwarded. Nothing to do.")
+                return
+            
+            addresses_to_forward = unseen_addresses
+            logger.info(f"[SPLIT-RESP] Starting job queue population for {len(addresses_to_forward)} new tokens across {len(target_groups)} target groups")
 
-                    group_queued = 0
-                    group_failed = 0
+            # Queue tokens for all target groups
+            total_queued = 0
+            total_failed = 0
 
-                    # Find routing rule and forwarding userbot for this target group
-                    routing_rule = None
-                    forwarding_userbot_id = None
+            for target_group in target_groups:
+                logger.debug(f"[SPLIT-RESP] Processing target group: {target_group['title']}({target_group['id']})")
 
-                    for rule in routing_rules:
-                        if rule['target_group_id'] == target_group['id'] and rule['enabled']:
-                            routing_rule = rule
-                            forwarding_userbot_id = rule['forwarding_userbot_id']
-                            logger.debug(f"[SPLIT-RESP] Matched routing rule {rule['id']} for group {target_group['id']}, forwarding_userbot: {forwarding_userbot_id}")
-                            break
+                # Check if group can accept calls at current time/day
+                if not await self._can_group_accept_calls(target_group['tg_chat_id']):
+                    logger.info(f"[SPLIT-RESP] Skipping group {target_group['tg_chat_id']} - outside schedule window")
+                    continue
 
-                    if not routing_rule:
-                        logger.warning(f"[SPLIT-RESP] No routing rule found for target group {target_group['id']} - SKIPPING")
-                        continue
+                group_queued = 0
+                group_failed = 0
 
-                    # Use any active userbot if no forwarding userbot assigned (backward compatibility)
-                    if not forwarding_userbot_id:
-                        forwarding_userbot_id = self.userbot_id
-                        logger.info(f"[SPLIT-RESP] No forwarding userbot assigned, using current userbot {self.userbot_id} (backward compatibility)")
-                    else:
-                        logger.info(f"[SPLIT-RESP] Using assigned forwarding userbot {forwarding_userbot_id}")
+                # Find routing rule and forwarding userbot for this target group
+                routing_rule = None
+                forwarding_userbot_id = None
 
-                    # Queue each token for this target group
-                    for address in addresses:
-                        try:
-                            # Get source info for the call
-                            source_info = f"From {source.get('name') or source.get('title') or event.chat_id}"
-                            additional_info = self.utils.get_message_text(event.message) if hasattr(event, 'message') else ""
+                for rule in routing_rules:
+                    if rule['target_group_id'] == target_group['id'] and rule['enabled']:
+                        routing_rule = rule
+                        forwarding_userbot_id = rule['forwarding_userbot_id']
+                        logger.debug(f"[SPLIT-RESP] Matched routing rule {rule['id']} for group {target_group['id']}, forwarding_userbot: {forwarding_userbot_id}")
+                        break
 
-                            logger.debug(f"[SPLIT-RESP] Queueing token {address[:8]}... for target {target_group['id']} via userbot {forwarding_userbot_id}")
+                if not routing_rule:
+                    logger.warning(f"[SPLIT-RESP] No routing rule found for target group {target_group['id']} - SKIPPING")
+                    continue
 
-                            # Add job to call queue
-                            job = await self.call_queue_model.add_job(
-                                routing_rule_id=routing_rule['id'],
-                                token_address=address,
-                                source_message_id=event.id,
-                                source_chat_id=event.chat_id,
-                                target_group_id=target_group['id'],
-                                target_chat_id=target_group['tg_chat_id'],
-                                forwarding_userbot_id=forwarding_userbot_id,
-                                source_info=json.dumps(source_info),
-                                additional_info=json.dumps(additional_info)
-                            )
+                # Use any active userbot if no forwarding userbot assigned (backward compatibility)
+                if not forwarding_userbot_id:
+                    forwarding_userbot_id = self.userbot_id
+                    logger.info(f"[SPLIT-RESP] No forwarding userbot assigned, using current userbot {self.userbot_id} (backward compatibility)")
+                else:
+                    logger.info(f"[SPLIT-RESP] Using assigned forwarding userbot {forwarding_userbot_id}")
 
-                            if job:
-                                group_queued += 1
-                                total_queued += 1
-                                logger.debug(f"[SPLIT-RESP] ✅ Job {job['id']} created for {address[:8]}... → {target_group['title']}")
-                            else:
-                                group_failed += 1
-                                total_failed += 1
-                                logger.warning(f"[SPLIT-RESP] ❌ Failed to queue {address[:8]}... for {target_group['title'] or target_group['tg_chat_id']}")
+                # Queue each token for this target group
+                for address in addresses_to_forward:
+                    try:
+                        # Get source info for the call
+                        source_info = f"From {source.get('name') or source.get('title') or event.chat_id}"
+                        additional_info = self.utils.get_message_text(event.message) if hasattr(event, 'message') else ""
 
-                        except Exception as token_error:
+                        logger.debug(f"[SPLIT-RESP] Queueing token {address[:8]}... for target {target_group['id']} via userbot {forwarding_userbot_id}")
+
+                        # Add job to call queue
+                        job = await self.call_queue_model.add_job(
+                            routing_rule_id=routing_rule['id'],
+                            token_address=address,
+                            source_message_id=event.id,
+                            source_chat_id=event.chat_id,
+                            target_group_id=target_group['id'],
+                            target_chat_id=target_group['tg_chat_id'],
+                            forwarding_userbot_id=forwarding_userbot_id,
+                            source_info=json.dumps(source_info),
+                            additional_info=json.dumps(additional_info)
+                        )
+
+                        if job:
+                            group_queued += 1
+                            total_queued += 1
+                            logger.debug(f"[SPLIT-RESP] ✅ Job {job['id']} created for {address[:8]}... → {target_group['title']}")
+                        else:
                             group_failed += 1
                             total_failed += 1
-                            logger.error(f"[SPLIT-RESP] ❌ Error queuing token {address[:8]}... for target {target_group['tg_chat_id']}: {token_error}")
+                            logger.warning(f"[SPLIT-RESP] ❌ Failed to queue {address[:8]}... for {target_group['title'] or target_group['tg_chat_id']}")
 
-                    if group_queued > 0:
-                        logger.info(f"[SPLIT-RESP] ✅ Group {target_group['title']}: {group_queued} tokens queued")
-                    if group_failed > 0:
-                        logger.warning(f"[SPLIT-RESP] ❌ Group {target_group['title']}: {group_failed} tokens failed")
+                    except Exception as token_error:
+                        group_failed += 1
+                        total_failed += 1
+                        logger.error(f"[SPLIT-RESP] ❌ Error queuing token {address[:8]}... for target {target_group['tg_chat_id']}: {token_error}")
 
-                logger.info(f"[SPLIT-RESP] 🎯 QUEUE SUMMARY: {total_queued} jobs created, {total_failed} failed across {len(target_groups)} target groups")
+                if group_queued > 0:
+                    logger.info(f"[SPLIT-RESP] ✅ Group {target_group['title']}: {group_queued} tokens queued")
+                if group_failed > 0:
+                    logger.warning(f"[SPLIT-RESP] ❌ Group {target_group['title']}: {group_failed} tokens failed")
+
+            logger.info(f"[SPLIT-RESP] 🎯 QUEUE SUMMARY: {total_queued} jobs created, {total_failed} failed across {len(target_groups)} target groups")
             
+            # After successfully queuing the jobs, log the new tokens as forwarded
+            if total_queued > 0:
+                try:
+                    # Use executemany for efficiency if available, otherwise loop
+                    if hasattr(db.pool, 'executemany'):
+                        await db.pool.executemany("""
+                            INSERT INTO forwarded_tokens_log (token_address, source_chat_id)
+                            VALUES ($1, $2)
+                        """, [(addr, event.chat_id) for addr in addresses_to_forward])
+                    else: # Fallback for pools that don't support it
+                        for addr in addresses_to_forward:
+                             await db.execute("""
+                                INSERT INTO forwarded_tokens_log (token_address, source_chat_id)
+                                VALUES ($1, $2)
+                            """, addr, event.chat_id)
+                    logger.info(f"Logged {len(addresses_to_forward)} new tokens to forwarded_tokens_log for source {event.chat_id}")
+                except Exception as log_error:
+                    logger.error(f"Failed to log forwarded tokens: {log_error}")
+
             # Update bot last seen
             await self.bot_model.update_last_seen(self.userbot_id)
             
@@ -669,3 +720,102 @@ class MessageHandler:
             'source_manager': self.source_manager,
             'utils': self.utils
         }
+
+    async def _handle_curated_alpha(self, addresses: List[str], source_chat_id: int, event):
+        """
+        Processes tokens against Curated Alpha rules.
+        """
+        try:
+            # Find all enabled rules that require this source chat
+            rules = await self.curated_alpha_rule_model.db.fetch("""
+                SELECT * FROM curated_alpha_rules
+                WHERE $1 = ANY(required_source_chat_ids) AND enabled = true
+            """, source_chat_id)
+
+            if not rules:
+                return # No rules care about this source
+
+            logger.debug(f"[CuratedAlpha] Source {source_chat_id} is part of {len(rules)} rule(s).")
+
+            for address in addresses:
+                for rule in rules:
+                    rule_id = rule['id']
+                    logger.debug(f"[CuratedAlpha] Checking token {address[:8]} against rule {rule_id} ('{rule['name']}')")
+                    
+                    # Check if this token has already been triggered for this rule
+                    existing_state = await self.curated_alpha_token_state_model.db.fetchrow("""
+                        SELECT * FROM curated_alpha_token_state
+                        WHERE rule_id = $1 AND token_address = $2
+                    """, rule_id, address)
+
+                    if existing_state and existing_state['status'] in ['triggered', 'expired']:
+                        logger.debug(f"[CuratedAlpha] Token {address[:8]} already '{existing_state['status']}' for rule {rule_id}. Skipping.")
+                        continue
+
+                    if existing_state:
+                        logger.debug(f"[CuratedAlpha] Found existing 'tracking' state for token {address[:8]} in rule {rule_id}.")
+                        # It's being tracked, let's update it
+                        if source_chat_id in existing_state['seen_in_source_chat_ids']:
+                            logger.debug(f"[CuratedAlpha] Token {address[:8]} already seen in this source for rule {rule_id}. Skipping.")
+                            continue
+
+                        # Check if time window has expired
+                        from datetime import datetime, timezone
+                        time_since_first_seen = (datetime.now(timezone.utc) - existing_state['first_seen_at']).total_seconds()
+                        if time_since_first_seen > rule['time_window_seconds']:
+                            await self.curated_alpha_token_state_model.update(existing_state['id'], {'status': 'expired'})
+                            logger.info(f"[CuratedAlpha] Token {address[:8]}... expired for rule {rule_id}.")
+                            continue
+
+                        # Add the new source and get the updated list
+                        updated_seen_sources = existing_state['seen_in_source_chat_ids'] + [source_chat_id]
+                        await self.curated_alpha_token_state_model.update(existing_state['id'], {
+                            'seen_in_source_chat_ids': updated_seen_sources
+                        })
+                        logger.debug(f"[CuratedAlpha] Updated token {address[:8]} state for rule {rule_id}. Seen in: {updated_seen_sources}")
+                        
+                        seen_sources_set = set(updated_seen_sources)
+                        required_sources_set = set(rule['required_source_chat_ids'])
+
+                    else:
+                        # First time seeing this token for this rule
+                        logger.debug(f"[CuratedAlpha] Creating new tracking state for token {address[:8]} in rule {rule_id}.")
+                        await self.curated_alpha_token_state_model.create({
+                            'rule_id': rule_id,
+                            'token_address': address,
+                            'seen_in_source_chat_ids': [source_chat_id]
+                        })
+                        seen_sources_set = {source_chat_id}
+                        required_sources_set = set(rule['required_source_chat_ids'])
+
+                    # Check if the condition is now met
+                    logger.debug(f"[CuratedAlpha] Rule {rule_id} check: Seen {seen_sources_set} vs Required {required_sources_set}")
+                    if seen_sources_set.issuperset(required_sources_set):
+                        logger.info(f"[CuratedAlpha] ✅ Condition MET for token {address[:8]}... on rule {rule_id}!")
+                        
+                        # Mark as triggered to prevent re-processing
+                        state_id_to_update = existing_state['id'] if existing_state else \
+                            (await self.curated_alpha_token_state_model.db.fetchrow(
+                                "SELECT id FROM curated_alpha_token_state WHERE rule_id = $1 AND token_address = $2",
+                                rule_id, address))['id']
+                        await self.curated_alpha_token_state_model.update(state_id_to_update, {'status': 'triggered'})
+
+                        # Queue the curated call
+                        source_info = f"Curated Alpha: Rule '{rule.get('name', rule_id)}'"
+                        additional_info = self.utils.get_message_text(event.message) if hasattr(event, 'message') else ""
+
+                        await self.call_queue_model.add_job(
+                            curated_alpha_rule_id=rule_id,
+                            token_address=address,
+                            source_message_id=event.id,
+                            source_chat_id=source_chat_id,
+                            target_chat_id=rule['destination_chat_id'],
+                            forwarding_userbot_id=rule['forwarding_userbot_id'],
+                            source_info=json.dumps(source_info),
+                            additional_info=json.dumps(additional_info),
+                            priority=10 # Higher priority for curated calls
+                        )
+                        logger.info(f"[CuratedAlpha] Queued call for {address[:8]}... to {rule['destination_chat_id']}")
+
+        except Exception as e:
+            logger.error(f"Error in _handle_curated_alpha: {e}", exc_info=True)

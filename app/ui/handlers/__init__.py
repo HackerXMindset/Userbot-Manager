@@ -10,6 +10,7 @@ from .alerts import AlertsHandler
 from .pnl import PnlHandler
 from .notifications import NotificationsHandler
 from .auto_click import AutoClickHandler
+from .curate_alpha import CurateAlphaHandler
 
 __all__ = [
     "MenuHandler",
@@ -22,4 +23,5 @@ __all__ = [
     "PnlHandler",
     "NotificationsHandler",
     "AutoClickHandler",
+    "CurateAlphaHandler",
 ]
