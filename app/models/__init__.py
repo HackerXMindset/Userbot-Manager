@@ -9,6 +9,7 @@ from .pnl_forwarding import PnlForwardingRuleModel
 from .notification import NotificationSettingsModel, NotificationBlacklistModel
 from .auto_button_click import AutoButtonClickRuleModel
 from .curated_alpha import CuratedAlphaRuleModel, CuratedAlphaTokenStateModel
+from .template import TemplateModel, TemplateAssignmentModel
 
 __all__ = [
     "BaseModel",
@@ -23,4 +24,6 @@ __all__ = [
     "AutoButtonClickRuleModel",
     "CuratedAlphaRuleModel",
     "CuratedAlphaTokenStateModel",
+    "TemplateModel",
+    "TemplateAssignmentModel",
 ]

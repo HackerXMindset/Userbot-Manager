@@ -60,5 +60,12 @@ class ManagementStates(StatesGroup):
     curate_alpha_set_destination = State()
     curate_alpha_set_time_window = State()
     curate_alpha_edit_field = State()
+
+    # Template Management
+    template_add_name = State()
+    template_add_text = State()
+    template_edit_name = State()
+    template_edit_text = State()
+    template_assign_select_groups = State()
     
     

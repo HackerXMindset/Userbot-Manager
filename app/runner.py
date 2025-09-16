@@ -61,14 +61,17 @@ class SystemManager:
             # Userbot manager
             self.components['userbot_manager'] = UserbotManager()
 
-            # Call dispatcher (requires userbot manager)
-            self.components['call_dispatcher'] = CallDispatcher(self.components['userbot_manager'])
+            # Management bot
+            self.components['management_bot'] = ManagementBot()
+
+            # Call dispatcher (requires userbot manager and management bot)
+            self.components['call_dispatcher'] = CallDispatcher(
+                self.components['userbot_manager'], 
+                self.components['management_bot']
+            )
 
             # Pass userbot_manager to dex_service
             self.components['dex_service'].set_userbot_manager(self.components['userbot_manager'])
-            
-            # Management bot (last, depends on others)
-            self.components['management_bot'] = ManagementBot()
             self.components['event_router'].set_management_bot(self.components['management_bot'])
             self.components['management_bot'].set_system_manager(self)
             

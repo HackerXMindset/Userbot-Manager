@@ -16,7 +16,7 @@ class Keyboards:
                 InlineKeyboardButton(text="📈 Tracking", callback_data="menu:tracking")
             ],
             [
-                InlineKeyboardButton(text="👥 Groups", callback_data="menu:groups"),
+                InlineKeyboardButton(text="🎯 Target", callback_data="menu:groups"),
                 InlineKeyboardButton(text="👤 Agents", callback_data="menu:userbots")
             ],
             [
@@ -30,6 +30,9 @@ class Keyboards:
             [
                 InlineKeyboardButton(text="✨ Curate Alpha", callback_data="menu:curate_alpha"),
                 InlineKeyboardButton(text="📡 Auto-Tap", callback_data="menu:auto_click")
+            ],
+            [
+                InlineKeyboardButton(text="📝 Templates", callback_data="menu:templates")
             ],
             [
                 InlineKeyboardButton(text="🔻 Collapse", callback_data="menu:close")

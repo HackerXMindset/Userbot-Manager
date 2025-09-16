@@ -17,7 +17,7 @@ from app.ui.states import ManagementStates
 from app.ui.handlers import (
     MenuHandler, GroupsHandler, UserbotsHandler, 
     SchedulesHandler, SourcesHandler, AlertsHandler, PnlHandler,
-    NotificationsHandler, AutoClickHandler, CurateAlphaHandler
+    NotificationsHandler, AutoClickHandler, CurateAlphaHandler, TemplatesHandler
 )
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,7 @@ class ManagementBot:
         self.notifications_handler = NotificationsHandler(db, self.keyboards)
         self.auto_click_handler = AutoClickHandler(db, self.keyboards)
         self.curate_alpha_handler = CurateAlphaHandler(db, self.keyboards)
+        self.templates_handler = TemplatesHandler(db, self.keyboards)
         
         self.setup_handlers()
 
@@ -175,6 +176,13 @@ class ManagementBot:
         self.dp.callback_query.register(
             self.curate_alpha_handler.handle_curate_alpha_action,
             F.data.startswith('curate_alpha:'),
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        # Templates
+        self.dp.callback_query.register(
+            self.templates_handler.handle_templates_action,
+            F.data.startswith('templates:'),
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
 
@@ -340,6 +348,30 @@ class ManagementBot:
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
 
+        self.dp.message.register(
+            self.templates_handler.wizard_process_name,
+            ManagementStates.template_add_name,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.templates_handler.wizard_process_text,
+            ManagementStates.template_add_text,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.templates_handler.wizard_process_edit_name,
+            ManagementStates.template_edit_name,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.templates_handler.wizard_process_edit_text,
+            ManagementStates.template_edit_text,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
         
         
         
@@ -409,6 +441,8 @@ class ManagementBot:
             await self.auto_click_handler.show_auto_click_menu(query)
         elif action == 'curate_alpha':
             await self.curate_alpha_handler.show_curate_alpha_menu(query)
+        elif action == 'templates':
+            await self.templates_handler.show_templates_menu(query)
         elif action == 'close':
             await query.message.delete()
         

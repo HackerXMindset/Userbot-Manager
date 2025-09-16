@@ -52,8 +52,7 @@ class CallExecutor:
                 # Return original ID as final fallback
                 return target_chat_id
     
-    async def send_call_message(self, target_chat_id: int, token_address: str, 
-                               additional_info: str = "", source_info: str = "") -> Dict[str, Any]:
+    async def send_call_message(self, target_chat_id: int, message: str, token_address: str) -> Dict[str, Any]:
         """Send a call message to a target chat"""
         try:
             client = self.session_manager.get_client()
@@ -65,14 +64,11 @@ class CallExecutor:
                 logger.warning(f"Rate limit exceeded for userbot {self.userbot_id}")
                 return {'success': False, 'error': 'Rate limit exceeded'}
             
-            # Send only the contract address, no formatting
-            message = token_address
-            
             # Pre-resolve entity to avoid entity resolution errors
             resolved_entity = await self._resolve_entity_safely(client, target_chat_id)
             
             # Send message with resolved entity
-            sent_message = await client.send_message(resolved_entity, message)
+            sent_message = await client.send_message(resolved_entity, message, parse_mode='md', link_preview=False)
             
             # Record the call for rate limiting
             self.rate_limiter.record_call()
@@ -158,9 +154,8 @@ class CallExecutor:
                         # Create formatted call message
                         call_result = await self.send_call_message(
                             target_chat_id=target['dest_chat_id'],
-                            token_address=address,
-                            additional_info=utils.get_message_text(source_event.message),
-                            source_info=source_info
+                            message=address,
+                            token_address=address
                         )
                         
                         if call_result['success']:

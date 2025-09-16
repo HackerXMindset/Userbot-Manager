@@ -189,3 +189,4 @@ def truncate_text(text: str, max_length: int = 200, suffix: str = "...") -> str:
         return text or ""
     
     return text[:max_length - len(suffix)] + suffix
+

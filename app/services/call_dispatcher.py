@@ -5,21 +5,25 @@ Call Dispatcher Service - Processes job queue and delegates to forwarding bots
 import asyncio
 import logging
 import time
+import json
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 
 from app.db import db
 from app.models import BotModel
 from app.models.call_queue import CallQueueModel
+from app.models.template import TemplateAssignmentModel
 from app.userbot.call_executor import CallExecutor
+from app.services.placeholder_service import PlaceholderService
 
 logger = logging.getLogger(__name__)
 
 class CallDispatcher:
     """Async service that processes call queue jobs and delegates to forwarding userbots"""
 
-    def __init__(self, userbot_manager, polling_interval: int = 2, batch_size: int = 10):
+    def __init__(self, userbot_manager, management_bot, polling_interval: int = 2, batch_size: int = 10):
         self.userbot_manager = userbot_manager
+        self.management_bot = management_bot
         self.polling_interval = polling_interval
         self.batch_size = batch_size
         self.running = False
@@ -28,6 +32,7 @@ class CallDispatcher:
         # Models
         self.bot_model = BotModel(db)
         self.call_queue_model = CallQueueModel(db)
+        self.assignment_model = TemplateAssignmentModel(db)
 
         # Cache for userbot executors
         self.executors: Dict[int, CallExecutor] = {}
@@ -104,50 +109,80 @@ class CallDispatcher:
 
     async def _process_job(self, job) -> bool:
         """Process a single job from the queue"""
+        job_id = job['id']
         try:
-            job_id = job['id']
             forwarding_userbot_id = job['forwarding_userbot_id']
             token_address = job['token_address']
             target_chat_id = job['target_chat_id']
+            target_group_id = job.get('target_group_id')
 
-            logger.info(f"[DISPATCHER] Processing job {job_id}: {token_address[:8]}... → {target_chat_id} via userbot {forwarding_userbot_id}")
+            logger.info(f"[DISPATCHER] Processing job {job_id}: {token_address[:8]}... -> {target_chat_id}")
 
-            # Mark job as processing
             await self.call_queue_model.mark_processing(job_id)
-            logger.debug(f"[DISPATCHER] Job {job_id} marked as processing")
+            
+            message_content = token_address
+            use_mgmt_bot = False
+            template_record = None
 
-            # Get or create call executor for this userbot
-            executor = await self._get_executor(forwarding_userbot_id)
-            if not executor:
-                logger.error(f"[DISPATCHER] ❌ Job {job_id}: Forwarding userbot {forwarding_userbot_id} not available")
-                await self.call_queue_model.mark_failed(job_id, "Forwarding userbot not available")
-                return False
+            if target_group_id:
+                template_record = await self.assignment_model.get_template_for_group(target_group_id)
 
-            logger.debug(f"[DISPATCHER] Got executor for userbot {forwarding_userbot_id}, executing call...")
+            if template_record:
+                logger.info(f"Found custom template '{template_record['name']}' for group {target_group_id}")
+                job_context = dict(job)
+                
+                placeholder_service = PlaceholderService(token_address, job_context)
+                placeholders = await placeholder_service.get_all_placeholders()
+                message_content = placeholder_service.format_template(template_record['template_text'], placeholders)
+                use_mgmt_bot = template_record.get('use_management_bot', False)
+            
+            logger.debug(f"Final message content for job {job_id}:\n{message_content}")
 
-            # Execute the call
-            result = await executor.send_call_message(
-                target_chat_id=target_chat_id,
-                token_address=token_address,
-                additional_info=job.get('additional_info', ''),
-                source_info=job.get('source_info', '')
-            )
+            success = False
+            error_msg = "Unknown error"
 
-            # Update job status based on result
-            if result['success']:
-                await self.call_queue_model.mark_completed(job_id)
-                logger.info(f"[DISPATCHER] ✅ Job {job_id} completed: {token_address[:8]}... sent to {target_chat_id}")
-                return True
+            if use_mgmt_bot:
+                logger.info(f"Sending job {job_id} via Management Bot.")
+                try:
+                    await self.management_bot.bot.send_message(
+                        chat_id=target_chat_id,
+                        text=message_content,
+                        parse_mode="Markdown",
+                        disable_web_page_preview=True
+                    )
+                    success = True
+                except Exception as e:
+                    error_msg = f"Mgmt bot send failed: {e}"
+                    logger.error(f"[DISPATCHER] ❌ {error_msg}")
             else:
-                error_msg = result.get('error', 'Unknown error')
+                logger.info(f"Sending job {job_id} via Userbot {forwarding_userbot_id}.")
+                executor = await self._get_executor(forwarding_userbot_id)
+                if executor:
+                    result = await executor.send_call_message(
+                        target_chat_id=target_chat_id,
+                        message=message_content,
+                        token_address=token_address
+                    )
+                    success = result.get('success', False)
+                    if not success:
+                        error_msg = result.get('error', 'Userbot execution failed')
+                else:
+                    error_msg = f"Userbot {forwarding_userbot_id} not available"
+                    logger.error(f"[DISPATCHER] ❌ Job {job_id}: {error_msg}")
+
+            # Update job status
+            if success:
+                await self.call_queue_model.mark_completed(job_id)
+                logger.info(f"[DISPATCHER] ✅ Job {job_id} completed.")
+            else:
                 await self.call_queue_model.mark_failed(job_id, error_msg)
                 logger.warning(f"[DISPATCHER] ❌ Job {job_id} failed: {error_msg}")
-                return False
+            
+            return success
 
         except Exception as e:
-            # Mark job as failed
-            await self.call_queue_model.mark_failed(job['id'], f"Processing error: {str(e)}")
-            logger.error(f"Error processing job {job['id']}: {e}")
+            await self.call_queue_model.mark_failed(job_id, f"Processing error: {str(e)}")
+            logger.error(f"Critical error processing job {job_id}: {e}", exc_info=True)
             return False
 
     async def _get_executor(self, userbot_id: int) -> Optional[CallExecutor]:

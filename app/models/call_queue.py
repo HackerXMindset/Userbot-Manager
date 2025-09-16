@@ -17,7 +17,7 @@ class CallQueueModel(BaseModel):
                      forwarding_userbot_id: int, routing_rule_id: int = None,
                      curated_alpha_rule_id: int = None, target_group_id: int = None,
                      source_info: str = None, additional_info: str = None,
-                     priority: int = 0) -> asyncpg.Record:
+                     priority: int = 0, source_user_id: int = None) -> asyncpg.Record:
         """Add a new call job to the queue, with fallback for older schema."""
         
         if not routing_rule_id and not curated_alpha_rule_id:
@@ -49,6 +49,9 @@ class CallQueueModel(BaseModel):
             if additional_info:
                 cols.append("additional_info")
                 vals.append(additional_info)
+            if source_user_id:
+                cols.append("source_user_id")
+                vals.append(source_user_id)
 
             placeholders = ", ".join([f"${i+1}" for i in range(len(vals))])
             query = f"""
