@@ -22,11 +22,11 @@ An enterprise-grade Telegram userbot management system designed for automated So
 - **Message Filtering**: Sophisticated content analysis and spam detection
 - **Real-time Processing**: Instant message capture and routing
 
-### 💹 **Profit & Loss Tracking**
-- **DexScreener Integration**: Real-time token price monitoring and market data
-- **Gain Alerts**: Configurable multiplier thresholds (5x, 10x, 20x+)
-- **Stop-Loss Protection**: Automatic tracking halt on major drops (70% default)
-- **Performance Analytics**: Comprehensive PNL reports and statistics
+### 💹 **Profit & Loss Tracking & Forwarding**
+- **Multi-API Integration**: Leverages DexScreener, Moralis, and Helius for real-time token prices, market data, and on-chain metadata.
+- **Gain Alerts**: Configurable multiplier thresholds (5x, 10x, 20x+) that trigger `/pnl` commands in target channels.
+- **Automated PNL Reply Forwarding**: Automatically detect and forward replies to `/pnl` commands from authorized users to a designated channel.
+- **Stop-Loss Protection**: Automatic tracking halt on major drops from a token's peak market cap.
 
 ### 📬 **Advanced Notification System**
 - **Event Forwarding**: Auto-forward replies, mentions, and DMs
@@ -530,6 +530,33 @@ pytest tests/
 1. **Fork Repository**: Create personal fork
 2. **Feature Branch**: Create branch for changes
 3. **Development**: Implement features with tests
+4. **Documentation**: Update relevant documentation
+5. **Pull Request**: Submit for review
+
+## 📝 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🆘 Support & Community
+
+### **Getting Help**
+- **Documentation**: Check this README and inline documentation
+- **Issues**: Report bugs via GitHub Issues
+- **Discussions**: Community discussions for questions
+- **Examples**: Sample configurations and use cases
+
+### **Professional Support**
+For enterprise deployments and custom integrations:
+- **Consulting Services**: Architecture and optimization
+- **Custom Development**: Feature development and integration
+- **Training**: Team training and best practices
+- **24/7 Support**: Production support and monitoring
+
+---
+
+**⚡ Built for Professional Trading Operations | 🚀 Enterprise-Grade Architecture | 🔒 Security-First Design**
+
+*Making Solana token monitoring simple, reliable, and profitable.*th tests
 4. **Documentation**: Update relevant documentation
 5. **Pull Request**: Submit for review
 
