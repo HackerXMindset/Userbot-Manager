@@ -23,7 +23,7 @@ from telethon.tl.types import PeerChannel, PeerChat, PeerUser
 
 logger = logging.getLogger(__name__)
 
-# Set detailed logging for message handler PNL operations
+# Set detailed logging for message handler operations
 logging.getLogger(__name__).setLevel(logging.DEBUG)
 
 
@@ -71,6 +71,8 @@ class MessageHandler:
         logger.info(f"Setup event handlers for all incoming messages and edits")
 
     async def _process_incoming_event(self, event, is_edit=False):
+        logger.debug(f"[MessageHandler] Processing incoming event - Chat: {event.chat_id}, Userbot: {self.userbot_id}, Edit: {is_edit}, Sender: {event.sender_id}")
+
         is_dm = event.is_private
         is_mention = event.mentioned
         is_reply_to_me = False
@@ -100,7 +102,10 @@ class MessageHandler:
         # Handle source logic
         is_source = await self.source_manager.get_source_by_chat_id(event.chat_id)
         if is_source:
+            logger.debug(f"[MessageHandler] Source message detected in chat {event.chat_id} by userbot {self.userbot_id}")
             await self._handle_source_message(event, is_edit=is_edit)
+        else:
+            logger.debug(f"[MessageHandler] Not a source message - chat {event.chat_id} not monitored by userbot {self.userbot_id}")
 
         # Handle auto click
         if not is_edit:
@@ -172,6 +177,7 @@ class MessageHandler:
 
             # Validate source permissions
             permission_check = await self.source_manager.validate_source_permissions(event)
+            logger.debug(f"[SPLIT-RESP] Source permission check result: {permission_check}")
 
             if not permission_check['allowed']:
                 logger.debug(f"[SPLIT-RESP] Source message rejected: {permission_check['reason']}")
@@ -184,47 +190,73 @@ class MessageHandler:
             routing_rules = await self.source_model.get_routing_rules(source['id'])
             logger.info(f"[SPLIT-RESP] Found {len(routing_rules)} routing rules for source {source['id']}")
 
-            # Determine the designated monitoring bot for this source
-            designated_monitors = {rule['monitoring_userbot_id'] for rule in routing_rules if rule['monitoring_userbot_id'] is not None}
-            
+            # Check source-level bot assignments first (NEW FEATURE)
+            source_monitor_bot = source.get('default_monitoring_userbot_id')
+            source_forward_bot = source.get('default_forwarding_userbot_id')
+
             monitoring_allowed = False
-            
-            if designated_monitors:
-                # If there are explicit assignments, only ONE bot should monitor.
-                # By convention, we'll deterministically pick the one with the lowest ID.
-                primary_monitor_id = min(designated_monitors)
-                if self.userbot_id == primary_monitor_id:
+            primary_monitor_id = None
+            designated_monitors = set()  # Initialize to avoid UnboundLocalError
+
+            if source_monitor_bot:
+                # Source has a designated monitor bot - use it
+                primary_monitor_id = source_monitor_bot
+                if self.userbot_id == source_monitor_bot:
                     monitoring_allowed = True
-                    logger.info(f"[SPLIT-RESP] Userbot {self.userbot_id} is the designated primary monitor (min ID) for source {source['id']}")
+                    logger.info(f"[SPLIT-RESP] Userbot {self.userbot_id} is the source-level designated monitor for source {source['id']}")
+                else:
+                    logger.debug(f"[SPLIT-RESP] Userbot {self.userbot_id} not source-level monitor (assigned: {source_monitor_bot})")
             else:
-                # BACKWARD COMPATIBILITY: No explicit monitor is set.
-                # To prevent a race condition, we'll deterministically assign monitoring duty
-                # to the forwarding bot of the *first* routing rule found.
-                if routing_rules and routing_rules[0]['forwarding_userbot_id']:
-                    primary_monitor_id = routing_rules[0]['forwarding_userbot_id']
+                # Fallback to routing rules logic
+                designated_monitors = {rule['monitoring_userbot_id'] for rule in routing_rules if rule['monitoring_userbot_id'] is not None}
+                logger.debug(f"[SPLIT-RESP] Designated monitors for source {source['id']}: {designated_monitors}")
+
+                if designated_monitors:
+                    # If there are explicit assignments, only ONE bot should monitor.
+                    # By convention, we'll deterministically pick the one with the lowest ID.
+                    primary_monitor_id = min(designated_monitors)
                     if self.userbot_id == primary_monitor_id:
                         monitoring_allowed = True
-                        logger.info(f"[SPLIT-RESP] Userbot {self.userbot_id} assigned as monitor by backward compatibility rule (first forwarder) for source {source['id']}")
+                        logger.info(f"[SPLIT-RESP] Userbot {self.userbot_id} is the designated primary monitor (min ID) for source {source['id']}")
+                    else:
+                        logger.debug(f"[SPLIT-RESP] Userbot {self.userbot_id} not primary monitor (primary: {primary_monitor_id})")
+                else:
+                    # BACKWARD COMPATIBILITY: No explicit monitor is set.
+                    # To prevent a race condition, we'll deterministically assign monitoring duty
+                    # to the forwarding bot of the *first* routing rule found.
+                    if routing_rules and routing_rules[0]['forwarding_userbot_id']:
+                        primary_monitor_id = routing_rules[0]['forwarding_userbot_id']
+                        if self.userbot_id == primary_monitor_id:
+                            monitoring_allowed = True
+                            logger.info(f"[SPLIT-RESP] Userbot {self.userbot_id} assigned as monitor by backward compatibility rule (first forwarder) for source {source['id']}")
+                        else:
+                            logger.debug(f"[SPLIT-RESP] Userbot {self.userbot_id} not assigned as backward compatibility monitor (assigned: {primary_monitor_id})")
+                    else:
+                        logger.warning(f"[SPLIT-RESP] No routing rules or forwarding userbot found for source {source['id']}")
 
             if not monitoring_allowed:
-                logger.info(f"[SPLIT-RESP] Userbot {self.userbot_id} is not the designated primary monitor for source {event.chat_id} - SKIPPING")
+                logger.debug(f"[SPLIT-RESP] ⏭️ Userbot {self.userbot_id} SKIPPING - not designated monitor for source {event.chat_id}")
+                logger.debug(f"[SPLIT-RESP] Designated monitors: {designated_monitors}, Primary: {primary_monitor_id if designated_monitors else 'source-level or backward compatibility'}")
                 return
+            else:
+                logger.debug(f"[SPLIT-RESP] ✅ Userbot {self.userbot_id} IS designated monitor for source {event.chat_id}")
 
             # Get all target groups for this source using routing rules
             target_groups = await self.source_manager.get_target_groups_for_source(event.chat_id)
 
+            # Process message for tokens regardless of routing rules (needed for curated alpha)
+            addresses = await self.token_monitor.process_source_message(event, event.chat_id, target_groups or [])
+
+            # Handle Curated Alpha logic independently (works without routing rules)
+            if addresses:
+                await self._handle_curated_alpha(addresses, event.chat_id, event)
+
+            # Early return if no routing rules for regular forwarding
             if not target_groups:
-                logger.warning(f"[SPLIT-RESP] No target groups found for source {event.chat_id}")
+                logger.warning(f"[SPLIT-RESP] No target groups found for source {event.chat_id} - skipping regular forwarding")
                 return
 
             logger.info(f"[SPLIT-RESP] Found {len(target_groups)} target groups: {[f'{g['title']}({g['id']})' for g in target_groups]}")
-
-            # Process message for tokens
-            addresses = await self.token_monitor.process_source_message(event, event.chat_id, target_groups)
-
-            # Handle Curated Alpha logic independently
-            if addresses:
-                await self._handle_curated_alpha(addresses, event.chat_id, event)
 
             if not addresses:
                 logger.debug(f"[SPLIT-RESP] No token addresses found in message")
@@ -296,7 +328,12 @@ class MessageHandler:
                     try:
                         # Get source info for the call
                         source_info = f"From {source.get('name') or source.get('title') or event.chat_id}"
-                        additional_info = self.utils.get_message_text(event.message) if hasattr(event, 'message') else ""
+                        additional_info_dict = {
+                            "message_text": self.utils.get_message_text(event.message) if hasattr(event, 'message') else "",
+                            "caller_name": self.utils.get_user_name(event.sender),
+                            "source_name": source.get('name') or source.get('title'),
+                            "source_type": source.get('source_type')
+                        }
 
                         logger.debug(f"[SPLIT-RESP] Queueing token {address[:8]}... for target {target_group['id']} via userbot {forwarding_userbot_id}")
 
@@ -311,7 +348,7 @@ class MessageHandler:
                             target_chat_id=target_group['tg_chat_id'],
                             forwarding_userbot_id=forwarding_userbot_id,
                             source_info=json.dumps(source_info),
-                            additional_info=json.dumps(additional_info)
+                            additional_info=json.dumps(additional_info_dict)
                         )
 
                         if job:
@@ -326,14 +363,16 @@ class MessageHandler:
                     except Exception as token_error:
                         group_failed += 1
                         total_failed += 1
-                        logger.error(f"[SPLIT-RESP] ❌ Error queuing token {address[:8]}... for target {target_group['tg_chat_id']}: {token_error}")
+                        logger.error(f"[SPLIT-RESP] ❌ Error queuing token {address[:8]}... for target {target_group['tg_chat_id']} via userbot {self.userbot_id}: {token_error}")
+                        import traceback
+                        logger.error(f"[SPLIT-RESP] Full traceback: {traceback.format_exc()}")
 
                 if group_queued > 0:
                     logger.info(f"[SPLIT-RESP] ✅ Group {target_group['title']}: {group_queued} tokens queued")
                 if group_failed > 0:
                     logger.warning(f"[SPLIT-RESP] ❌ Group {target_group['title']}: {group_failed} tokens failed")
 
-            logger.info(f"[SPLIT-RESP] 🎯 QUEUE SUMMARY: {total_queued} jobs created, {total_failed} failed across {len(target_groups)} target groups")
+            logger.info(f"[SPLIT-RESP] 🎯 QUEUE SUMMARY: {total_queued} jobs created, {total_failed} failed across {len(target_groups)} target groups by userbot {self.userbot_id}")
             
             # After successfully queuing the jobs, log the new tokens as forwarded
             if total_queued > 0:
@@ -358,7 +397,9 @@ class MessageHandler:
             await self.bot_model.update_last_seen(self.userbot_id)
             
         except Exception as e:
-            logger.error(f"Error handling source message: {e}")
+            logger.error(f"[SPLIT-RESP] ❌ Critical error handling source message in chat {event.chat_id} by userbot {self.userbot_id}: {e}")
+            import traceback
+            logger.error(f"[SPLIT-RESP] Full traceback: {traceback.format_exc()}")
 
     async def _handle_auto_click(self, event):
         if not event.is_reply:
@@ -727,6 +768,7 @@ class MessageHandler:
         Processes tokens against Curated Alpha rules.
         """
         try:
+            logger.debug(f"[CuratedAlpha] Processing event for source chat ID: {source_chat_id}")
             # Find all enabled rules that require this source chat
             rules = await self.curated_alpha_rule_model.db.fetch("""
                 SELECT * FROM curated_alpha_rules
@@ -734,6 +776,7 @@ class MessageHandler:
             """, source_chat_id)
 
             if not rules:
+                logger.debug(f"[CuratedAlpha] No active rules found for source_chat_id: {source_chat_id}")
                 return # No rules care about this source
 
             logger.debug(f"[CuratedAlpha] Source {source_chat_id} is part of {len(rules)} rule(s).")
@@ -742,6 +785,7 @@ class MessageHandler:
                 for rule in rules:
                     rule_id = rule['id']
                     logger.debug(f"[CuratedAlpha] Checking token {address[:8]} against rule {rule_id} ('{rule['name']}')")
+                    logger.debug(f"[CuratedAlpha] Rule requirements: Mentions={rule.get('required_mentions', 'All')}, Sources={rule['required_source_chat_ids']}")
                     
                     # Check if this token has already been triggered for this rule
                     existing_state = await self.curated_alpha_token_state_model.db.fetchrow("""
@@ -749,7 +793,8 @@ class MessageHandler:
                         WHERE rule_id = $1 AND token_address = $2
                     """, rule_id, address)
 
-                    if existing_state and existing_state['status'] in ['triggered', 'expired']:
+                    if existing_state and existing_state['status'] in ('triggered', 'expired'):
+                        logger.debug(f"[CuratedAlpha] Found existing state for token: {dict(existing_state)}")
                         logger.debug(f"[CuratedAlpha] Token {address[:8]} already '{existing_state['status']}' for rule {rule_id}. Skipping.")
                         continue
 
@@ -790,8 +835,17 @@ class MessageHandler:
                         required_sources_set = set(rule['required_source_chat_ids'])
 
                     # Check if the condition is now met
-                    logger.debug(f"[CuratedAlpha] Rule {rule_id} check: Seen {seen_sources_set} vs Required {required_sources_set}")
-                    if seen_sources_set.issuperset(required_sources_set):
+                    required_sources_set = set(rule['required_source_chat_ids'])
+                    seen_in_rule_sources = seen_sources_set.intersection(required_sources_set)
+                    
+                    required_mentions = rule.get('required_mentions')
+                    # Default to all if not set, 0, or invalid
+                    if not required_mentions or required_mentions <= 0:
+                        required_mentions = len(required_sources_set)
+
+                    logger.debug(f"[CuratedAlpha] Rule {rule_id} check: Seen {len(seen_in_rule_sources)}/{required_mentions} required sources.")
+
+                    if len(seen_in_rule_sources) >= required_mentions:
                         logger.info(f"[CuratedAlpha] ✅ Condition MET for token {address[:8]}... on rule {rule_id}!")
                         
                         # Mark as triggered to prevent re-processing
@@ -801,9 +855,31 @@ class MessageHandler:
                                 rule_id, address))['id']
                         await self.curated_alpha_token_state_model.update(state_id_to_update, {'status': 'triggered'})
 
-                        # Queue the curated call
                         source_info = f"Curated Alpha: Rule '{rule.get('name', rule_id)}'"
-                        additional_info = self.utils.get_message_text(event.message) if hasattr(event, 'message') else ""
+
+                        # Look up target group ID for template support
+                        target_group_id = None
+                        try:
+                            group_record = await self.db.fetchrow(
+                                "SELECT id FROM groups WHERE tg_chat_id = $1",
+                                rule['destination_chat_id']
+                            )
+                            if group_record:
+                                target_group_id = group_record['id']
+                        except Exception as group_lookup_error:
+                            logger.debug(f"Could not find group for destination chat {rule['destination_chat_id']}: {group_lookup_error}")
+
+                        # Get source object to pass its details
+                        source = await self.source_model.get_source_by_chat_id(source_chat_id)
+
+                        additional_info_dict = {
+                            "message_text": self.utils.get_message_text(event.message) if hasattr(event, 'message') else "",
+                            "target_group_id_fallback": target_group_id,
+                            "caller_name": self.utils.get_user_name(event.sender),
+                            "source_name": source.get('name') or source.get('title') if source else f"Chat {source_chat_id}",
+                            "source_type": source.get('source_type') if source else 'unknown'
+                        }
+                        additional_info = json.dumps(additional_info_dict)
 
                         await self.call_queue_model.add_job(
                             curated_alpha_rule_id=rule_id,
@@ -811,10 +887,11 @@ class MessageHandler:
                             source_message_id=event.id,
                             source_chat_id=source_chat_id,
                             source_user_id=event.sender_id,
+                            target_group_id=target_group_id,
                             target_chat_id=rule['destination_chat_id'],
                             forwarding_userbot_id=rule['forwarding_userbot_id'],
                             source_info=json.dumps(source_info),
-                            additional_info=json.dumps(additional_info),
+                            additional_info=additional_info,
                             priority=10 # Higher priority for curated calls
                         )
                         logger.info(f"[CuratedAlpha] Queued call for {address[:8]}... to {rule['destination_chat_id']}")
