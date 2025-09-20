@@ -1,0 +1,43 @@
+[package]
+name = "telegram-token-bot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# HTTP client with connection pooling
+reqwest = { version = "0.11", features = ["json"] }
+
+# Telegram bot
+teloxide = { version = "0.12", features = ["macros"] }
+
+# JSON handling
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+
+# Regex for contract address detection
+regex = "1.0"
+
+# Caching
+moka = { version = "0.12", features = ["future"] }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Configuration
+dotenv = "0.15"
+
+# Logging
+tracing-subscriber = "0.3"
+
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
