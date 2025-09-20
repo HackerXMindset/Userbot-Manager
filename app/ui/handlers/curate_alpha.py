@@ -71,6 +71,8 @@ class CurateAlphaHandler:
             await self.wizard_show_bot_selection(query, state)
         elif action == 'process_bot':
             await self.wizard_process_bot(query, state)
+        elif action == 'set_mentions':
+            await self.wizard_prompt_for_min_mentions(query, state)
         elif action == 'set_time':
             await self.wizard_set_time_window(query, state)
         elif action == 'toggle_pnl':
@@ -94,6 +96,8 @@ class CurateAlphaHandler:
             await self.wizard_start_edit_dest(query, state, rule_id)
         elif action == 'edit_settings':
             await self.wizard_start_edit_settings(query, state, rule_id)
+        elif action == 'edit_mentions':
+            await self.wizard_start_edit_mentions(query, state, rule_id)
         else:
             await query.answer("This edit function is not yet implemented.", show_alert=True)
 
@@ -120,8 +124,14 @@ class CurateAlphaHandler:
             time_window_seconds = data.get('time_window_seconds', 86400)
             time_display = f"{time_window_seconds // 3600} hours" if time_window_seconds >= 3600 else f"{time_window_seconds // 60} minutes"
 
-            text = (f"<b>✨ Rule: {data.get('name')}</b>\n\n" 
-                   f"<b>Required Sources:</b>\n - {'\n - '.join(selected_source_names)}\n"
+            required_mentions = data.get('required_mentions')
+            if not required_mentions or required_mentions <= 0:
+                mentions_display = f"All ({len(selected_source_names)})"
+            else:
+                mentions_display = f"{required_mentions} of {len(selected_source_names)}"
+
+            text = (f"<b>✨ Rule: {data.get('name')}</b>\n\n"
+                   f"<b>Required Sources ({mentions_display}):</b>\n - {'\n - '.join(selected_source_names)}\n"
                    f"<b>Forwarding Bot:</b> {bot_name}\n"
                    f"<b>Destination Chat ID:</b> `{data.get('destination_chat_id')}`\n"
                    f"<b>Time Window:</b> {time_display}\n"
@@ -178,7 +188,7 @@ class CurateAlphaHandler:
         """Step 1: Start the wizard and ask for a rule name."""
         await state.clear()
         await query.message.edit_text(
-            "<b>✨ Add Curated Alpha Rule (1/6)</b>\n\n" \
+            "<b>✨ Add Curated Alpha Rule (1/7)</b>\n\n" \
             "First, give this rule a descriptive name (e.g., 'Tier 1 Callers').",
             reply_markup=self.keyboards.cancel_button("curate_alpha:list")
         )
@@ -204,7 +214,7 @@ class CurateAlphaHandler:
         is_edit = data.get('edit_mode', False)
         rule_id = data.get('rule_id')
 
-        text = f"<b>✨ {'Edit' if is_edit else 'Add'} Curated Alpha Rule</b>\n\n" \
+        text = f"<b>✨ {'Edit' if is_edit else 'Add'} Curated Alpha Rule (2/7)</b>\n\n" \
                f"Select at least two source chats that are required for this rule. Tap to select/deselect."
 
         keyboard_rows = []
@@ -268,7 +278,7 @@ class CurateAlphaHandler:
             await query.answer("❌ No active userbots found. Please add one first.", show_alert=True)
             return
 
-        text = f"<b>✨ {'Edit' if is_edit else 'Add'} Curated Alpha Rule</b>\n\n" \
+        text = f"<b>✨ {'Edit' if is_edit else 'Add'} Curated Alpha Rule (3/7)</b>\n\n" \
                f"Select the userbot that will forward the curated call."
 
         keyboard_rows = []
@@ -299,7 +309,7 @@ class CurateAlphaHandler:
     async def wizard_prompt_for_destination(self, query: types.CallbackQuery, state: FSMContext):
         """Ask for destination chat ID for add or edit mode."""
         data = await state.get_data()
-        text = f"<b>✨ {'Edit' if data.get('edit_mode') else 'Add'} Curated Alpha Rule</b>\n\n" \
+        text = f"<b>✨ {'Edit' if data.get('edit_mode') else 'Add'} Curated Alpha Rule (4/7)</b>\n\n" \
                f"Enter the chat ID of the destination channel (e.g., -100123456789)."
         
         back_cb = f"curate_alpha:view:{data.get('rule_id')}" if data.get('edit_mode') else "curate_alpha:select_bot"
@@ -328,9 +338,63 @@ class CurateAlphaHandler:
             else:
                 await state.update_data(destination_chat_id=destination_id)
                 await message.delete()
-                await self.wizard_show_final_settings(message, state)
+                await self.wizard_prompt_for_min_mentions(message, state)
         except ValueError:
             await message.reply("Invalid Chat ID. Please enter a number.")
+
+    async def wizard_prompt_for_min_mentions(self, message: types.Message, state: FSMContext):
+        """Step 5: Ask for the minimum number of mentions."""
+        data = await state.get_data()
+        num_sources = len(data.get('selected_sources', []))
+        # Set default to all sources
+        await state.update_data(required_mentions=num_sources)
+
+        text = f"<b>✨ Add Curated Alpha Rule (5/7)</b>\n\n" \
+               f"You have selected {num_sources} source(s).\n\n" \
+               f"Enter the <b>minimum number of mentions</b> required to trigger this rule. " \
+               f"(from 1 to {num_sources}).\n\n" \
+               f"Default is <b>{num_sources}</b> (requires all sources). Just press enter to use the default."
+
+        await message.answer(
+            text,
+            reply_markup=self.keyboards.cancel_button("curate_alpha:list")
+        )
+        await state.set_state(ManagementStates.curate_alpha_set_min_mentions)
+
+    async def wizard_process_min_mentions(self, message: types.Message, state: FSMContext):
+        """Process the minimum mentions input."""
+        data = await state.get_data()
+        num_sources = len(data.get('selected_sources', []))
+        is_edit = data.get('edit_mode', False)
+        rule_id = data.get('rule_id')
+
+        if not message.text.strip(): # User pressed enter for default
+            required_mentions = num_sources
+        else:
+            try:
+                required_mentions = int(message.text.strip())
+                if not (1 <= required_mentions <= num_sources):
+                    await message.reply(f"Please enter a number between 1 and {num_sources}.")
+                    return
+            except ValueError:
+                await message.reply("Invalid number. Please enter a number.")
+                return
+
+        if is_edit:
+            await self.rule_model.update(rule_id, {'required_mentions': required_mentions})
+            await message.delete()
+            await state.clear()
+            # Create a dummy query to redraw the details view
+            from aiogram.types.user import User
+            from aiogram.types.chat import Chat
+            dummy_user = User(id=message.from_user.id, is_bot=False, first_name=message.from_user.first_name)
+            dummy_chat = Chat(id=message.chat.id, type="private")
+            dummy_query = types.CallbackQuery(id="dummy", from_user=dummy_user, chat_instance="dummy", message=message)
+            await self.show_rule_details(dummy_query, rule_id)
+        else:
+            await state.update_data(required_mentions=required_mentions)
+            await message.delete()
+            await self.wizard_show_final_settings(message, state)
 
     async def wizard_show_final_settings(self, message_or_query, state: FSMContext):
         """Show time window and PNL alert options for add or edit mode."""
@@ -340,13 +404,17 @@ class CurateAlphaHandler:
 
         if is_edit and 'time_window_seconds' not in data:
             rule = await self.rule_model.get_by_id(rule_id)
-            await state.update_data(time_window_seconds=rule['time_window_seconds'], forward_pnl_alerts=rule['forward_pnl_alerts'])
+            await state.update_data(
+                time_window_seconds=rule['time_window_seconds'], 
+                forward_pnl_alerts=rule['forward_pnl_alerts'],
+                required_mentions=rule.get('required_mentions')
+            )
             data = await state.get_data()
 
         time_window = data.get('time_window_seconds', 86400)
         pnl_alerts = data.get('forward_pnl_alerts', False)
 
-        text = f"<b>✨ {'Edit' if is_edit else 'Add'} Curated Alpha Rule</b>\n\n" \
+        text = f"<b>✨ {'Edit' if is_edit else 'Add'} Curated Alpha Rule (6/7)</b>\n\n" \
                f"Configure the final settings."
 
         time_display = f"{time_window // 3600}h" if time_window >= 3600 else f"{time_window // 60}m"
@@ -361,15 +429,12 @@ class CurateAlphaHandler:
                 InlineKeyboardButton(text="1h", callback_data="curate_alpha:set_time:3600"),
             ],
             [InlineKeyboardButton(text="-- PNL Alerts --", callback_data="curate_alpha:noop")],
-            [
-                InlineKeyboardButton(
-                    text=f"{ '✅' if pnl_alerts else '❌'} Forward /pnl Alerts", 
-                    callback_data="curate_alpha:toggle_pnl"
-                )
-            ],
+            [InlineKeyboardButton(text=f"{'✅' if pnl_alerts else '❌'} Forward /pnl Alerts", callback_data="curate_alpha:toggle_pnl")],
         ]
+
         if is_edit:
-             keyboard_rows.append([InlineKeyboardButton(text="✅ Save Settings", callback_data=f"curate_alpha:save_edited_settings:{rule_id}")])
+            keyboard_rows.insert(0, [InlineKeyboardButton(text="🔢 Edit Mentions", callback_data=f"curate_alpha:edit_mentions:{rule_id}")])
+            keyboard_rows.append([InlineKeyboardButton(text="✅ Save Settings", callback_data=f"curate_alpha:save_edited_settings:{rule_id}")])
         else:
             keyboard_rows.append([InlineKeyboardButton(text="➡️ Continue to Summary", callback_data="curate_alpha:summary")])
         
@@ -414,7 +479,7 @@ class CurateAlphaHandler:
             await query.answer("❌ Error saving settings.", show_alert=True)
 
     async def wizard_show_summary(self, query: types.CallbackQuery, state: FSMContext):
-        """Step 6: Show summary and confirm."""
+        """Step 7: Show summary and confirm."""
         logger.debug("[CuratedAlpha] Entering wizard_show_summary")
         try:
             data = await state.get_data()
@@ -434,9 +499,15 @@ class CurateAlphaHandler:
             time_window_seconds = data.get('time_window_seconds', 86400)
             time_display = f"{time_window_seconds // 3600} hours" if time_window_seconds >= 3600 else f"{time_window_seconds // 60} minutes"
 
-            text = (f"<b>✨ Rule Summary</b>\n\n" 
+            required_mentions = data.get('required_mentions')
+            if not required_mentions or required_mentions <= 0:
+                mentions_display = f"All ({len(selected_source_names)})"
+            else:
+                mentions_display = f"{required_mentions} of {len(selected_source_names)}"
+
+            text = (f"<b>✨ Rule Summary (7/7)</b>\n\n" 
                    f"<b>Name:</b> {data.get('name')}\n"
-                   f"<b>Required Sources:</b>\n - {'\n - '.join(selected_source_names)}\n"
+                   f"<b>Required Sources ({mentions_display}):</b>\n - {'\n - '.join(selected_source_names)}\n"
                    f"<b>Forwarding Bot:</b> {bot_name}\n"
                    f"<b>Destination Chat ID:</b> `{data.get('destination_chat_id')}`\n"
                    f"<b>Time Window:</b> {time_display}\n"
@@ -467,6 +538,7 @@ class CurateAlphaHandler:
                 'forwarding_userbot_id': data['forwarding_userbot_id'],
                 'time_window_seconds': data.get('time_window_seconds', 86400),
                 'forward_pnl_alerts': data.get('forward_pnl_alerts', False),
+                'required_mentions': data.get('required_mentions', len(selected_source_chat_ids)),
             })
             await state.clear()
             await query.message.edit_text("✅ <b>Curated Alpha Rule Saved!</b>")
@@ -516,6 +588,29 @@ class CurateAlphaHandler:
         except Exception as e:
             logger.error(f"Error saving edited sources: {e}", exc_info=True)
             await query.answer("❌ Error saving sources.", show_alert=True)
+
+    async def wizard_start_edit_mentions(self, query: types.CallbackQuery, state: FSMContext, rule_id: int):
+        """Start the process to edit a rule's minimum mentions."""
+        rule = await self.rule_model.get_by_id(rule_id)
+        if not rule:
+            await query.answer("Rule not found.", show_alert=True)
+            return
+
+        num_sources = len(rule.get('required_source_chat_ids', []))
+        current_mentions = rule.get('required_mentions') or num_sources
+
+        await state.set_data({
+            'rule_id': rule_id, 
+            'edit_mode': True,
+            'selected_sources': [s['id'] for s in await self.source_model.get_all_sources() if s['source_chat_id'] in rule['required_source_chat_ids']]
+        })
+
+        await query.message.edit_text(
+            f"Current minimum mentions: <b>{current_mentions} of {num_sources}</b>.\n\n" \
+            f"Enter the new minimum number of mentions (1 to {num_sources}).",
+            reply_markup=self.keyboards.cancel_button(f"curate_alpha:view:{rule_id}")
+        )
+        await state.set_state(ManagementStates.curate_alpha_set_min_mentions)
 
     async def wizard_start_edit_bot(self, query: types.CallbackQuery, state: FSMContext, rule_id: int):
         """Start the process to edit a rule's forwarding bot."""

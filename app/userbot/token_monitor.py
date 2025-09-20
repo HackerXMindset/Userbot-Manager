@@ -157,11 +157,11 @@ class TokenMonitor:
         """Clean up old token records"""
         try:
             deleted_count = await db.fetchval("""
-                DELETE FROM tokens_tracked 
-                WHERE created_at < NOW() - INTERVAL '%s days'
+                DELETE FROM tokens_tracked
+                WHERE created_at < NOW() - INTERVAL $1
                 AND status != 'active'
                 RETURNING COUNT(*)
-            """, days_old)
+            """, f"{days_old} days")
             
             if deleted_count:
                 logger.info(f"Cleaned up {deleted_count} old token records")

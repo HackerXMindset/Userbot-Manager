@@ -4,8 +4,9 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import (
-    SessionPasswordNeededError, 
-    PhoneCodeInvalidError, 
+    SessionPasswordNeededError,
+    PhoneCodeInvalidError,
+    PhoneCodeExpiredError,
     FloodWaitError,
     PasswordHashInvalidError
 )
@@ -19,6 +20,9 @@ from app.models import BotModel
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Set detailed logging for userbot authentication operations
+logging.getLogger(__name__).setLevel(logging.DEBUG)
 
 class UserbotsHandler:
     """Handler for userbot management operations"""
@@ -180,12 +184,18 @@ class UserbotsHandler:
         try:
             # Create client with StringSession
             session_name = f"userbot_{phone.replace('+', '')[-8:]}"
+            masked_phone = '*' * (len(phone) - 4) + phone[-4:]
+            logger.debug(f"[UserbotAuth] Processing phone: {masked_phone}")
+            logger.debug(f"[UserbotAuth] Session name: {session_name}")
+            logger.debug(f"[UserbotAuth] Creating TelegramClient...")
+
             client = TelegramClient(
                 StringSession(),
                 settings.api_id,
                 settings.api_hash
             )
-            
+
+            logger.debug(f"[UserbotAuth] Connecting client...")
             await client.connect()
             
             # Check if already authorized (edge case)
@@ -211,17 +221,24 @@ class UserbotsHandler:
                 pass
             
             # Send code request
+            logger.debug(f"[UserbotAuth] Sending code request to {masked_phone}...")
             sent_code = await client.send_code_request(phone)
+            logger.debug(f"[UserbotAuth] Code request successful, phone_code_hash: {sent_code.phone_code_hash}")
+
             session_string = client.session.save()
+            logger.debug(f"[UserbotAuth] Session string saved, length: {len(session_string)}")
             await client.disconnect()  # Disconnect after getting session
-            
-            # Store session data in FSM state (not memory)
+
+            # Store session data in FSM state with timestamp
+            code_request_time = time.time()
             await state.update_data(
                 phone=phone,
                 session_name=session_name,
                 session_string=session_string,
-                phone_code_hash=sent_code.phone_code_hash
+                phone_code_hash=sent_code.phone_code_hash,
+                code_request_time=code_request_time
             )
+            logger.debug(f"[UserbotAuth] Session data stored in FSM state at {code_request_time}")
             
             await state.set_state(ManagementStates.userbot_login_code)
             
@@ -269,25 +286,50 @@ class UserbotsHandler:
         phone = data.get('phone')
         session_name = data.get('session_name')
         session_string = data.get('session_string')
-        
-        if not all([phone, session_name, session_string]):
+        phone_code_hash = data.get('phone_code_hash')
+        code_request_time = data.get('code_request_time', 0)
+
+        masked_phone = '*' * (len(phone) - 4) + phone[-4:] if phone else 'unknown'
+        logger.debug(f"[UserbotAuth] Processing verification code for phone: {masked_phone}")
+        logger.debug(f"[UserbotAuth] Code length: {len(code)}, format valid: {code.isdigit()}")
+        logger.debug(f"[UserbotAuth] Session data check: phone={bool(phone)}, session_name={bool(session_name)}, session_string={bool(session_string)}, phone_code_hash={bool(phone_code_hash)}")
+
+        if not all([phone, session_name, session_string, phone_code_hash]):
+            logger.error(f"[UserbotAuth] Session data incomplete for {masked_phone}: phone={bool(phone)}, session_name={bool(session_name)}, session_string={bool(session_string)}, phone_code_hash={bool(phone_code_hash)}")
             await message.answer("❌ Session data lost. Please start again with /start.")
+            await state.clear()
+            return
+
+        # Check if code request is too old
+        time_elapsed = time.time() - code_request_time
+        logger.debug(f"[UserbotAuth] Time elapsed since code request: {time_elapsed:.1f} seconds")
+        if time_elapsed > 300:  # 5 minutes
+            logger.warning(f"[UserbotAuth] Code request too old ({time_elapsed:.1f}s) for {masked_phone}")
+            await message.answer(
+                f"⚠️ **Code Request Expired**\n\n"
+                f"⏰ Time elapsed: {time_elapsed:.1f} seconds\n"
+                f"📱 Telegram codes expire after 5 minutes\n\n"
+                f"Please start over with /start"
+            )
             await state.clear()
             return
         
         try:
             # Recreate client from stored session
+            logger.debug(f"[UserbotAuth] Recreating client from session for {masked_phone}...")
             client = TelegramClient(
                 StringSession(session_string),
                 settings.api_id,
                 settings.api_hash
             )
-            
+
+            logger.debug(f"[UserbotAuth] Connecting client...")
             await client.connect()
-            
+
             # Attempt sign in with verification code
-            phone_code_hash = data.get('phone_code_hash')
+            logger.debug(f"[UserbotAuth] Attempting sign in with code for {masked_phone}...")
             me = await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
+            logger.debug(f"[UserbotAuth] Sign in successful for {masked_phone}")
             
             # Success - save session
             final_session = client.session.save()
@@ -341,7 +383,22 @@ class UserbotsHandler:
                 await client.disconnect()
                 await state.set_state(ManagementStates.userbot_login_2fa)
             
+        except PhoneCodeExpiredError as e:
+            time_elapsed = time.time() - code_request_time
+            logger.error(f"[UserbotAuth] ❌ VERIFICATION CODE EXPIRED for {masked_phone}")
+            logger.error(f"[UserbotAuth] Time since code request: {time_elapsed:.1f} seconds")
+            logger.error(f"[UserbotAuth] Telegram timeout: usually 5 minutes (300s)")
+            await message.answer(
+                f"❌ **Verification Code Expired**\n\n"
+                f"⏰ Time elapsed: {time_elapsed:.1f} seconds\n"
+                f"📱 Telegram codes expire after 5 minutes\n\n"
+                f"Please start over with /start"
+            )
+            await client.disconnect()
+            await state.clear()
+
         except PhoneCodeInvalidError:
+            logger.error(f"[UserbotAuth] ❌ Invalid verification code for {masked_phone}")
             await message.answer(
                 "❌ <b>Invalid Code</b>\n\n"
                 "The verification code is incorrect. Please try again:"
@@ -357,12 +414,27 @@ class UserbotsHandler:
             await state.clear()
             
         except Exception as e:
-            logger.error(f"Code processing error: {e}")
-            await message.answer(
-                f"❌ <b>Error</b>\n\n"
-                f"Authentication failed: {str(e)}\n"
-                f"Please start again with /start"
-            )
+            time_elapsed = time.time() - code_request_time
+            logger.error(f"[UserbotAuth] ❌ Code processing error for {masked_phone}: {type(e).__name__}: {e}")
+            logger.error(f"[UserbotAuth] Time elapsed: {time_elapsed:.1f} seconds")
+            import traceback
+            logger.error(f"[UserbotAuth] Full traceback: {traceback.format_exc()}")
+
+            # Check if this might be a timeout-related error
+            error_msg = str(e).lower()
+            if any(word in error_msg for word in ['expired', 'timeout', 'time']):
+                await message.answer(
+                    f"❌ **Authentication Timeout**\n\n"
+                    f"⏰ Time elapsed: {time_elapsed:.1f} seconds\n"
+                    f"Error: {str(e)}\n\n"
+                    f"Please start over with /start"
+                )
+            else:
+                await message.answer(
+                    f"❌ <b>Error</b>\n\n"
+                    f"Authentication failed: {str(e)}\n"
+                    f"Please start again with /start"
+                )
             try:
                 await client.disconnect()
             except:

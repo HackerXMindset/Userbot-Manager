@@ -328,56 +328,72 @@ class DexScreenerService:
     
     async def _queue_pnl_command(self, token: Dict[str, Any], threshold: Decimal):
         """Send /pnl command using the managed userbot worker."""
+        logger.debug(f"[PNL_ALERT] Attempting to queue PNL command for token {token['address']} at {threshold}x.")
         try:
             source_group_id = token.get('source_group_id')
             if not source_group_id:
+                logger.debug(f"[PNL_ALERT] Aborting: No source_group_id found on token {token['id']}.")
                 return
+
+            logger.debug(f"[PNL_ALERT] Token {token['id']} is associated with source_group_id {source_group_id}.")
 
             # Check if the userbot manager is available
             if not self.userbot_manager:
-                logger.error("UserbotManager not available in DexScreenerService. Cannot send PNL command.")
+                logger.error("[PNL_ALERT] Aborting: UserbotManager not available in DexScreenerService.")
                 return
 
             # Get the userbot assigned to the source group
+            logger.debug(f"[PNL_ALERT] Fetching userbot assignment for group {source_group_id}.")
             userbot_assignment = await db.fetchrow("""
                 SELECT userbot_id FROM userbot_assignments WHERE group_id = $1
             """, source_group_id)
 
             if not userbot_assignment or not userbot_assignment['userbot_id']:
-                logger.warning(f"No userbot assigned to group {source_group_id} for PNL alert.")
+                logger.warning(f"[PNL_ALERT] Aborting: No userbot assigned to group {source_group_id} for PNL alert.")
                 return
             
             userbot_id = userbot_assignment['userbot_id']
+            logger.debug(f"[PNL_ALERT] Group {source_group_id} is assigned to userbot {userbot_id}.")
 
             # Get the worker instance from the manager
             worker = self.userbot_manager.get_worker(userbot_id)
             if not worker:
-                logger.error(f"Userbot worker {userbot_id} not found in manager.")
+                logger.error(f"[PNL_ALERT] Aborting: Userbot worker {userbot_id} not found in manager.")
                 return
 
             client = worker.session_manager.get_client()
             if not client or not worker.session_manager.is_connected():
-                logger.error(f"Userbot {userbot_id} is not connected. Cannot send PNL command.")
+                logger.error(f"[PNL_ALERT] Aborting: Userbot {userbot_id} is not connected.")
                 return
+            
+            logger.debug(f"[PNL_ALERT] Userbot {userbot_id} client is connected.")
 
             # Get target groups for this source group
+            logger.debug(f"[PNL_ALERT] Fetching targets for group {source_group_id}.")
             targets = await db.fetch("SELECT dest_chat_id FROM targets WHERE group_id = $1", source_group_id)
             if not targets:
-                logger.warning(f"No target groups found for source group {source_group_id}")
+                logger.warning(f"[PNL_ALERT] Aborting: No targets found for source group {source_group_id}.")
                 return
 
+            logger.debug(f"[PNL_ALERT] Found {len(targets)} targets for group {source_group_id}.")
             message = f"/pnl {token['address']}"
             
             # Send to all target groups
             for target in targets:
+                target_chat_id = target['dest_chat_id']
+                logger.debug(f"[PNL_ALERT] Processing target chat_id: {target_chat_id}.")
                 try:
-                    sent_message = await client.send_message(target['dest_chat_id'], message)
-                    logger.info(f"Sent /pnl {token['address'][:8]}... to {target['dest_chat_id']} ({threshold}x alert, msg_id: {sent_message.id})")
+                    sent_message = await client.send_message(target_chat_id, message)
+                    logger.info(f"[PNL_ALERT] SUCCESS: Sent /pnl {token['address'][:8]}... to {target_chat_id} ({threshold}x alert, msg_id: {sent_message.id})")
                 except Exception as send_error:
-                    logger.error(f"Failed to send PNL command to {target['dest_chat_id']}: {send_error}")
+                    import traceback
+                    logger.error(f"[PNL_ALERT] FAILED to send PNL command to {target_chat_id}: {send_error}")
+                    logger.error(f"[PNL_ALERT] Traceback: {traceback.format_exc()}")
 
         except Exception as e:
-            logger.error(f"Error sending PNL command: {e}")
+            import traceback
+            logger.error(f"[PNL_ALERT] CRITICAL: Error in _queue_pnl_command: {e}")
+            logger.error(f"[PNL_ALERT] Traceback: {traceback.format_exc()}")
 
         # --- NEW LOGIC for Curated Alpha targets ---
         try:
@@ -392,7 +408,7 @@ class DexScreenerService:
             """, token['address'])
 
             if not curated_rules:
-                return # No curated PNL forwarding for this token
+                pass # No curated PNL forwarding for this token
 
             logger.info(f"[CuratedAlpha] Found {len(curated_rules)} curated PNL rule(s) for token {token['address'][:8]}...")
 

@@ -14,12 +14,16 @@ class SourceChatModel(BaseModel):
         query = """
             SELECT sc.*, COUNT(scu.id) as user_count,
                    COUNT(rr.id) as route_count,
-                   COALESCE(g.display_name, g.title) as group_display_name
+                   COALESCE(g.display_name, g.title) as group_display_name,
+                   mb.session_name as monitoring_bot_name,
+                   fb.session_name as forwarding_bot_name
             FROM source_chats sc
             LEFT JOIN source_chat_users scu ON scu.source_chat_id = sc.id
             LEFT JOIN routing_rules rr ON rr.source_chat_id = sc.id AND rr.enabled = true
             LEFT JOIN groups g ON g.tg_chat_id = sc.source_chat_id
-            GROUP BY sc.id, sc.display_name, g.display_name, g.title
+            LEFT JOIN bots mb ON mb.id = sc.default_monitoring_userbot_id
+            LEFT JOIN bots fb ON fb.id = sc.default_forwarding_userbot_id
+            GROUP BY sc.id, sc.display_name, g.display_name, g.title, mb.session_name, fb.session_name
             ORDER BY sc.created_at DESC
         """
         return await self.db.fetch(query)
@@ -197,3 +201,15 @@ class SourceChatModel(BaseModel):
             ORDER BY sc.name, rr.created_at
         """
         return await self.db.fetch(query, userbot_id)
+
+    async def update_source_bots(self, source_id: int,
+                                monitoring_userbot_id: int = None,
+                                forwarding_userbot_id: int = None) -> asyncpg.Record:
+        """Update default monitor and forwarding bots for a source"""
+        query = """
+            UPDATE source_chats
+            SET default_monitoring_userbot_id = $2, default_forwarding_userbot_id = $3
+            WHERE id = $1
+            RETURNING *
+        """
+        return await self.db.fetchrow(query, source_id, monitoring_userbot_id, forwarding_userbot_id)

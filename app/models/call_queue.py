@@ -62,37 +62,22 @@ class CallQueueModel(BaseModel):
             return await self.db.fetchrow(query, *vals)
 
         except asyncpg.exceptions.UndefinedColumnError:
-            logger.warning("Call queue schema appears to be outdated. Attempting to use fallback query. Please ensure migrations are up to date.")
-            
-            # Build the query dynamically for an OLDER schema
-            cols = [
-                "token_address", "target_chat_id", "forwarding_userbot_id", "priority"
-            ]
-            vals = [
-                token_address, target_chat_id, forwarding_userbot_id, priority
-            ]
-
-            if routing_rule_id:
-                cols.append("routing_rule_id")
-                vals.append(routing_rule_id)
-            # Cannot add curated_alpha_rule_id in fallback as it relies on a migration
-            if target_group_id:
-                cols.append("target_group_id")
-                vals.append(target_group_id)
-            if source_info:
-                cols.append("source_info")
-                vals.append(source_info)
-            if additional_info:
-                cols.append("additional_info")
-                vals.append(additional_info)
-            
-            placeholders = ", ".join([f"${i+1}" for i in range(len(vals))])
-            query_fallback = f"""
-                INSERT INTO call_queue ({", ".join(cols)})
-                VALUES ({placeholders})
+            logger.warning("Call queue schema appears to be outdated. Forcing fallback query for curated alpha calls.")
+            # Simplified fallback to ensure essential data and template support is saved.
+            fallback_query = """
+                INSERT INTO call_queue (token_address, target_chat_id, forwarding_userbot_id, priority, curated_alpha_rule_id, target_group_id, additional_info, source_info, source_user_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                ON CONFLICT DO NOTHING
                 RETURNING *
             """
-            return await self.db.fetchrow(query_fallback, *vals)
+            try:
+                return await self.db.fetchrow(
+                    fallback_query,
+                    token_address, target_chat_id, forwarding_userbot_id, priority, curated_alpha_rule_id, target_group_id, additional_info, source_info, source_user_id
+                )
+            except Exception as final_fallback_error:
+                logger.error(f"CRITICAL: Final fallback insert failed: {final_fallback_error}")
+                return None
 
     async def get_pending_jobs(self, limit: int = 10, userbot_id: int = None) -> List[asyncpg.Record]:
         """Get pending jobs from the queue, optionally filtered by userbot"""

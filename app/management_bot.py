@@ -337,6 +337,12 @@ class ManagementBot:
         )
 
         self.dp.message.register(
+            self.curate_alpha_handler.wizard_process_min_mentions,
+            ManagementStates.curate_alpha_set_min_mentions,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
             self.curate_alpha_handler.process_field_edit,
             ManagementStates.curate_alpha_edit_field,
             F.from_user.id.in_(settings.admin_telegram_ids_list)

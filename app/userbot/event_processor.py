@@ -123,9 +123,8 @@ class EventProcessor:
         try:
             # Get unprocessed events for this userbot
             events = await db.fetch("""
-                SELECT * FROM events 
+                SELECT * FROM events
                 WHERE payload::json->>'userbot_id' = $1
-                AND routed_at IS NULL
                 AND created_at > NOW() - INTERVAL '1 hour'
                 ORDER BY created_at DESC
                 LIMIT $2
@@ -253,14 +252,14 @@ class EventProcessor:
         """Get event processing statistics"""
         try:
             stats = await db.fetchrow("""
-                SELECT 
+                SELECT
                     COUNT(*) as total_events,
                     COUNT(*) FILTER (WHERE kind = 'token_call') as token_call_events,
                     COUNT(*) FILTER (WHERE kind = 'source_token_call') as source_token_events,
                     COUNT(*) FILTER (WHERE kind = 'system') as system_events,
-                    COUNT(*) FILTER (WHERE routed_at IS NOT NULL) as processed_events,
-                    COUNT(*) FILTER (WHERE routed_at IS NULL) as pending_events
-                FROM events 
+                    0 as processed_events,
+                    COUNT(*) as pending_events
+                FROM events
                 WHERE payload::json->>'userbot_id' = $1
                 AND created_at > NOW() - INTERVAL '24 hours'
             """, str(self.userbot_id))
@@ -291,12 +290,11 @@ class EventProcessor:
         """Clean up old processed events"""
         try:
             deleted_count = await db.fetchval("""
-                DELETE FROM events 
+                DELETE FROM events
                 WHERE payload::json->>'userbot_id' = $1
-                AND routed_at IS NOT NULL
-                AND created_at < NOW() - INTERVAL '%s days'
+                AND created_at < NOW() - INTERVAL $2
                 RETURNING COUNT(*)
-            """, str(self.userbot_id), days_old)
+            """, str(self.userbot_id), f"{days_old} days")
             
             if deleted_count:
                 logger.info(f"Cleaned up {deleted_count} old events for userbot {self.userbot_id}")

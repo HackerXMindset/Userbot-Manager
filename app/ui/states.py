@@ -58,6 +58,7 @@ class ManagementStates(StatesGroup):
     curate_alpha_select_sources = State()
     curate_alpha_select_forwarding_bot = State()
     curate_alpha_set_destination = State()
+    curate_alpha_set_min_mentions = State()
     curate_alpha_set_time_window = State()
     curate_alpha_edit_field = State()
 

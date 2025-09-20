@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from app.db import db
 from app.models.token import TokenModel
 from app.dex import get_dex_service
+from app.services.call_history_service import CallHistoryService
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class PlaceholderService:
         self.token_address = token_address
         self.job_context = job_context
         self.token_model = TokenModel(db)
+        self.call_history_service = CallHistoryService()
         self._data_cache: Dict[str, Any] = {}
 
     async def get_all_placeholders(self) -> Dict[str, str]:
@@ -93,6 +95,7 @@ class PlaceholderService:
             'price_usd': 'N/A',
             'fdv': 'N/A',
             'liquidity_usd': 'N/A',
+            'call_history': 'N/A',
         }
 
         # Fetch data
@@ -185,6 +188,16 @@ class PlaceholderService:
                 "SELECT COUNT(*) FROM calls WHERE token_id = $1", db_token['id']
             )
             placeholders['mention_count'] = str(mention_count or 1)
+
+        # Add call history
+        try:
+            call_history_text = await self.call_history_service.format_call_history_for_token(
+                self.token_address
+            )
+            placeholders['call_history'] = call_history_text
+        except Exception as history_error:
+            logger.warning(f"Failed to fetch call history for {self.token_address}: {history_error}")
+            placeholders['call_history'] = "🌕 Recent History\nCall history unavailable"
 
         # Add links
         placeholders['defined_link'] = f"https://www.defined.fi/sol/{self.token_address}"

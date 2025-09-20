@@ -70,9 +70,14 @@ class SourcesHandler:
                     type_emoji = type_emojis.get(source['source_type'], '📡')
                     name = source.get('display_name') or source.get('group_display_name') or source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
                     route_count = source['route_count'] or 0
-                    
+
                     text += f"{status} {type_emoji} <b>{name}</b>\n"
-                    text += f"   Routes: {route_count} targets\n\n"
+                    text += f"   Routes: {route_count} targets\n"
+
+                    # Show bot assignments
+                    monitor_bot = source.get('monitoring_bot_name', 'None')
+                    forward_bot = source.get('forwarding_bot_name', 'None')
+                    text += f"   Monitor: {monitor_bot} | Forward: {forward_bot}\n\n"
             
             keyboard_rows = [
                 [
@@ -198,6 +203,21 @@ class SourcesHandler:
             self.clear_cache()
             await query.answer("✅ Cache cleared!")
             await self.show_sources_menu(query)
+        elif action == 'set_monitor':
+            source_id = int(parts[2])
+            await self.show_monitor_bot_selection(query, source_id)
+        elif action == 'set_forward':
+            source_id = int(parts[2])
+            await self.show_forward_bot_selection(query, source_id)
+        elif action == 'clear_bots':
+            source_id = int(parts[2])
+            await self.clear_source_bots(query, source_id)
+        elif action == 'select_monitor_bot':
+            source_id, bot_id = int(parts[2]), int(parts[3])
+            await self.set_monitor_bot(query, source_id, bot_id)
+        elif action == 'select_forward_bot':
+            source_id, bot_id = int(parts[2]), int(parts[3])
+            await self.set_forward_bot(query, source_id, bot_id)
         else:
             await self.show_sources_menu(query)
     
@@ -337,12 +357,20 @@ class SourcesHandler:
     async def show_source_details(self, query: types.CallbackQuery, source_id: int):
         """Show detailed source information and routing management"""
         try:
-            # Get source details
-            source = await self.db.fetchrow("SELECT * FROM source_chats WHERE id = $1", source_id)
+            # Get source details with bot information
+            source = await self.db.fetchrow("""
+                SELECT sc.*,
+                       mb.session_name as monitoring_bot_name,
+                       fb.session_name as forwarding_bot_name
+                FROM source_chats sc
+                LEFT JOIN bots mb ON mb.id = sc.default_monitoring_userbot_id
+                LEFT JOIN bots fb ON fb.id = sc.default_forwarding_userbot_id
+                WHERE sc.id = $1
+            """, source_id)
             if not source:
                 await query.answer("❌ Source not found")
                 return
-            
+
             # Get routing rules
             routes = await self.source_model.get_routing_rules(source_id)
             
@@ -356,6 +384,13 @@ class SourcesHandler:
             text += f"<b>Chat/User ID:</b> <code>{source['source_chat_id']}</code>\n"
             text += f"<b>Type:</b> {source['source_type'].title()}\n"
             text += f"<b>Status:</b> {status}\n\n"
+
+            # Show source-level bot assignments
+            monitor_bot = source.get('monitoring_bot_name') or 'None'
+            forward_bot = source.get('forwarding_bot_name') or 'None'
+            text += f"<b>🤖 Source-Level Bots:</b>\n"
+            text += f"   Monitor: <code>{monitor_bot}</code>\n"
+            text += f"   Forward: <code>{forward_bot}</code>\n\n"
             
             if routes:
                 text += f"<b>🔄 Routing Rules ({len(routes)}):</b>\n"
@@ -389,6 +424,11 @@ class SourcesHandler:
                     )
                 ],
                 [
+                    InlineKeyboardButton(text="🤖 Set Monitor Bot", callback_data=f"sources:set_monitor:{source_id}"),
+                    InlineKeyboardButton(text="📤 Set Forward Bot", callback_data=f"sources:set_forward:{source_id}")
+                ],
+                [
+                    InlineKeyboardButton(text="❌ Clear Bots", callback_data=f"sources:clear_bots:{source_id}"),
                     InlineKeyboardButton(
                         text="➕ Add Route",
                         callback_data=f"sources:add_route:{source_id}"
@@ -509,6 +549,12 @@ class SourcesHandler:
 
             source = await self.db.fetchrow("SELECT * FROM source_chats WHERE id = $1", source_id)
             group = await self.db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
+
+            # Fall back to source-level bot assignments if routing-level ones aren't set
+            if monitor_bot_id is None and source:
+                monitor_bot_id = source.get('default_monitoring_userbot_id')
+            if forward_bot_id is None and source:
+                forward_bot_id = source.get('default_forwarding_userbot_id')
 
             source_name = source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
             group_name = group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}"
@@ -1326,3 +1372,132 @@ class SourcesHandler:
                 await query.message.edit_text(text, reply_markup=keyboard)
             except:
                 pass
+
+    async def show_monitor_bot_selection(self, query: types.CallbackQuery, source_id: int):
+        """Show available bots for monitor bot selection"""
+        try:
+            from app.models.bot import BotModel
+            bot_model = BotModel(self.db)
+            bots = await bot_model.get_active_userbots()
+
+            text = "<b>🤖 Select Monitor Bot</b>\n\n"
+            text += "Choose which userbot will monitor this source for tokens:\n\n"
+
+            keyboard_rows = []
+            for bot in bots:
+                name = bot.get('display_name') or bot['session_name']
+                keyboard_rows.append([
+                    InlineKeyboardButton(
+                        text=f"🤖 {name}",
+                        callback_data=f"sources:select_monitor_bot:{source_id}:{bot['id']}"
+                    )
+                ])
+
+            keyboard_rows.append([
+                InlineKeyboardButton(text="❌ Clear Monitor", callback_data=f"sources:select_monitor_bot:{source_id}:0")
+            ])
+            keyboard_rows.append([
+                InlineKeyboardButton(text="🔙 Back", callback_data=f"sources:source_details:{source_id}")
+            ])
+
+            await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows))
+
+        except Exception as e:
+            logger.error(f"Error showing monitor bot selection: {e}")
+            await query.answer("❌ Error loading bots")
+
+    async def show_forward_bot_selection(self, query: types.CallbackQuery, source_id: int):
+        """Show available bots for forward bot selection"""
+        try:
+            from app.models.bot import BotModel
+            bot_model = BotModel(self.db)
+            bots = await bot_model.get_active_userbots()
+
+            text = "<b>📤 Select Forward Bot</b>\n\n"
+            text += "Choose which userbot will forward curated calls from this source:\n\n"
+
+            keyboard_rows = []
+            for bot in bots:
+                name = bot.get('display_name') or bot['session_name']
+                keyboard_rows.append([
+                    InlineKeyboardButton(
+                        text=f"🤖 {name}",
+                        callback_data=f"sources:select_forward_bot:{source_id}:{bot['id']}"
+                    )
+                ])
+
+            keyboard_rows.append([
+                InlineKeyboardButton(text="❌ Clear Forward", callback_data=f"sources:select_forward_bot:{source_id}:0")
+            ])
+            keyboard_rows.append([
+                InlineKeyboardButton(text="🔙 Back", callback_data=f"sources:source_details:{source_id}")
+            ])
+
+            await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows))
+
+        except Exception as e:
+            logger.error(f"Error showing forward bot selection: {e}")
+            await query.answer("❌ Error loading bots")
+
+    async def set_monitor_bot(self, query: types.CallbackQuery, source_id: int, bot_id: int):
+        """Set or clear monitor bot for source"""
+        try:
+            # Get current source to preserve forward bot
+            source = await self.source_model.get_by_id(source_id)
+            if not source:
+                await query.answer("❌ Source not found")
+                return
+
+            monitor_bot_id = bot_id if bot_id != 0 else None
+            current_forward_bot = source.get('default_forwarding_userbot_id')
+
+            await self.source_model.update_source_bots(
+                source_id,
+                monitoring_userbot_id=monitor_bot_id,
+                forwarding_userbot_id=current_forward_bot
+            )
+
+            action_text = "cleared" if monitor_bot_id is None else "set"
+            await query.answer(f"✅ Monitor bot {action_text}!")
+            await self.show_source_details(query, source_id)
+
+        except Exception as e:
+            logger.error(f"Error setting monitor bot: {e}")
+            await query.answer("❌ Error updating monitor bot")
+
+    async def set_forward_bot(self, query: types.CallbackQuery, source_id: int, bot_id: int):
+        """Set or clear forward bot for source"""
+        try:
+            # Get current source to preserve monitor bot
+            source = await self.source_model.get_by_id(source_id)
+            if not source:
+                await query.answer("❌ Source not found")
+                return
+
+            forward_bot_id = bot_id if bot_id != 0 else None
+            current_monitor_bot = source.get('default_monitoring_userbot_id')
+
+            await self.source_model.update_source_bots(
+                source_id,
+                monitoring_userbot_id=current_monitor_bot,
+                forwarding_userbot_id=forward_bot_id
+            )
+
+            action_text = "cleared" if forward_bot_id is None else "set"
+            await query.answer(f"✅ Forward bot {action_text}!")
+            await self.show_source_details(query, source_id)
+
+        except Exception as e:
+            logger.error(f"Error setting forward bot: {e}")
+            await query.answer("❌ Error updating forward bot")
+
+    async def clear_source_bots(self, query: types.CallbackQuery, source_id: int):
+        """Clear both monitor and forward bots for source"""
+        try:
+            await self.source_model.update_source_bots(source_id, monitoring_userbot_id=None, forwarding_userbot_id=None)
+            await query.answer("✅ Source bots cleared!")
+            await self.show_source_details(query, source_id)
+
+        except Exception as e:
+            logger.error(f"Error clearing source bots: {e}")
+            await query.answer("❌ Error clearing bots")

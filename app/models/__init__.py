@@ -10,6 +10,7 @@ from .notification import NotificationSettingsModel, NotificationBlacklistModel
 from .auto_button_click import AutoButtonClickRuleModel
 from .curated_alpha import CuratedAlphaRuleModel, CuratedAlphaTokenStateModel
 from .template import TemplateModel, TemplateAssignmentModel
+from .token_call_history import TokenCallHistoryModel
 
 __all__ = [
     "BaseModel",
@@ -26,4 +27,5 @@ __all__ = [
     "CuratedAlphaTokenStateModel",
     "TemplateModel",
     "TemplateAssignmentModel",
+    "TokenCallHistoryModel",
 ]
