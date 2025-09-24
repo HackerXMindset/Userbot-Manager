@@ -17,6 +17,10 @@ pub struct DexPayload {
     pub pairs: Vec<TokenPair>,
     pub orders: Vec<DexScreenerOrder>,
     pub pump_fun: Option<PumpFunData>,
+    pub jupiter: Option<JupiterTokenData>,
+    pub dev_sol_balance: Option<f64>,
+    pub holders: Option<HoldersData>,
+    pub supply_ui_amount: Option<f64>,
 }
 
 impl ApiClient {
@@ -73,20 +77,44 @@ impl ApiClient {
     }
 
     pub async fn fetch_dex_payload(&self, mint_address: &str) -> Result<DexPayload> {
-        let (pairs_res, orders_res, pump_fun_res) = tokio::join!(
+        let (pairs_res, orders_res, pump_fun_res, jupiter_res, holders_res, supply_res) = tokio::join!(
             self.get_dexscreener_data(mint_address),
             self.get_dexscreener_orders_data("solana", mint_address),
             self.get_pump_fun_data(mint_address),
+            self.fetch_jupiter_token_data(mint_address),
+            self.get_token_largest_accounts(mint_address),
+            self.get_token_supply(mint_address),
         );
 
         let pairs = pairs_res?.pairs.unwrap_or_default();
         let orders = orders_res?;
         let pump_fun = pump_fun_res.ok();
+        let jupiter = jupiter_res.ok();
+        let holders = holders_res.ok();
+        let supply_ui_amount = supply_res.ok().and_then(|info| {
+            info.result
+                .and_then(|res| res.value)
+                .and_then(|val| val.ui_amount)
+        });
+
+        let dev_sol_balance = if let Some(jup) = &jupiter {
+            if let Some(dev_address) = &jup.dev {
+                self.get_sol_balance(dev_address).await.ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         Ok(DexPayload {
             pairs,
             orders,
             pump_fun,
+            jupiter,
+            dev_sol_balance,
+            holders,
+            supply_ui_amount,
         })
     }
 
@@ -114,6 +142,23 @@ impl ApiClient {
         );
         let response = timeout(Duration::from_secs(3), self.client.get(&url).send()).await??;
         let data: DexScreenerData = response.json().await?;
+        Ok(data)
+    }
+
+    async fn get_token_supply(&self, mint_address: &str) -> Result<SupplyInfo> {
+        let url = format!("https://mainnet.helius-rpc.com/?api-key={}", self.api_key);
+        let payload = json!({
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "getTokenSupply",
+            "params": [mint_address]
+        });
+        let response = timeout(
+            Duration::from_secs(3),
+            self.client.post(&url).json(&payload).send(),
+        )
+        .await??;
+        let data: SupplyInfo = response.json().await?;
         Ok(data)
     }
 

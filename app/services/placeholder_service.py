@@ -86,6 +86,16 @@ def format_timestamp_value(timestamp: Optional[int]) -> Dict[str, str]:
 
     return {"ago": format_time_diff(dt), "iso": dt.isoformat()}
 
+
+def get_map_value(mapping: Optional[Dict[str, Any]], *keys: str) -> Any:
+    """Return the first non-None value for the provided keys from a mapping."""
+    if not isinstance(mapping, dict):
+        return None
+    for key in keys:
+        if key in mapping and mapping[key] is not None:
+            return mapping[key]
+    return None
+
 class PlaceholderService:
     """Gathers and formats data for template placeholders."""
 
@@ -218,6 +228,64 @@ class PlaceholderService:
             'pf_banner_uri': 'N/A',
             'pf_thumbnail_uri': 'N/A',
             'pf_video_uri': 'N/A',
+            'jup_id': 'N/A',
+            'jup_name': 'N/A',
+            'jup_symbol': 'N/A',
+            'jup_icon': 'N/A',
+            'jup_decimals': 'N/A',
+            'jup_token_program': 'N/A',
+            'jup_launchpad': 'N/A',
+            'jup_first_pool_id': 'N/A',
+            'jup_first_pool_created_at': 'N/A',
+            'jup_graduated_pool': 'N/A',
+            'jup_graduated_at': 'N/A',
+            'jup_holder_count': 'N/A',
+            'jup_updated_at': 'N/A',
+            'jup_circ_supply': 'N/A',
+            'jup_total_supply': 'N/A',
+            'jup_usd_price': 'N/A',
+            'jup_mcap': 'N/A',
+            'jup_fdv': 'N/A',
+            'jup_liquidity': 'N/A',
+            'jup_bonding_curve': 'N/A',
+            'jup_price_block_id': 'N/A',
+            'jup_is_verified': 'N/A',
+            'jup_audit_mint_authority_disabled': 'N/A',
+            'jup_audit_freeze_authority_disabled': 'N/A',
+            'jup_audit_top_holders_pct': 'N/A',
+            'jup_audit_snipers_pct': 'N/A',
+            'jup_audit_dev_migrations': 'N/A',
+            'jup_audit_dev_balance_pct': 'N/A',
+            'jup_dev_address': 'N/A',
+            'jup_dev_sol_balance': 'N/A',
+            'jup_organic_score': 'N/A',
+            'jup_organic_score_label': 'N/A',
+            'jup_tags': 'N/A',
+            'jup_ct_likes': 'N/A',
+            'jup_smart_ct_likes': 'N/A',
+            'jup_twitter': 'N/A',
+            'jup_telegram': 'N/A',
+            'jup_website': 'N/A',
+            'jup_cexes': 'N/A',
+            'helius_data_slot': 'N/A',
+            'helius_holder_count': 'N/A',
+            'helius_holder_total_ui_amount': 'N/A',
+            'helius_creator_holding_ui_amount': 'N/A',
+            'helius_creator_holding_ui_amount_string': 'N/A',
+            'helius_creator_holding_raw_amount': 'N/A',
+            'helius_creator_holding_percent_of_sample': 'N/A',
+            'helius_creator_holding_percent_of_supply': 'N/A',
+            'helius_creator_is_holder': 'N/A',
+            'helius_top1_ui_amount': 'N/A',
+            'helius_top5_ui_amount': 'N/A',
+            'helius_top10_ui_amount': 'N/A',
+            'helius_top20_ui_amount': 'N/A',
+            'helius_top1_share': 'N/A',
+            'helius_top5_share': 'N/A',
+            'helius_top10_share': 'N/A',
+            'helius_top20_share': 'N/A',
+            'helius_remaining_share': 'N/A',
+            'helius_holder_table': 'N/A',
         }
 
         for i in range(1, 6):
@@ -225,11 +293,41 @@ class PlaceholderService:
             placeholders[f'dex_info_social_{i}_platform'] = 'N/A'
             placeholders[f'dex_info_social_{i}_handle'] = 'N/A'
 
+        stat_fields = [
+            'price_change',
+            'holder_change',
+            'liquidity_change',
+            'volume_change',
+            'buy_volume',
+            'sell_volume',
+            'buy_organic_volume',
+            'sell_organic_volume',
+            'num_buys',
+            'num_sells',
+            'num_traders',
+            'num_organic_buyers',
+            'num_net_buyers',
+        ]
+
+        for timeframe in ['5m', '1h', '6h', '24h']:
+            for field in stat_fields:
+                placeholders[f'jup_stats_{timeframe}_{field}'] = 'N/A'
+
         for i in range(1, 21):
             placeholders[f'dex_order_{i}_type'] = 'N/A'
             placeholders[f'dex_order_{i}_status'] = 'N/A'
             placeholders[f'dex_order_{i}_timestamp'] = 'N/A'
             placeholders[f'dex_order_{i}_timestamp_iso'] = 'N/A'
+
+        for i in range(1, 21):
+            placeholders[f'helius_holder_{i}_address'] = 'N/A'
+            placeholders[f'helius_holder_{i}_short'] = 'N/A'
+            placeholders[f'helius_holder_{i}_ui_amount'] = 'N/A'
+            placeholders[f'helius_holder_{i}_ui_amount_string'] = 'N/A'
+            placeholders[f'helius_holder_{i}_raw_amount'] = 'N/A'
+            placeholders[f'helius_holder_{i}_decimals'] = 'N/A'
+            placeholders[f'helius_holder_{i}_percent_of_sample'] = 'N/A'
+            placeholders[f'helius_holder_{i}_percent_of_supply'] = 'N/A'
 
         # Fetch data from Rust service first
         db_token = await self.token_model.get_by_address(self.token_address)
@@ -238,10 +336,18 @@ class PlaceholderService:
         dex_pairs = []
         dex_orders = []
         pump_fun_payload = None
+        jupiter_payload = None
+        dev_sol_balance = None
+        holders_payload = None
+        supply_ui_amount = None
         if rust_payload:
             dex_pairs = rust_payload.get('pairs') or []
             dex_orders = rust_payload.get('orders') or []
             pump_fun_payload = rust_payload.get('pump_fun')
+            jupiter_payload = rust_payload.get('jupiter')
+            dev_sol_balance = rust_payload.get('dev_sol_balance')
+            holders_payload = rust_payload.get('holders')
+            supply_ui_amount = rust_payload.get('supply_ui_amount')
 
         if not dex_pairs:
             logger.warning(
@@ -255,8 +361,8 @@ class PlaceholderService:
 
         if dex_pairs:
             pair_data = dex_pairs[0]
-            base_token = pair_data.get('baseToken', {})
-            quote_token = pair_data.get('quoteToken', {})
+            base_token = pair_data.get('baseToken') or {}
+            quote_token = pair_data.get('quoteToken') or {}
             placeholders.update({
                 'token_symbol': base_token.get('symbol') or 'N/A',
                 'token_name': base_token.get('name') or 'N/A',
@@ -286,7 +392,7 @@ class PlaceholderService:
             if fdv_raw is not None:
                 placeholders['dex_pair_fdv_raw'] = f"{fdv_raw:.2f}" if isinstance(fdv_raw, (int, float)) else str(fdv_raw)
 
-            volume = pair_data.get('volume', {})
+            volume = pair_data.get('volume') or {}
             placeholders.update({
                 'volume_h1': format_market_cap(volume.get('h1')),
                 'volume_h6': format_market_cap(volume.get('h6')),
@@ -294,7 +400,7 @@ class PlaceholderService:
                 'volume_m5': format_market_cap(volume.get('m5')),
             })
 
-            price_change = pair_data.get('priceChange', {})
+            price_change = pair_data.get('priceChange') or {}
             placeholders.update({
                 'price_change_h1': f"{price_change.get('h1', 0) or 0:.2f}",
                 'price_change_h6': f"{price_change.get('h6', 0) or 0:.2f}",
@@ -302,19 +408,24 @@ class PlaceholderService:
                 'price_change_m5': f"{price_change.get('m5', 0) or 0:.2f}",
             })
 
-            txns = pair_data.get('txns', {})
+            txns = pair_data.get('txns') or {}
+            h1_txn = txns.get('h1') or {}
+            h6_txn = txns.get('h6') or {}
+            h24_txn = txns.get('h24') or {}
+            m5_txn = txns.get('m5') or {}
+
             placeholders.update({
-                'txns_h1_buys': txns.get('h1', {}).get('buys', 0),
-                'txns_h1_sells': txns.get('h1', {}).get('sells', 0),
-                'txns_h6_buys': txns.get('h6', {}).get('buys', 0),
-                'txns_h6_sells': txns.get('h6', {}).get('sells', 0),
-                'txns_h24_buys': txns.get('h24', {}).get('buys', 0),
-                'txns_h24_sells': txns.get('h24', {}).get('sells', 0),
-                'txns_m5_buys': txns.get('m5', {}).get('buys', 0),
-                'txns_m5_sells': txns.get('m5', {}).get('sells', 0),
+                'txns_h1_buys': h1_txn.get('buys', 0),
+                'txns_h1_sells': h1_txn.get('sells', 0),
+                'txns_h6_buys': h6_txn.get('buys', 0),
+                'txns_h6_sells': h6_txn.get('sells', 0),
+                'txns_h24_buys': h24_txn.get('buys', 0),
+                'txns_h24_sells': h24_txn.get('sells', 0),
+                'txns_m5_buys': m5_txn.get('buys', 0),
+                'txns_m5_sells': m5_txn.get('sells', 0),
             })
 
-            liquidity = pair_data.get('liquidity', {})
+            liquidity = pair_data.get('liquidity') or {}
             placeholders['liquidity_usd'] = format_market_cap(liquidity.get('usd'))
             placeholders['liquidity_base'] = format_market_cap(liquidity.get('base'))
             placeholders['liquidity_quote'] = format_market_cap(liquidity.get('quote'))
@@ -356,7 +467,7 @@ class PlaceholderService:
                     formatted_socials.append(f"{platform}: {handle}")
                 placeholders['dex_info_socials'] = '\n'.join(formatted_socials)
 
-            boosts = pair_data.get('boosts', {})
+            boosts = pair_data.get('boosts') or {}
             if boosts:
                 placeholders['dex_boosts_active'] = boosts.get('active', 'N/A') or 'N/A'
 
@@ -458,6 +569,86 @@ class PlaceholderService:
             placeholders['pf_banner_uri'] = pf.get('banner_uri') or 'N/A'
             placeholders['pf_thumbnail_uri'] = pf.get('thumbnail') or 'N/A'
             placeholders['pf_video_uri'] = pf.get('video_uri') or 'N/A'
+
+        if jupiter_payload:
+            jup = jupiter_payload
+            placeholders['jup_id'] = jup.get('id') or 'N/A'
+            placeholders['jup_name'] = jup.get('name') or 'N/A'
+            placeholders['jup_symbol'] = jup.get('symbol') or 'N/A'
+            placeholders['jup_icon'] = jup.get('icon') or 'N/A'
+            placeholders['jup_decimals'] = get_map_value(jup, 'decimals') or 'N/A'
+            placeholders['jup_token_program'] = get_map_value(jup, 'token_program', 'tokenProgram') or 'N/A'
+            placeholders['jup_launchpad'] = get_map_value(jup, 'launchpad') or 'N/A'
+
+            first_pool = get_map_value(jup, 'first_pool', 'firstPool') or {}
+            placeholders['jup_first_pool_id'] = get_map_value(first_pool, 'id') or 'N/A'
+            placeholders['jup_first_pool_created_at'] = get_map_value(first_pool, 'created_at', 'createdAt') or 'N/A'
+            placeholders['jup_graduated_pool'] = get_map_value(jup, 'graduated_pool', 'graduatedPool') or 'N/A'
+            placeholders['jup_graduated_at'] = get_map_value(jup, 'graduated_at', 'graduatedAt') or 'N/A'
+
+            placeholders['jup_holder_count'] = format_int(get_map_value(jup, 'holder_count', 'holderCount'))
+            placeholders['jup_updated_at'] = get_map_value(jup, 'updated_at', 'updatedAt') or 'N/A'
+            placeholders['jup_circ_supply'] = format_number(get_map_value(jup, 'circ_supply', 'circSupply'), decimals=2)
+            placeholders['jup_total_supply'] = format_number(get_map_value(jup, 'total_supply', 'totalSupply'), decimals=2)
+            placeholders['jup_usd_price'] = format_number(get_map_value(jup, 'usd_price', 'usdPrice'), decimals=10)
+            placeholders['jup_mcap'] = format_market_cap(get_map_value(jup, 'mcap'))
+            placeholders['jup_fdv'] = format_market_cap(get_map_value(jup, 'fdv'))
+            placeholders['jup_liquidity'] = format_market_cap(get_map_value(jup, 'liquidity'))
+            placeholders['jup_bonding_curve'] = format_number(get_map_value(jup, 'bonding_curve', 'bondingCurve'))
+            price_block_id = get_map_value(jup, 'price_block_id', 'priceBlockId')
+            placeholders['jup_price_block_id'] = str(price_block_id) if price_block_id is not None else 'N/A'
+
+            placeholders['jup_is_verified'] = format_bool(get_map_value(jup, 'is_verified', 'isVerified'))
+
+            audit = get_map_value(jup, 'audit') or {}
+            placeholders['jup_audit_mint_authority_disabled'] = format_bool(get_map_value(audit, 'mint_authority_disabled', 'mintAuthorityDisabled'))
+            placeholders['jup_audit_freeze_authority_disabled'] = format_bool(get_map_value(audit, 'freeze_authority_disabled', 'freezeAuthorityDisabled'))
+            placeholders['jup_audit_top_holders_pct'] = format_number(get_map_value(audit, 'top_holders_percentage', 'topHoldersPercentage'))
+            placeholders['jup_audit_snipers_pct'] = format_number(get_map_value(audit, 'snipers_holding_percentage', 'snipersHoldingPercentage'))
+            placeholders['jup_audit_dev_migrations'] = format_int(get_map_value(audit, 'dev_migrations', 'devMigrations'))
+            placeholders['jup_audit_dev_balance_pct'] = format_number(get_map_value(audit, 'dev_balance_percentage', 'devBalancePercentage'))
+
+            placeholders['jup_dev_address'] = get_map_value(jup, 'dev') or 'N/A'
+
+            placeholders['jup_organic_score'] = format_number(get_map_value(jup, 'organic_score', 'organicScore'))
+            placeholders['jup_organic_score_label'] = get_map_value(jup, 'organic_score_label', 'organicScoreLabel') or 'N/A'
+
+            tags = get_map_value(jup, 'tags') or []
+            placeholders['jup_tags'] = ', '.join(tags) if tags else 'N/A'
+
+            placeholders['jup_ct_likes'] = format_int(get_map_value(jup, 'ct_likes', 'ctLikes'))
+            placeholders['jup_smart_ct_likes'] = format_int(get_map_value(jup, 'smart_ct_likes', 'smartCtLikes'))
+            placeholders['jup_twitter'] = get_map_value(jup, 'twitter') or 'N/A'
+            placeholders['jup_telegram'] = get_map_value(jup, 'telegram') or 'N/A'
+            placeholders['jup_website'] = get_map_value(jup, 'website') or 'N/A'
+
+            cexes = get_map_value(jup, 'cexes') or []
+            placeholders['jup_cexes'] = ', '.join(cexes) if cexes else 'N/A'
+
+            stats_map = {
+                '5m': get_map_value(jup, 'stats_5m', 'stats5m') or {},
+                '1h': get_map_value(jup, 'stats_1h', 'stats1h') or {},
+                '6h': get_map_value(jup, 'stats_6h', 'stats6h') or {},
+                '24h': get_map_value(jup, 'stats_24h', 'stats24h') or {},
+            }
+
+            for timeframe, stats in stats_map.items():
+                placeholders[f'jup_stats_{timeframe}_price_change'] = format_number(get_map_value(stats, 'price_change', 'priceChange'))
+                placeholders[f'jup_stats_{timeframe}_holder_change'] = format_number(get_map_value(stats, 'holder_change', 'holderChange'))
+                placeholders[f'jup_stats_{timeframe}_liquidity_change'] = format_number(get_map_value(stats, 'liquidity_change', 'liquidityChange'))
+                placeholders[f'jup_stats_{timeframe}_volume_change'] = format_number(get_map_value(stats, 'volume_change', 'volumeChange'))
+                placeholders[f'jup_stats_{timeframe}_buy_volume'] = format_market_cap(get_map_value(stats, 'buy_volume', 'buyVolume'))
+                placeholders[f'jup_stats_{timeframe}_sell_volume'] = format_market_cap(get_map_value(stats, 'sell_volume', 'sellVolume'))
+                placeholders[f'jup_stats_{timeframe}_buy_organic_volume'] = format_market_cap(get_map_value(stats, 'buy_organic_volume', 'buyOrganicVolume'))
+                placeholders[f'jup_stats_{timeframe}_sell_organic_volume'] = format_market_cap(get_map_value(stats, 'sell_organic_volume', 'sellOrganicVolume'))
+                placeholders[f'jup_stats_{timeframe}_num_buys'] = format_int(get_map_value(stats, 'num_buys', 'numBuys'))
+                placeholders[f'jup_stats_{timeframe}_num_sells'] = format_int(get_map_value(stats, 'num_sells', 'numSells'))
+                placeholders[f'jup_stats_{timeframe}_num_traders'] = format_int(get_map_value(stats, 'num_traders', 'numTraders'))
+                placeholders[f'jup_stats_{timeframe}_num_organic_buyers'] = format_int(get_map_value(stats, 'num_organic_buyers', 'numOrganicBuyers'))
+                placeholders[f'jup_stats_{timeframe}_num_net_buyers'] = format_int(get_map_value(stats, 'num_net_buyers', 'numNetBuyers'))
+
+        if dev_sol_balance is not None:
+            placeholders['jup_dev_sol_balance'] = format_number(dev_sol_balance, decimals=4)
 
         # Fallback and supplement with DB data
         if db_token:
