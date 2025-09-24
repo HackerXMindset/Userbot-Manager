@@ -1,0 +1,45 @@
+# Rust build artifacts
+target/
+
+# Python cache and virtual environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.env
+.venv
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Development and temporary files
+*.log
+*.tmp
+.cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Claude AI assistant files (if recreated)
+.claude/
+CLAUDE.md
+CLAUDE.sessions.md
+GEMINI.md
+sessions/
+todolist.md

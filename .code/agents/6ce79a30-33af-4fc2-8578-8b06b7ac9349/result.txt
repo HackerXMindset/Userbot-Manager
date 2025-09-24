@@ -1,0 +1,1 @@
+**Investigation plan complete.** The repository contains two independent but complementary systems - a Python enterprise userbot manager and a high-performance Rust token analysis bot. Start with the Python `app/runner.py` for the main system, then explore the Rust `src/main.rs` for the token bot.

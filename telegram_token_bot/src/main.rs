@@ -11,20 +11,19 @@ async fn main() -> Result<()> {
     // Load environment variables from .env file
     dotenv().ok();
 
-    // #COMPLETION_DRIVE: Assuming environment variables are set
-    // #SUGGEST_VERIFY: Add validation for required env vars (BOT_TOKEN, API_KEY)
-
     // Initialize logging
     tracing_subscriber::fmt::init();
 
     println!("🤖 Starting Telegram Token Bot (Rust version)...");
 
-    // Get environment variables
-    let bot_token = env::var("BOT_TOKEN")
-        .expect("BOT_TOKEN environment variable must be set");
+    // Get environment variables and validate them
+    let bot_token = env::var("BOT_TOKEN").map_err(|_| {
+        anyhow::anyhow!("❌ FATAL: BOT_TOKEN environment variable not set. Please create a .env file and add it.")
+    })?;
 
-    let api_key = env::var("HELIUS_API_KEY")
-        .expect("HELIUS_API_KEY environment variable must be set");
+    let api_key = env::var("HELIUS_API_KEY").map_err(|_| {
+        anyhow::anyhow!("❌ FATAL: HELIUS_API_KEY environment variable not set. Please create a .env file and add it.")
+    })?;
 
     // Initialize API client
     let api_client = api::ApiClient::new(api_key).await?;

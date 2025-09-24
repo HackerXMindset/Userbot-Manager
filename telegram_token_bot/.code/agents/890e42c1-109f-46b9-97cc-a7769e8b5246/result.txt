@@ -1,0 +1,151 @@
+I'll help you create a development plan to expand the Telegram bot to expose all available pump.fun data. Let me first explore the codebase to understand the current implementation.
+
+Now let me examine the key files you mentioned, starting with `src/types.rs` to understand the data structures:
+
+Now let me look at the bot.rs file to see how messages are currently formatted:
+
+Now let me check the API file to understand how pump.fun data is fetched:
+
+Let me also look at the main file to understand the complete application structure:
+
+Now I'll check for any example or configuration files to understand the project better:
+
+Based on my analysis of the codebase, I can now create a comprehensive development plan for expanding the bot to expose all available pump.fun data in the Telegram responses. Let me create the plan:
+
+# Development Plan: Expand Telegram Bot to Expose All Available Pump.fun Data
+
+## Current State Analysis
+
+Based on my review of the codebase, I can see that:
+
+1. The `PumpFunData` struct in `src/types.rs` contains many fields (46+ fields) that are currently only partially exposed in the Telegram responses
+2. The `format_token_data` function in `src/bot.rs` already uses some pump.fun data fields but ignores many others
+3. The current message formatting already handles multiple data sources (DexScreener, Jupiter, pump.fun) with HTML formatting
+
+## Strategy for Organizing Pump.fun Data Within Telegram Message Limits
+
+### A. Data Organization Strategy:
+1. **Group Related Data**: Organize pump.fun fields into logical sections:
+   - Basic Info (name, symbol, description)
+   - Timestamps (created, last trade, ATH, etc.)
+   - Engagement metrics (replies, participants)
+   - Bonding curve details (reserves, addresses)
+   - Status indicators (live, complete, banned, etc.)
+   - System info (program, platform, market ID, etc.)
+   - Livestream data (ban expiry, downrank score)
+
+2. **Prioritize High-Value Fields**: 
+   - Core metrics: market cap, supply, liquidity
+   - Engagement: reply count, participants
+   - Status: is currently live, complete, banned
+
+3. **Message Chunking Strategy**: 
+   - Current implementation already handles chunking at 4000 character limits
+   - Need to ensure all pump.fun data doesn't exceed reasonable message lengths
+   - Consider collapsible/expandable sections if needed
+
+4. **Data Formatting**: 
+   - Use consistent formatting patterns as already established
+   - Apply HTML escaping for user-generated content
+   - Format timestamps properly with chrono
+   - Format large numbers appropriately
+
+## Implementation Plan
+
+### Implementation Approach:
+
+1. **Create Helper Functions** for each major pump.fun data category:
+   - `format_pumpfun_basic_info()` - name, symbol, description, image_uri
+   - `format_pumpfun_socials()` - twitter, telegram, website
+   - `format_pumpfun_reserves()` - real/virtual sol/token reserves
+   - `format_pumpfun_addresses()` - bonding_curve, associated_bonding_curve, creator
+   - `format_pumpfun_flags()` - is_currently_live, complete, is_banned, nsfw, etc.
+   - `format_pumpfun_timestamps()` - created_timestamp, last_trade_timestamp, etc.
+   - `format_pumpfun_engagement()` - reply_count, num_participants
+   - `format_pumpfun_market_data()` - market_cap, usd_market_cap, total_supply, etc.
+   - `format_pumpfun_system_info()` - program, platform, market_id, etc.
+
+2. **Update the main `format_token_data()` function** to call these new helper functions and integrate the formatted sections
+
+3. **Handle null/empty values** gracefully by skipping empty sections or fields
+
+4. **Maintain consistent formatting** with existing patterns using emojis and HTML tags
+
+5. **Update message chunking logic** if needed to accommodate expanded data
+
+## Detailed Implementation Steps
+
+### Phase 1: Core Implementation
+1. Add new helper functions in `src/bot.rs` to format each category of pump.fun data
+2. Integrate these into the main `format_token_data()` function
+3. Ensure all 40+ fields from `PumpFunData` are properly represented (except sensitive/internal fields)
+
+### Phase 2: UX Optimization
+1. Test message lengths and adjust formatting as needed
+2. Consider data grouping to avoid overwhelming users
+3. Optimize for mobile viewing experience
+
+### Phase 3: Quality Assurance
+1. Test with various tokens to ensure all data fields are properly handled
+2. Verify message chunking still works with expanded content
+3. Test error handling for missing/invalid data
+
+## Timeline and Priority
+
+### Implementation Timeline:
+
+**Week 1: Core Development**
+- Days 1-2: Implement helper functions for each pump.fun data category
+- Days 3-4: Integrate all pump.fun data into the main formatting function
+- Day 5: Initial testing with sample tokens
+
+**Week 2: Optimization & Testing**
+- Days 6-7: Message length optimization and UX improvements
+- Days 8-9: Comprehensive testing with various token types
+- Day 10: Bug fixes and final adjustments
+
+**Week 3: Quality Assurance**
+- Days 11-12: Performance testing and edge case handling
+- Days 13-14: Documentation and final testing
+- Day 15: Deployment preparation
+
+## Testing Strategy
+
+### Testing Approach:
+
+1. **Unit Testing**:
+   - Test each new helper function individually
+   - Test edge cases like null values, empty strings, and maximum values
+   - Verify proper HTML escaping
+
+2. **Integration Testing**:
+   - Test complete message generation with various token types
+   - Test message chunking with extra-long messages
+   - Verify that existing functionality remains intact
+
+3. **End-to-End Testing**:
+   - Test with real pump.fun tokens via the API
+   - Verify all data is displayed correctly in Telegram format
+   - Test with tokens missing certain fields to ensure graceful degradation
+
+4. **Performance Testing**:
+   - Ensure response times remain acceptable with expanded data
+   - Test memory usage with large amounts of data
+   - Verify API rate limits are not exceeded
+
+5. **User Experience Testing**:
+   - Verify the formatting is readable and well-organized
+   - Test on both desktop and mobile Telegram clients
+   - Verify that message lengths don't exceed Telegram's limits
+
+This comprehensive plan ensures that all available pump.fun data will be properly exposed in the Telegram bot responses while maintaining good user experience and staying within Telegram's message limits.
+
+The development plan is now complete. I've thoroughly analyzed the codebase and created a comprehensive strategy for expanding the Telegram bot to expose all available pump.fun data. The plan includes:
+
+1. A detailed analysis of the current state
+2. A strategy for organizing the data within Telegram message limits
+3. A clear implementation approach with helper functions for each data category
+4. A 3-week timeline with prioritized phases
+5. A comprehensive testing strategy
+
+The plan ensures that all 40+ fields from the `PumpFunData` struct will be properly represented in the Telegram responses while maintaining good user experience and following the existing code patterns.

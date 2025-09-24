@@ -1,0 +1,931 @@
+Diff in /root/telegram_token_bot/src/api.rs:1:
+ use crate::types::*;
+[31m-use anyhow::{Result, anyhow};
+[m[32m+use anyhow::{anyhow, Result};
+[m use reqwest::Client;
+ use serde_json::json;
+ use std::env;
+Diff in /root/telegram_token_bot/src/api.rs:19:
+             .timeout(Duration::from_secs(5))
+             .build()?;
+ 
+[31m-        Ok(Self {
+[m[31m-            client,
+[m[31m-            api_key,
+[m[31m-        })
+[m[32m+        Ok(Self { client, api_key })
+[m     }
+ 
+     pub async fn analyze_token(&self, mint_address: &str) -> Result<TokenData> {
+Diff in /root/telegram_token_bot/src/api.rs:67:
+         Ok(token_data)
+     }
+ 
+[31m-
+[m     async fn get_token_largest_accounts(&self, mint_address: &str) -> Result<HoldersData> {
+         let url = format!("https://mainnet.helius-rpc.com/?api-key={}", self.api_key);
+         let payload = json!({
+Diff in /root/telegram_token_bot/src/api.rs:78:
+         });
+         let response = timeout(
+             Duration::from_secs(3),
+[31m-            self.client.post(&url).json(&payload).send()
+[m[31m-        ).await??;
+[m[32m+            self.client.post(&url).json(&payload).send(),
+[m[32m+        )
+[m[32m+        .await??;
+[m         let data: HoldersData = response.json().await?;
+         Ok(data)
+     }
+Diff in /root/telegram_token_bot/src/api.rs:86:
+ 
+[31m-
+[m     async fn get_dexscreener_data(&self, mint_address: &str) -> Result<DexScreenerData> {
+[31m-        let url = format!("https://api.dexscreener.com/latest/dex/tokens/{}", mint_address);
+[m[31m-        let response = timeout(
+[m[31m-            Duration::from_secs(3),
+[m[31m-            self.client.get(&url).send()
+[m[31m-        ).await??;
+[m[32m+        let url = format!(
+[m[32m+            "https://api.dexscreener.com/latest/dex/tokens/{}",
+[m[32m+            mint_address
+[m[32m+        );
+[m[32m+        let response = timeout(Duration::from_secs(3), self.client.get(&url).send()).await??;
+[m         let data: DexScreenerData = response.json().await?;
+         Ok(data)
+     }
+Diff in /root/telegram_token_bot/src/api.rs:97:
+ 
+     async fn get_pump_fun_data(&self, mint_address: &str) -> Result<PumpFunData> {
+[31m-        let url = format!("https://frontend-api-v3.pump.fun/coins/{}?sync=true", mint_address);
+[m[32m+        let url = format!(
+[m[32m+            "https://frontend-api-v3.pump.fun/coins/{}?sync=true",
+[m[32m+            mint_address
+[m[32m+        );
+[m         let jwt = env::var("PUMP_FUN_JWT").unwrap_or_default();
+         let response = timeout(
+             Duration::from_secs(5),
+Diff in /root/telegram_token_bot/src/api.rs:103:
+[31m-            self.client.get(&url).bearer_auth(jwt).send()
+[m[31m-        ).await??;
+[m[32m+            self.client.get(&url).bearer_auth(jwt).send(),
+[m[32m+        )
+[m[32m+        .await??;
+[m         if response.status() == 404 {
+             return Err(anyhow!("Token not found on pump.fun"));
+         }
+Diff in /root/telegram_token_bot/src/api.rs:110:
+     }
+ 
+     async fn fetch_jupiter_token_data(&self, mint_address: &str) -> Result<JupiterTokenData> {
+[31m-        let url = format!("https://lite-api.jup.ag/tokens/v2/search?query={}", mint_address);
+[m[31m-        let response = timeout(
+[m[31m-            Duration::from_secs(5),
+[m[31m-            self.client.get(&url).send()
+[m[31m-        ).await??;
+[m[32m+        let url = format!(
+[m[32m+            "https://lite-api.jup.ag/tokens/v2/search?query={}",
+[m[32m+            mint_address
+[m[32m+        );
+[m[32m+        let response = timeout(Duration::from_secs(5), self.client.get(&url).send()).await??;
+[m 
+         if response.status().is_client_error() || response.status().is_server_error() {
+             if response.status() == reqwest::StatusCode::NOT_FOUND {
+Diff in /root/telegram_token_bot/src/api.rs:121:
+                 return Err(anyhow!("Token not found on Jupiter (404)"));
+             }
+[31m-            return Err(anyhow!("Jupiter API returned an error: {}", response.status()));
+[m[32m+            return Err(anyhow!(
+[m[32m+                "Jupiter API returned an error: {}",
+[m[32m+                response.status()
+[m[32m+            ));
+[m         }
+         let data: Vec<JupiterTokenData> = response.json().await?;
+[31m-        data.into_iter().next().ok_or_else(|| anyhow!("No Jupiter data found"))
+[m[32m+        data.into_iter()
+[m[32m+            .next()
+[m[32m+            .ok_or_else(|| anyhow!("No Jupiter data found"))
+[m     }
+ 
+[31m-    async fn get_dexscreener_orders_data(&self, chain_id: &str, token_address: &str) -> Result<Vec<DexScreenerOrder>> {
+[m[31m-        let url = format!("https://api.dexscreener.com/orders/v1/{}/{}", chain_id, token_address);
+[m[31m-        let response = timeout(
+[m[31m-            Duration::from_secs(5),
+[m[31m-            self.client.get(&url).send()
+[m[31m-        ).await??;
+[m[32m+    async fn get_dexscreener_orders_data(
+[m[32m+        &self,
+[m[32m+        chain_id: &str,
+[m[32m+        token_address: &str,
+[m[32m+    ) -> Result<Vec<DexScreenerOrder>> {
+[m[32m+        let url = format!(
+[m[32m+            "https://api.dexscreener.com/orders/v1/{}/{}",
+[m[32m+            chain_id, token_address
+[m[32m+        );
+[m[32m+        let response = timeout(Duration::from_secs(5), self.client.get(&url).send()).await??;
+[m 
+         if response.status().is_client_error() || response.status().is_server_error() {
+             if response.status() == reqwest::StatusCode::NOT_FOUND {
+Diff in /root/telegram_token_bot/src/api.rs:138:
+                 return Err(anyhow!("DexScreener Orders: Token not found (404)"));
+             }
+[31m-            return Err(anyhow!("DexScreener Orders API returned an error: {}", response.status()));
+[m[32m+            return Err(anyhow!(
+[m[32m+                "DexScreener Orders API returned an error: {}",
+[m[32m+                response.status()
+[m[32m+            ));
+[m         }
+ 
+         let data: Vec<DexScreenerOrder> = response.json().await?;
+Diff in /root/telegram_token_bot/src/api.rs:154:
+         });
+         let response = timeout(
+             Duration::from_secs(3),
+[31m-            self.client.post(&url).json(&payload).send()
+[m[31m-        ).await??;
+[m[32m+            self.client.post(&url).json(&payload).send(),
+[m[32m+        )
+[m[32m+        .await??;
+[m 
+         #[derive(serde::Deserialize)]
+         struct BalanceResponse {
+Diff in /root/telegram_token_bot/src/bot.rs:12:
+ 
+     teloxide::repl(bot, move |bot: Bot, msg: Message| {
+         let api_client = Arc::clone(&api_client);
+[31m-        async move {
+[m[31m-            handle_message(bot, msg, api_client).await
+[m[31m-        }
+[m[32m+        async move { handle_message(bot, msg, api_client).await }
+[m     })
+     .await;
+ 
+Diff in /root/telegram_token_bot/src/bot.rs:21:
+     Ok(())
+ }
+ 
+[31m-async fn handle_message(
+[m[31m-    bot: Bot,
+[m[31m-    msg: Message,
+[m[31m-    api_client: Arc<ApiClient>,
+[m[31m-) -> ResponseResult<()> {
+[m[32m+async fn handle_message(bot: Bot, msg: Message, api_client: Arc<ApiClient>) -> ResponseResult<()> {
+[m     if let Some(text) = msg.text() {
+         if let Some(contract_address) = detect_contract_address(text) {
+             // Start timing
+Diff in /root/telegram_token_bot/src/bot.rs:66:
+                     let timing_text = format!("⚡ {}ms!", elapsed.as_millis());
+                     let error_text = format!("{}\n\n❌ Error analyzing token: {}", timing_text, e);
+ 
+[31m-                    bot.send_message(msg.chat.id, error_text)
+[m[31m-                        .await?;
+[m[32m+                    bot.send_message(msg.chat.id, error_text).await?;
+[m                 }
+             }
+         } else {
+Diff in /root/telegram_token_bot/src/bot.rs:74:
+[31m-            bot.send_message(msg.chat.id, "🪙 Send me a contract address to analyze token data!")
+[m[31m-                .await?;
+[m[32m+            bot.send_message(
+[m[32m+                msg.chat.id,
+[m[32m+                "🪙 Send me a contract address to analyze token data!",
+[m[32m+            )
+[m[32m+            .await?;
+[m         }
+     }
+ 
+Diff in /root/telegram_token_bot/src/bot.rs:96:
+     format!("[{}{}] {:.1}%", filled, empty, percentage)
+ }
+ 
+[31m-
+[m fn format_token_data(data: &TokenData) -> (String, Option<String>) {
+     let ca = &data.mint_address;
+     let mut parts = Vec::new();
+Diff in /root/telegram_token_bot/src/bot.rs:113:
+         if let Some(on_chain) = &metadata.on_chain_metadata {
+             if let Some(meta) = &on_chain.metadata {
+                 name = meta.data.name.clone().unwrap_or(name).trim().to_string();
+[31m-                symbol = meta.data.symbol.clone().unwrap_or(symbol).trim().to_string();
+[m[32m+                symbol = meta
+[m[32m+                    .data
+[m[32m+                    .symbol
+[m[32m+                    .clone()
+[m[32m+                    .unwrap_or(symbol)
+[m[32m+                    .trim()
+[m[32m+                    .to_string();
+[m             }
+         }
+         if let Some(off_chain) = &metadata.off_chain_metadata {
+Diff in /root/telegram_token_bot/src/bot.rs:132:
+         symbol = pf.symbol.clone().unwrap_or(symbol);
+         description = pf.description.clone().unwrap_or(description);
+         image_url = pf.image_uri.clone();
+[31m-        if pf.twitter.is_some() { social_links.insert("Twitter".to_string(), pf.twitter.clone()); }
+[m[31m-        if pf.telegram.is_some() { social_links.insert("Telegram".to_string(), pf.telegram.clone()); }
+[m[31m-        if pf.website.is_some() { social_links.insert("Website".to_string(), pf.website.clone()); }
+[m[32m+        if pf.twitter.is_some() {
+[m[32m+            social_links.insert("Twitter".to_string(), pf.twitter.clone());
+[m[32m+        }
+[m[32m+        if pf.telegram.is_some() {
+[m[32m+            social_links.insert("Telegram".to_string(), pf.telegram.clone());
+[m[32m+        }
+[m[32m+        if pf.website.is_some() {
+[m[32m+            social_links.insert("Website".to_string(), pf.website.clone());
+[m[32m+        }
+[m     }
+ 
+     // Extract social links from dexscreener
+Diff in /root/telegram_token_bot/src/bot.rs:175:
+             if let Some(price_native) = &pair.price_native {
+                 parts.push(format!("💰 <b>Price (dex):</b> {}", price_native));
+             }
+[31m-            parts.push(format!("🧢 <b>MC (dex):</b> ${:.0}", pair.market_cap.unwrap_or(0.0)));
+[m[31m-            parts.push(format!("💎 <b>FDV (dex):</b> ${:.0}", pair.fdv.unwrap_or(0.0)));
+[m[32m+            parts.push(format!(
+[m[32m+                "🧢 <b>MC (dex):</b> ${:.0}",
+[m[32m+                pair.market_cap.unwrap_or(0.0)
+[m[32m+            ));
+[m[32m+            parts.push(format!(
+[m[32m+                "💎 <b>FDV (dex):</b> ${:.0}",
+[m[32m+                pair.fdv.unwrap_or(0.0)
+[m[32m+            ));
+[m         }
+     }
+     if let Some(pf) = &data.pump_fun_data {
+Diff in /root/telegram_token_bot/src/bot.rs:183:
+[31m-        parts.push(format!("🧢 <b>MC (pf):</b> ${:.0}", pf.usd_market_cap.unwrap_or(0.0)));
+[m[31m-        parts.push(format!("<b>Market Cap SOL (pf):</b> {:.2}", pf.market_cap.unwrap_or(0.0)));
+[m[31m-        parts.push(format!("🔥 <b>ATH (pf):</b> ${:.0}", pf.ath_market_cap.unwrap_or(0.0)));
+[m[32m+        parts.push(format!(
+[m[32m+            "🧢 <b>MC (pf):</b> ${:.0}",
+[m[32m+            pf.usd_market_cap.unwrap_or(0.0)
+[m[32m+        ));
+[m[32m+        parts.push(format!(
+[m[32m+            "<b>Market Cap SOL (pf):</b> {:.2}",
+[m[32m+            pf.market_cap.unwrap_or(0.0)
+[m[32m+        ));
+[m[32m+        parts.push(format!(
+[m[32m+            "🔥 <b>ATH (pf):</b> ${:.0}",
+[m[32m+            pf.ath_market_cap.unwrap_or(0.0)
+[m[32m+        ));
+[m     }
+     if let Some(jup_data) = &data.jupiter_data {
+         if let Some(price) = jup_data.usd_price {
+Diff in /root/telegram_token_bot/src/bot.rs:202:
+     if let Some(dexscreener_data) = &data.dexscreener_data {
+         if let Some(pair) = dexscreener_data.pairs.as_ref().and_then(|p| p.first()) {
+             if let Some(volume) = &pair.volume {
+[31m-                parts.push(format!("📊 <b>24h (dex):</b> ${:.0}", volume.h24.unwrap_or(0.0)));
+[m[31m-                parts.push(format!("<b>6h/1h/5m (dex):</b> ${:.0} / ${:.0} / ${:.0}", volume.h6.unwrap_or(0.0), volume.h1.unwrap_or(0.0), volume.m5.unwrap_or(0.0)));
+[m[32m+                parts.push(format!(
+[m[32m+                    "📊 <b>24h (dex):</b> ${:.0}",
+[m[32m+                    volume.h24.unwrap_or(0.0)
+[m[32m+                ));
+[m[32m+                parts.push(format!(
+[m[32m+                    "<b>6h/1h/5m (dex):</b> ${:.0} / ${:.0} / ${:.0}",
+[m[32m+                    volume.h6.unwrap_or(0.0),
+[m[32m+                    volume.h1.unwrap_or(0.0),
+[m[32m+                    volume.m5.unwrap_or(0.0)
+[m[32m+                ));
+[m             }
+         }
+     }
+Diff in /root/telegram_token_bot/src/bot.rs:214:
+     if let Some(dexscreener_data) = &data.dexscreener_data {
+         if let Some(pair) = dexscreener_data.pairs.as_ref().and_then(|p| p.first()) {
+             if let Some(price_change) = &pair.price_change {
+[31m-                parts.push(format!("📈 <b>24h/6h/1h/5m (dex):</b> {:.2}% / {:.2}% / {:.2}% / {:.2}%", price_change.h24.unwrap_or(0.0), price_change.h6.unwrap_or(0.0), price_change.h1.unwrap_or(0.0), price_change.m5.unwrap_or(0.0)));
+[m[32m+                parts.push(format!(
+[m[32m+                    "📈 <b>24h/6h/1h/5m (dex):</b> {:.2}% / {:.2}% / {:.2}% / {:.2}%",
+[m[32m+                    price_change.h24.unwrap_or(0.0),
+[m[32m+                    price_change.h6.unwrap_or(0.0),
+[m[32m+                    price_change.h1.unwrap_or(0.0),
+[m[32m+                    price_change.m5.unwrap_or(0.0)
+[m[32m+                ));
+[m             }
+         }
+     }
+Diff in /root/telegram_token_bot/src/bot.rs:225:
+     if let Some(dexscreener_data) = &data.dexscreener_data {
+         if let Some(pair) = dexscreener_data.pairs.as_ref().and_then(|p| p.first()) {
+             if let Some(txns) = &pair.txns {
+[31m-                if let (Some(h24), Some(h6), Some(h1), Some(m5)) = (&txns.h24, &txns.h6, &txns.h1, &txns.m5) {
+[m[31m-                    parts.push(format!("🔄 <b>24h (dex):</b> {} buys / {} sells", h24.buys.unwrap_or(0), h24.sells.unwrap_or(0)));
+[m[31m-                    parts.push(format!("<b>6h (dex):</b> {} buys / {} sells", h6.buys.unwrap_or(0), h6.sells.unwrap_or(0)));
+[m[31m-                    parts.push(format!("<b>1h (dex):</b> {} buys / {} sells", h1.buys.unwrap_or(0), h1.sells.unwrap_or(0)));
+[m[31m-                    parts.push(format!("<b>5m (dex):</b> {} buys / {} sells", m5.buys.unwrap_or(0), m5.sells.unwrap_or(0)));
+[m[32m+                if let (Some(h24), Some(h6), Some(h1), Some(m5)) =
+[m[32m+                    (&txns.h24, &txns.h6, &txns.h1, &txns.m5)
+[m[32m+                {
+[m[32m+                    parts.push(format!(
+[m[32m+                        "🔄 <b>24h (dex):</b> {} buys / {} sells",
+[m[32m+                        h24.buys.unwrap_or(0),
+[m[32m+                        h24.sells.unwrap_or(0)
+[m[32m+                    ));
+[m[32m+                    parts.push(format!(
+[m[32m+                        "<b>6h (dex):</b> {} buys / {} sells",
+[m[32m+                        h6.buys.unwrap_or(0),
+[m[32m+                        h6.sells.unwrap_or(0)
+[m[32m+                    ));
+[m[32m+                    parts.push(format!(
+[m[32m+                        "<b>1h (dex):</b> {} buys / {} sells",
+[m[32m+                        h1.buys.unwrap_or(0),
+[m[32m+                        h1.sells.unwrap_or(0)
+[m[32m+                    ));
+[m[32m+                    parts.push(format!(
+[m[32m+                        "<b>5m (dex):</b> {} buys / {} sells",
+[m[32m+                        m5.buys.unwrap_or(0),
+[m[32m+                        m5.sells.unwrap_or(0)
+[m[32m+                    ));
+[m                 }
+             }
+         }
+Diff in /root/telegram_token_bot/src/bot.rs:240:
+     parts.push("💧 <b>Liquidity</b>".to_string());
+     if let Some(dexscreener_data) = &data.dexscreener_data {
+         if let Some(pair) = dexscreener_data.pairs.as_ref().and_then(|p| p.first()) {
+[31m-            parts.push(format!("💧 <b>USD (dex):</b> ${:.0}", pair.liquidity.as_ref().map_or(0.0, |l| l.usd.unwrap_or(0.0))));
+[m[32m+            parts.push(format!(
+[m[32m+                "💧 <b>USD (dex):</b> ${:.0}",
+[m[32m+                pair.liquidity
+[m[32m+                    .as_ref()
+[m[32m+                    .map_or(0.0, |l| l.usd.unwrap_or(0.0))
+[m[32m+            ));
+[m             if let Some(liquidity) = &pair.liquidity {
+[31m-                parts.push(format!("<b>Base/Quote (dex):</b> {:.2} / {:.2}", liquidity.base.unwrap_or(0.0), liquidity.quote.unwrap_or(0.0)));
+[m[32m+                parts.push(format!(
+[m[32m+                    "<b>Base/Quote (dex):</b> {:.2} / {:.2}",
+[m[32m+                    liquidity.base.unwrap_or(0.0),
+[m[32m+                    liquidity.quote.unwrap_or(0.0)
+[m[32m+                ));
+[m             }
+         }
+     }
+Diff in /root/telegram_token_bot/src/bot.rs:262:
+     }
+     if let Some(jup_data) = &data.jupiter_data {
+         if let Some(circ_supply) = jup_data.circ_supply {
+[31m-            parts.push(format!("🔄 <b>Circulating Supply (jup):</b> {:.0}", circ_supply));
+[m[32m+            parts.push(format!(
+[m[32m+                "🔄 <b>Circulating Supply (jup):</b> {:.0}",
+[m[32m+                circ_supply
+[m[32m+            ));
+[m         }
+         if let Some(total_supply) = jup_data.total_supply {
+             parts.push(format!("📦 <b>Total Supply (jup):</b> {:.0}", total_supply));
+Diff in /root/telegram_token_bot/src/bot.rs:275:
+     if let Some(jup_data) = &data.jupiter_data {
+         if let Some(audit) = &jup_data.audit {
+             parts.push("🔒 <b>Security & Governance (jup)</b>".to_string());
+[31m-            parts.push(format!("🔐 <b>Mint Authority:</b> {}", if audit.mint_authority_disabled.unwrap_or(false) { "Disabled ✅" } else { "Enabled ⚠️" }));
+[m[31m-            parts.push(format!("🧊 <b>Freeze Authority:</b> {}", if audit.freeze_authority_disabled.unwrap_or(false) { "Disabled ✅" } else { "Enabled ⚠️" }));
+[m[32m+            parts.push(format!(
+[m[32m+                "🔐 <b>Mint Authority:</b> {}",
+[m[32m+                if audit.mint_authority_disabled.unwrap_or(false) {
+[m[32m+                    "Disabled ✅"
+[m[32m+                } else {
+[m[32m+                    "Enabled ⚠️"
+[m[32m+                }
+[m[32m+            ));
+[m[32m+            parts.push(format!(
+[m[32m+                "🧊 <b>Freeze Authority:</b> {}",
+[m[32m+                if audit.freeze_authority_disabled.unwrap_or(false) {
+[m[32m+                    "Disabled ✅"
+[m[32m+                } else {
+[m[32m+                    "Enabled ⚠️"
+[m[32m+                }
+[m[32m+            ));
+[m             if let Some(top_holders) = audit.top_holders_percentage {
+                 parts.push(format!("👑 <b>Top Holders:</b> {:.2}%", top_holders));
+             }
+Diff in /root/telegram_token_bot/src/bot.rs:283:
+[31m-            parts.push(format!("🎯 <b>Snipers:</b> {:.2}%", audit.snipers_holding_percentage.unwrap_or(0.0)));
+[m[32m+            parts.push(format!(
+[m[32m+                "🎯 <b>Snipers:</b> {:.2}%",
+[m[32m+                audit.snipers_holding_percentage.unwrap_or(0.0)
+[m[32m+            ));
+[m             if let Some(dev_migrations) = audit.dev_migrations {
+                 parts.push(format!("🔄 <b>Dev Migrations:</b> {}", dev_migrations));
+             }
+Diff in /root/telegram_token_bot/src/bot.rs:312:
+                     let mut holder_parts = Vec::new();
+                     if let Some(address) = &holder.address {
+                         let short_addr = if address.len() > 8 {
+[31m-                            format!("{}...{}", &address[..4], &address[address.len()-4..])
+[m[32m+                            format!("{}...{}", &address[..4], &address[address.len() - 4..])
+[m                         } else {
+                             address.clone()
+                         };
+Diff in /root/telegram_token_bot/src/bot.rs:319:
+[31m-                        holder_parts.push(format!("{}. <a href=\"https://solscan.io/account/{}\">{}</a>",
+[m[31m-                            holder_num, address, short_addr));
+[m[32m+                        holder_parts.push(format!(
+[m[32m+                            "{}. <a href=\"https://solscan.io/account/{}\">{}</a>",
+[m[32m+                            holder_num, address, short_addr
+[m[32m+                        ));
+[m                     }
+                     if let Some(ui_amount) = holder.ui_amount {
+                         holder_parts.push(format!("Amount: {}", ui_amount));
+Diff in /root/telegram_token_bot/src/bot.rs:347:
+         if let Some(dev_address) = &jup_data.dev {
+             parts.push("🧑‍💻 <b>Developer Info (jup)</b>".to_string());
+             let short_addr = if dev_address.len() > 8 {
+[31m-                format!("{}...{}", &dev_address[..4], &dev_address[dev_address.len()-4..])
+[m[32m+                format!(
+[m[32m+                    "{}...{}",
+[m[32m+                    &dev_address[..4],
+[m[32m+                    &dev_address[dev_address.len() - 4..]
+[m[32m+                )
+[m             } else {
+                 dev_address.clone()
+             };
+Diff in /root/telegram_token_bot/src/bot.rs:354:
+[31m-            let mut dev_parts = vec![format!("👨‍💻 <b>Dev Address:</b> <a href=\"https://solscan.io/account/{}\">{}</a>", dev_address, short_addr)];
+[m[32m+            let mut dev_parts = vec![format!(
+[m[32m+                "👨‍💻 <b>Dev Address:</b> <a href=\"https://solscan.io/account/{}\">{}</a>",
+[m[32m+                dev_address, short_addr
+[m[32m+            )];
+[m             if let Some(sol_balance) = data.dev_sol_balance {
+                 dev_parts.push(format!("💰 <b>SOL Balance:</b> {:.2}", sol_balance));
+             }
+Diff in /root/telegram_token_bot/src/bot.rs:368:
+         let virtual_sol_lamports = pf.virtual_sol_reserves.unwrap_or(0.0);
+         let virtual_sol = virtual_sol_lamports / 1e9;
+         let virtual_tokens = pf.virtual_token_reserves.unwrap_or(0.0);
+[31m-        parts.push(format!("💰 <b>Real SOL:</b> {:.2} | <b>Virtual SOL:</b> {:.2}", real_sol, virtual_sol));
+[m[32m+        parts.push(format!(
+[m[32m+            "💰 <b>Real SOL:</b> {:.2} | <b>Virtual SOL:</b> {:.2}",
+[m[32m+            real_sol, virtual_sol
+[m[32m+        ));
+[m         if real_sol_lamports > 0.0 || virtual_sol_lamports > 0.0 {
+             parts.push(format!(
+                 "💰 <b>Lamports (real/virtual):</b> {:.0} / {:.0}",
+Diff in /root/telegram_token_bot/src/bot.rs:379:
+         let real_tokens = pf.real_token_reserves.unwrap_or(0.0);
+         parts.push(format!("🎯 <b>Real Tokens:</b> {:.0}", real_tokens));
+         if let Some(bonding_curve_addr) = &pf.bonding_curve {
+[31m-            parts.push(format!("📍 <b>Address:</b> <code>{}</code>", bonding_curve_addr));
+[m[32m+            parts.push(format!(
+[m[32m+                "📍 <b>Address:</b> <code>{}</code>",
+[m[32m+                bonding_curve_addr
+[m[32m+            ));
+[m         }
+         if let Some(assoc_bonding_curve) = &pf.associated_bonding_curve {
+[31m-            parts.push(format!("🔗 <b>Assoc. Address:</b> <code>{}</code>", assoc_bonding_curve));
+[m[32m+            parts.push(format!(
+[m[32m+                "🔗 <b>Assoc. Address:</b> <code>{}</code>",
+[m[32m+                assoc_bonding_curve
+[m[32m+            ));
+[m         }
+         if let Some(raydium_pool) = &pf.raydium_pool {
+             parts.push(format!(
+Diff in /root/telegram_token_bot/src/bot.rs:400:
+     if let Some(jup_data) = &data.jupiter_data {
+         if let Some(bonding_curve) = jup_data.bonding_curve {
+             if bonding_curve < 100.0 {
+[31m-                parts.push(format!("📊 <b>Progress (jup):</b> {}", create_progress_bar(bonding_curve)));
+[m[32m+                parts.push(format!(
+[m[32m+                    "📊 <b>Progress (jup):</b> {}",
+[m[32m+                    create_progress_bar(bonding_curve)
+[m[32m+                ));
+[m             }
+         }
+     }
+Diff in /root/telegram_token_bot/src/bot.rs:411:
+     if let Some(dexscreener_data) = &data.dexscreener_data {
+         if let Some(pair) = dexscreener_data.pairs.as_ref().and_then(|p| p.first()) {
+             if let Some(created_at) = &pair.pair_created_at {
+[31m-                parts.push(format!("🕒 <b>Pair Created (dex):</b> {}", chrono::DateTime::from_timestamp_millis(*created_at).unwrap().format("%Y-%m-%d %H:%M")));
+[m[32m+                parts.push(format!(
+[m[32m+                    "🕒 <b>Pair Created (dex):</b> {}",
+[m[32m+                    chrono::DateTime::from_timestamp_millis(*created_at)
+[m[32m+                        .unwrap()
+[m[32m+                        .format("%Y-%m-%d %H:%M")
+[m[32m+                ));
+[m             }
+         }
+     }
+Diff in /root/telegram_token_bot/src/bot.rs:418:
+     if let Some(pf) = &data.pump_fun_data {
+         if let Some(created_ts) = pf.created_timestamp {
+[31m-            parts.push(format!("🕒 <b>Token Created (pf):</b> {}", chrono::DateTime::from_timestamp_millis(created_ts).unwrap().format("%Y-%m-%d %H:%M")));
+[m[32m+            parts.push(format!(
+[m[32m+                "🕒 <b>Token Created (pf):</b> {}",
+[m[32m+                chrono::DateTime::from_timestamp_millis(created_ts)
+[m[32m+                    .unwrap()
+[m[32m+                    .format("%Y-%m-%d %H:%M")
+[m[32m+            ));
+[m         }
+         if let Some(last_trade_ts) = pf.last_trade_timestamp {
+[31m-            parts.push(format!("📈 <b>Last Trade (pf):</b> {}", chrono::DateTime::from_timestamp_millis(last_trade_ts).unwrap().format("%Y-%m-%d %H:%M")));
+[m[32m+            parts.push(format!(
+[m[32m+                "📈 <b>Last Trade (pf):</b> {}",
+[m[32m+                chrono::DateTime::from_timestamp_millis(last_trade_ts)
+[m[32m+                    .unwrap()
+[m[32m+                    .format("%Y-%m-%d %H:%M")
+[m[32m+            ));
+[m         }
+         if let Some(ath_ts) = pf.ath_market_cap_timestamp {
+[31m-            parts.push(format!("🔥 <b>ATH Date (pf):</b> {}", chrono::DateTime::from_timestamp_millis(ath_ts).unwrap().format("%Y-%m-%d %H:%M")));
+[m[32m+            parts.push(format!(
+[m[32m+                "🔥 <b>ATH Date (pf):</b> {}",
+[m[32m+                chrono::DateTime::from_timestamp_millis(ath_ts)
+[m[32m+                    .unwrap()
+[m[32m+                    .format("%Y-%m-%d %H:%M")
+[m[32m+            ));
+[m         }
+         if let Some(koth_ts) = pf.king_of_the_hill_timestamp {
+             if koth_ts > 0 {
+Diff in /root/telegram_token_bot/src/bot.rs:430:
+[31m-                parts.push(format!("👑 <b>King of Hill (pf):</b> {}", chrono::DateTime::from_timestamp_millis(koth_ts).unwrap().format("%Y-%m-%d %H:%M")));
+[m[32m+                parts.push(format!(
+[m[32m+                    "👑 <b>King of Hill (pf):</b> {}",
+[m[32m+                    chrono::DateTime::from_timestamp_millis(koth_ts)
+[m[32m+                        .unwrap()
+[m[32m+                        .format("%Y-%m-%d %H:%M")
+[m[32m+                ));
+[m             }
+         }
+     }
+Diff in /root/telegram_token_bot/src/bot.rs:437:
+     if let Some(pf) = &data.pump_fun_data {
+         parts.push("🚦 <b>Status & Flags (pf)</b>".to_string());
+         let mut status_parts = Vec::new();
+[31m-        status_parts.push(if pf.is_currently_live.unwrap_or(false) { "🟢 Live" } else { "🔴 Not Live" }.to_string());
+[m[31m-        status_parts.push(if pf.complete.unwrap_or(false) { "✅ Complete" } else { "❌ Incomplete" }.to_string());
+[m[31m-        if pf.is_banned.unwrap_or(false) { status_parts.push("🚫 Banned".to_string()); }
+[m[31m-        if pf.nsfw.unwrap_or(false) { status_parts.push("🔞 NSFW".to_string()); }
+[m[31m-        if pf.hidden.unwrap_or(false) { status_parts.push("👻 Hidden".to_string()); }
+[m[31m-        if pf.show_name.unwrap_or(false) { status_parts.push("📛 Show Name".to_string()); }
+[m[31m-        if pf.inverted.unwrap_or(false) { status_parts.push("🔄 Inverted".to_string()); }
+[m[31m-        if pf.initialized.unwrap_or(false) { status_parts.push("⚡ Initialized".to_string()); }
+[m[32m+        status_parts.push(
+[m[32m+            if pf.is_currently_live.unwrap_or(false) {
+[m[32m+                "🟢 Live"
+[m[32m+            } else {
+[m[32m+                "🔴 Not Live"
+[m[32m+            }
+[m[32m+            .to_string(),
+[m[32m+        );
+[m[32m+        status_parts.push(
+[m[32m+            if pf.complete.unwrap_or(false) {
+[m[32m+                "✅ Complete"
+[m[32m+            } else {
+[m[32m+                "❌ Incomplete"
+[m[32m+            }
+[m[32m+            .to_string(),
+[m[32m+        );
+[m[32m+        if pf.is_banned.unwrap_or(false) {
+[m[32m+            status_parts.push("🚫 Banned".to_string());
+[m[32m+        }
+[m[32m+        if pf.nsfw.unwrap_or(false) {
+[m[32m+            status_parts.push("🔞 NSFW".to_string());
+[m[32m+        }
+[m[32m+        if pf.hidden.unwrap_or(false) {
+[m[32m+            status_parts.push("👻 Hidden".to_string());
+[m[32m+        }
+[m[32m+        if pf.show_name.unwrap_or(false) {
+[m[32m+            status_parts.push("📛 Show Name".to_string());
+[m[32m+        }
+[m[32m+        if pf.inverted.unwrap_or(false) {
+[m[32m+            status_parts.push("🔄 Inverted".to_string());
+[m[32m+        }
+[m[32m+        if pf.initialized.unwrap_or(false) {
+[m[32m+            status_parts.push("⚡ Initialized".to_string());
+[m[32m+        }
+[m         parts.push(status_parts.join(" | "));
+         if let Some(downrank_score) = pf.downrank_score {
+[31m-            parts.push(format!("⬇️ <b>Downrank Score (pf):</b> {:.2}", downrank_score));
+[m[32m+            parts.push(format!(
+[m[32m+                "⬇️ <b>Downrank Score (pf):</b> {:.2}",
+[m[32m+                downrank_score
+[m[32m+            ));
+[m         }
+         parts.push(String::new());
+     }
+Diff in /root/telegram_token_bot/src/bot.rs:460:
+                 parts.push(format!("🏢 <b>DEX (dex):</b> {}", dex_id));
+             }
+             if let Some(pair_address) = &pair.pair_address {
+[31m-                parts.push(format!("🔗 <b>Pair Address (dex):</b> <code>{}</code>", pair_address));
+[m[32m+                parts.push(format!(
+[m[32m+                    "🔗 <b>Pair Address (dex):</b> <code>{}</code>",
+[m[32m+                    pair_address
+[m[32m+                ));
+[m             }
+             if let Some(url) = &pair.url {
+                 parts.push(format!("🔗 <a href=\"{}\">View on DexScreener</a>", url));
+Diff in /root/telegram_token_bot/src/bot.rs:467:
+             }
+             if let (Some(base), Some(quote)) = (&pair.base_token, &pair.quote_token) {
+[31m-                parts.push(format!("📊 <b>Base Token (dex):</b> {} ({}) - <code>{}</code>", base.name.as_deref().unwrap_or("N/A"), base.symbol.as_deref().unwrap_or("N/A"), base.address.as_deref().unwrap_or("N/A")));
+[m[31m-                parts.push(format!("📊 <b>Quote Token (dex):</b> {} ({}) - <code>{}</code>", quote.name.as_deref().unwrap_or("N/A"), quote.symbol.as_deref().unwrap_or("N/A"), quote.address.as_deref().unwrap_or("N/A")));
+[m[32m+                parts.push(format!(
+[m[32m+                    "📊 <b>Base Token (dex):</b> {} ({}) - <code>{}</code>",
+[m[32m+                    base.name.as_deref().unwrap_or("N/A"),
+[m[32m+                    base.symbol.as_deref().unwrap_or("N/A"),
+[m[32m+                    base.address.as_deref().unwrap_or("N/A")
+[m[32m+                ));
+[m[32m+                parts.push(format!(
+[m[32m+                    "📊 <b>Quote Token (dex):</b> {} ({}) - <code>{}</code>",
+[m[32m+                    quote.name.as_deref().unwrap_or("N/A"),
+[m[32m+                    quote.symbol.as_deref().unwrap_or("N/A"),
+[m[32m+                    quote.address.as_deref().unwrap_or("N/A")
+[m[32m+                ));
+[m             }
+         }
+     }
+Diff in /root/telegram_token_bot/src/bot.rs:474:
+     if let Some(pf) = &data.pump_fun_data {
+[31m-        if let Some(prog) = &pf.program { parts.push(format!("⚙️ <b>Program (pf):</b> {}", prog)); }
+[m[31m-        if let Some(plat) = &pf.platform { parts.push(format!("🖥️ <b>Platform (pf):</b> {}", plat)); }
+[m[31m-        if let Some(market) = &pf.market_id { parts.push(format!("📈 <b>Market ID (pf):</b> {}", market)); }
+[m[31m-        if let Some(ts) = pf.last_reply { parts.push(format!("💬 <b>Last Reply (pf):</b> {}", chrono::DateTime::from_timestamp_millis(ts).unwrap().format("%Y-%m-%d %H:%M"))); }
+[m[31m-        if let Some(ts) = pf.updated_at { parts.push(format!("🔄 <b>Updated At (pf):</b> {}", chrono::DateTime::from_timestamp_millis(ts).unwrap().format("%Y-%m-%d %H:%M"))); }
+[m[31m-        if pf.hide_banner.unwrap_or(false) { parts.push("🚫 <b>Banner Hidden (pf):</b> ✅".to_string()); }
+[m[32m+        if let Some(prog) = &pf.program {
+[m[32m+            parts.push(format!("⚙️ <b>Program (pf):</b> {}", prog));
+[m[32m+        }
+[m[32m+        if let Some(plat) = &pf.platform {
+[m[32m+            parts.push(format!("🖥️ <b>Platform (pf):</b> {}", plat));
+[m[32m+        }
+[m[32m+        if let Some(market) = &pf.market_id {
+[m[32m+            parts.push(format!("📈 <b>Market ID (pf):</b> {}", market));
+[m[32m+        }
+[m[32m+        if let Some(ts) = pf.last_reply {
+[m[32m+            parts.push(format!(
+[m[32m+                "💬 <b>Last Reply (pf):</b> {}",
+[m[32m+                chrono::DateTime::from_timestamp_millis(ts)
+[m[32m+                    .unwrap()
+[m[32m+                    .format("%Y-%m-%d %H:%M")
+[m[32m+            ));
+[m[32m+        }
+[m[32m+        if let Some(ts) = pf.updated_at {
+[m[32m+            parts.push(format!(
+[m[32m+                "🔄 <b>Updated At (pf):</b> {}",
+[m[32m+                chrono::DateTime::from_timestamp_millis(ts)
+[m[32m+                    .unwrap()
+[m[32m+                    .format("%Y-%m-%d %H:%M")
+[m[32m+            ));
+[m[32m+        }
+[m[32m+        if pf.hide_banner.unwrap_or(false) {
+[m[32m+            parts.push("🚫 <b>Banner Hidden (pf):</b> ✅".to_string());
+[m[32m+        }
+[m     }
+     if let Some(jup_data) = &data.jupiter_data {
+         parts.push(format!("🆔 <b>Token ID (jup):</b> {}", jup_data.id));
+Diff in /root/telegram_token_bot/src/bot.rs:484:
+[31m-        parts.push(format!("💻 <b>Token Program (jup):</b> {}", jup_data.token_program));
+[m[32m+        parts.push(format!(
+[m[32m+            "💻 <b>Token Program (jup):</b> {}",
+[m[32m+            jup_data.token_program
+[m[32m+        ));
+[m         if let Some(launchpad) = &jup_data.launchpad {
+             parts.push(format!("🚀 <b>Launchpad (jup):</b> {}", launchpad));
+         }
+Diff in /root/telegram_token_bot/src/bot.rs:488:
+         if let Some(graduated_pool) = &jup_data.graduated_pool {
+[31m-            parts.push(format!("🎓 <b>Graduated Pool (jup):</b> {}", graduated_pool));
+[m[32m+            parts.push(format!(
+[m[32m+                "🎓 <b>Graduated Pool (jup):</b> {}",
+[m[32m+                graduated_pool
+[m[32m+            ));
+[m         }
+         if let Some(graduated_at) = &jup_data.graduated_at {
+             parts.push(format!("🎓 <b>Graduated At (jup):</b> {}", graduated_at));
+Diff in /root/telegram_token_bot/src/bot.rs:493:
+         }
+[31m-        parts.push(format!("🔄 <b>Updated At (jup):</b> {}", jup_data.updated_at));
+[m[32m+        parts.push(format!(
+[m[32m+            "🔄 <b>Updated At (jup):</b> {}",
+[m[32m+            jup_data.updated_at
+[m[32m+        ));
+[m     }
+     parts.push(String::new());
+ 
+Diff in /root/telegram_token_bot/src/bot.rs:501:
+         if let Some(pair) = dexscreener_data.pairs.as_ref().and_then(|p| p.first()) {
+             if let Some(info) = &pair.info {
+                 if let Some(socials) = &info.socials {
+[31m-                    let social_links_dex: Vec<String> = socials.iter().filter_map(|s| s.handle.as_ref().map(|h| format!("<a href=\"{}\">{} (dex)</a>", h, s.platform.as_deref().unwrap_or("Social")))).collect();
+[m[32m+                    let social_links_dex: Vec<String> = socials
+[m[32m+                        .iter()
+[m[32m+                        .filter_map(|s| {
+[m[32m+                            s.handle.as_ref().map(|h| {
+[m[32m+                                format!(
+[m[32m+                                    "<a href=\"{}\">{} (dex)</a>",
+[m[32m+                                    h,
+[m[32m+                                    s.platform.as_deref().unwrap_or("Social")
+[m[32m+                                )
+[m[32m+                            })
+[m[32m+                        })
+[m[32m+                        .collect();
+[m                     if !social_links_dex.is_empty() {
+[31m-                        parts.push(format!("🔗 <b>Socials (dex):</b> {}", social_links_dex.join(" | ")));
+[m[32m+                        parts.push(format!(
+[m[32m+                            "🔗 <b>Socials (dex):</b> {}",
+[m[32m+                            social_links_dex.join(" | ")
+[m[32m+                        ));
+[m                     }
+                 }
+                 if let Some(websites) = &info.websites {
+Diff in /root/telegram_token_bot/src/bot.rs:510:
+[31m-                    let website_links: Vec<String> = websites.iter().filter_map(|w| w.url.as_ref().map(|u| format!("<a href=\"{}\">Website (dex)</a>", u))).collect();
+[m[32m+                    let website_links: Vec<String> = websites
+[m[32m+                        .iter()
+[m[32m+                        .filter_map(|w| {
+[m[32m+                            w.url
+[m[32m+                                .as_ref()
+[m[32m+                                .map(|u| format!("<a href=\"{}\">Website (dex)</a>", u))
+[m[32m+                        })
+[m[32m+                        .collect();
+[m                     if !website_links.is_empty() {
+[31m-                        parts.push(format!("🌐 <b>Websites (dex):</b> {}", website_links.join(" | ")));
+[m[32m+                        parts.push(format!(
+[m[32m+                            "🌐 <b>Websites (dex):</b> {}",
+[m[32m+                            website_links.join(" | ")
+[m[32m+                        ));
+[m                     }
+                 }
+             }
+Diff in /root/telegram_token_bot/src/bot.rs:516:
+         }
+     }
+     if !social_links.is_empty() {
+[31m-        let social_parts: Vec<String> = social_links.iter().map(|(name, url)| format!("<a href=\"{}\">{} (pf)</a>", url.as_ref().unwrap_or(&"".to_string()), name)).collect();
+[m[31m-        parts.push(format!("🔗 <b>Socials (pf):</b> {}", social_parts.join(" | ")));
+[m[32m+        let social_parts: Vec<String> = social_links
+[m[32m+            .iter()
+[m[32m+            .map(|(name, url)| {
+[m[32m+                format!(
+[m[32m+                    "<a href=\"{}\">{} (pf)</a>",
+[m[32m+                    url.as_ref().unwrap_or(&"".to_string()),
+[m[32m+                    name
+[m[32m+                )
+[m[32m+            })
+[m[32m+            .collect();
+[m[32m+        parts.push(format!(
+[m[32m+            "🔗 <b>Socials (pf):</b> {}",
+[m[32m+            social_parts.join(" | ")
+[m[32m+        ));
+[m     }
+     if let Some(jup_data) = &data.jupiter_data {
+         let mut jup_social_parts = Vec::new();
+Diff in /root/telegram_token_bot/src/bot.rs:531:
+             jup_social_parts.push(format!("<a href=\"{}\">Website (jup)</a>", website));
+         }
+         if !jup_social_parts.is_empty() {
+[31m-            parts.push(format!("🔗 <b>Socials (jup):</b> {}", jup_social_parts.join(" | ")));
+[m[32m+            parts.push(format!(
+[m[32m+                "🔗 <b>Socials (jup):</b> {}",
+[m[32m+                jup_social_parts.join(" | ")
+[m[32m+            ));
+[m         }
+     }
+[31m-    if social_links.is_empty() &&
+[m[31m-       !data.dexscreener_data.as_ref().map_or(false, |d| d.pairs.as_ref().map_or(false, |p| p.first().map_or(false, |pair| pair.info.as_ref().map_or(false, |info| info.socials.is_some() || info.websites.is_some())))) &&
+[m[31m-       data.jupiter_data.as_ref().map_or(true, |j| j.twitter.is_none() && j.telegram.is_none() && j.website.is_none()) {
+[m[32m+    if social_links.is_empty()
+[m[32m+        && !data.dexscreener_data.as_ref().map_or(false, |d| {
+[m[32m+            d.pairs.as_ref().map_or(false, |p| {
+[m[32m+                p.first().map_or(false, |pair| {
+[m[32m+                    pair.info.as_ref().map_or(false, |info| {
+[m[32m+                        info.socials.is_some() || info.websites.is_some()
+[m[32m+                    })
+[m[32m+                })
+[m[32m+            })
+[m[32m+        })
+[m[32m+        && data.jupiter_data.as_ref().map_or(true, |j| {
+[m[32m+            j.twitter.is_none() && j.telegram.is_none() && j.website.is_none()
+[m[32m+        })
+[m[32m+    {
+[m         parts.push("No social links found.".to_string());
+     }
+     parts.push(String::new());
+Diff in /root/telegram_token_bot/src/bot.rs:552:
+     if let Some(jup_data) = &data.jupiter_data {
+         if let Some(score) = jup_data.organic_score {
+             parts.push("📊 <b>Advanced Analytics (jup)</b>".to_string());
+[31m-            parts.push(format!("🎯 <b>Organic Score:</b> {:.2} ({})", score, jup_data.organic_score_label.as_deref().unwrap_or("N/A")));
+[m[32m+            parts.push(format!(
+[m[32m+                "🎯 <b>Organic Score:</b> {:.2} ({})",
+[m[32m+                score,
+[m[32m+                jup_data.organic_score_label.as_deref().unwrap_or("N/A")
+[m[32m+            ));
+[m             if let Some(tags) = &jup_data.tags {
+                 if !tags.is_empty() {
+                     parts.push(format!("🏷️ <b>Tags:</b> {}", tags.join(", ")));
+Diff in /root/telegram_token_bot/src/bot.rs:579:
+             fn format_stats(name: &str, stats: &Option<crate::types::Stats>) -> Option<String> {
+                 stats.as_ref().map(|s| {
+                     let mut stat_parts = vec![format!("  <b>{} Stats:</b>", name)];
+[31m-                    stat_parts.push(format!("    📈 Price Change: {:.2}%", s.price_change.unwrap_or(0.0)));
+[m[31m-                    stat_parts.push(format!("    📊 Volume: ${:.0} (B: ${:.0} / S: ${:.0})", s.buy_volume.unwrap_or(0.0) + s.sell_volume.unwrap_or(0.0), s.buy_volume.unwrap_or(0.0), s.sell_volume.unwrap_or(0.0)));
+[m[31m-                    stat_parts.push(format!("    🌱 Organic Volume: ${:.0} (B: ${:.0} / S: ${:.0})", s.buy_organic_volume.unwrap_or(0.0) + s.sell_organic_volume.unwrap_or(0.0), s.buy_organic_volume.unwrap_or(0.0), s.sell_organic_volume.unwrap_or(0.0)));
+[m[31m-                    stat_parts.push(format!("    👥 Traders: {} (B: {} / S: {})", s.num_traders.unwrap_or(0), s.num_buys.unwrap_or(0), s.num_sells.unwrap_or(0)));
+[m[31m-                    stat_parts.push(format!("    👥 Holder Change: {:.2}%", s.holder_change.unwrap_or(0.0)));
+[m[31m-                    stat_parts.push(format!("    💧 Liquidity Change: {:.2}%", s.liquidity_change.unwrap_or(0.0)));
+[m[32m+                    stat_parts.push(format!(
+[m[32m+                        "    📈 Price Change: {:.2}%",
+[m[32m+                        s.price_change.unwrap_or(0.0)
+[m[32m+                    ));
+[m[32m+                    stat_parts.push(format!(
+[m[32m+                        "    📊 Volume: ${:.0} (B: ${:.0} / S: ${:.0})",
+[m[32m+                        s.buy_volume.unwrap_or(0.0) + s.sell_volume.unwrap_or(0.0),
+[m[32m+                        s.buy_volume.unwrap_or(0.0),
+[m[32m+                        s.sell_volume.unwrap_or(0.0)
+[m[32m+                    ));
+[m[32m+                    stat_parts.push(format!(
+[m[32m+                        "    🌱 Organic Volume: ${:.0} (B: ${:.0} / S: ${:.0})",
+[m[32m+                        s.buy_organic_volume.unwrap_or(0.0) + s.sell_organic_volume.unwrap_or(0.0),
+[m[32m+                        s.buy_organic_volume.unwrap_or(0.0),
+[m[32m+                        s.sell_organic_volume.unwrap_or(0.0)
+[m[32m+                    ));
+[m[32m+                    stat_parts.push(format!(
+[m[32m+                        "    👥 Traders: {} (B: {} / S: {})",
+[m[32m+                        s.num_traders.unwrap_or(0),
+[m[32m+                        s.num_buys.unwrap_or(0),
+[m[32m+                        s.num_sells.unwrap_or(0)
+[m[32m+                    ));
+[m[32m+                    stat_parts.push(format!(
+[m[32m+                        "    👥 Holder Change: {:.2}%",
+[m[32m+                        s.holder_change.unwrap_or(0.0)
+[m[32m+                    ));
+[m[32m+                    stat_parts.push(format!(
+[m[32m+                        "    💧 Liquidity Change: {:.2}%",
+[m[32m+                        s.liquidity_change.unwrap_or(0.0)
+[m[32m+                    ));
+[m                     stat_parts.join("\n")
+                 })
+             }
+Diff in /root/telegram_token_bot/src/bot.rs:608:
+         let participants = pf.num_participants.unwrap_or(0);
+         if replies > 0 || participants > 0 {
+             parts.push("💬 <b>Community Engagement (pf)</b>".to_string());
+[31m-            parts.push(format!("💬 <b>Replies:</b> {} | 👥 <b>Participants:</b> {}", replies, participants));
+[m[32m+            parts.push(format!(
+[m[32m+                "💬 <b>Replies:</b> {} | 👥 <b>Participants:</b> {}",
+[m[32m+                replies, participants
+[m[32m+            ));
+[m             parts.push(String::new());
+         }
+     }
+Diff in /root/telegram_token_bot/src/bot.rs:615:
+ 
+     // 19. 📺 Livestream Info
+     if let Some(pf) = &data.pump_fun_data {
+[31m-        if pf.livestream_ban_expiry.unwrap_or(0) > 0 || pf.livestream_downrank_score.unwrap_or(0.0) > 0.0 {
+[m[32m+        if pf.livestream_ban_expiry.unwrap_or(0) > 0
+[m[32m+            || pf.livestream_downrank_score.unwrap_or(0.0) > 0.0
+[m[32m+        {
+[m             parts.push("📺 <b>Livestream Info (pf)</b>".to_string());
+             if pf.livestream_ban_expiry.unwrap_or(0) > 0 {
+[31m-                parts.push(format!("🚫 <b>Ban Expiry:</b> {}", chrono::DateTime::from_timestamp_millis(pf.livestream_ban_expiry.unwrap()).unwrap().format("%Y-%m-%d %H:%M")));
+[m[32m+                parts.push(format!(
+[m[32m+                    "🚫 <b>Ban Expiry:</b> {}",
+[m[32m+                    chrono::DateTime::from_timestamp_millis(pf.livestream_ban_expiry.unwrap())
+[m[32m+                        .unwrap()
+[m[32m+                        .format("%Y-%m-%d %H:%M")
+[m[32m+                ));
+[m             }
+             if pf.livestream_downrank_score.unwrap_or(0.0) > 0.0 {
+[31m-                parts.push(format!("⬇️ <b>Downrank Score:</b> {:.2}", pf.livestream_downrank_score.unwrap()));
+[m[32m+                parts.push(format!(
+[m[32m+                    "⬇️ <b>Downrank Score:</b> {:.2}",
+[m[32m+                    pf.livestream_downrank_score.unwrap()
+[m[32m+                ));
+[m             }
+             if let Some(thumbnail_updated_at) = pf.thumbnail_updated_at {
+                 if let Some(dt) = chrono::DateTime::from_timestamp_millis(thumbnail_updated_at) {
+Diff in /root/telegram_token_bot/src/bot.rs:628:
+[31m-                    parts.push(format!("🖼️ <b>Thumbnail Updated:</b> {}", dt.format("%Y-%m-%d %H:%M")));
+[m[32m+                    parts.push(format!(
+[m[32m+                        "🖼️ <b>Thumbnail Updated:</b> {}",
+[m[32m+                        dt.format("%Y-%m-%d %H:%M")
+[m[32m+                    ));
+[m                 }
+             }
+             parts.push(String::new());
+Diff in /root/telegram_token_bot/src/main.rs:33:
+ 
+     Ok(())
+ }
+[32m+
+[mDiff in /root/telegram_token_bot/src/types.rs:225:
+     pub sol_balance: Option<f64>,
+ }
+ 
+[31m-
+[m[31m-
+[m #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct PumpFunData {
+     pub mint: Option<String>,
+Diff in /root/telegram_token_bot/src/types.rs:279:
+     pub thumbnail: Option<String>,
+     pub video_uri: Option<String>,
+ }
+[31m-
+[m 
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]

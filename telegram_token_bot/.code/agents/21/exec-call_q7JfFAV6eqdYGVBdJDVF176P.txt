@@ -1,0 +1,804 @@
+diff --git a/src/api.rs b/src/api.rs
+index aa71b8b..64e4425 100644
+--- a/src/api.rs
++++ b/src/api.rs
+@@ -1,5 +1,5 @@
+ use crate::types::*;
+-use anyhow::{Result, anyhow};
++use anyhow::{anyhow, Result};
+ use reqwest::Client;
+ use serde_json::json;
+ use std::env;
+@@ -19,10 +19,7 @@ impl ApiClient {
+             .timeout(Duration::from_secs(5))
+             .build()?;
+ 
+-        Ok(Self {
+-            client,
+-            api_key,
+-        })
++        Ok(Self { client, api_key })
+     }
+ 
+     pub async fn analyze_token(&self, mint_address: &str) -> Result<TokenData> {
+@@ -60,7 +57,10 @@ impl ApiClient {
+     }
+ 
+     async fn query_metadata_v1(&self, mint_address: &str) -> Result<MetadataResponse> {
+-        let url = format!("https://api.helius.xyz/v0/token-metadata?api-key={}", self.api_key);
++        let url = format!(
++            "https://api.helius.xyz/v0/token-metadata?api-key={}",
++            self.api_key
++        );
+         let payload = json!({
+             "mintAccounts": [mint_address],
+             "includeOffChain": true,
+@@ -68,10 +68,13 @@ impl ApiClient {
+         });
+         let response = timeout(
+             Duration::from_secs(3),
+-            self.client.post(&url).json(&payload).send()
+-        ).await??;
++            self.client.post(&url).json(&payload).send(),
++        )
++        .await??;
+         let data: Vec<MetadataResponse> = response.json().await?;
+-        data.into_iter().next().ok_or_else(|| anyhow!("No metadata found"))
++        data.into_iter()
++            .next()
++            .ok_or_else(|| anyhow!("No metadata found"))
+     }
+ 
+     async fn get_token_largest_accounts(&self, mint_address: &str) -> Result<HoldersData> {
+@@ -84,8 +87,9 @@ impl ApiClient {
+         });
+         let response = timeout(
+             Duration::from_secs(3),
+-            self.client.post(&url).json(&payload).send()
+-        ).await??;
++            self.client.post(&url).json(&payload).send(),
++        )
++        .await??;
+         let data: HoldersData = response.json().await?;
+         Ok(data)
+     }
+@@ -100,29 +104,34 @@ impl ApiClient {
+         });
+         let response = timeout(
+             Duration::from_secs(3),
+-            self.client.post(&url).json(&payload).send()
+-        ).await??;
++            self.client.post(&url).json(&payload).send(),
++        )
++        .await??;
+         let data: SupplyInfo = response.json().await?;
+         Ok(data)
+     }
+ 
+     async fn get_dexscreener_data(&self, mint_address: &str) -> Result<DexScreenerData> {
+-        let url = format!("https://api.dexscreener.com/latest/dex/tokens/{}", mint_address);
+-        let response = timeout(
+-            Duration::from_secs(3),
+-            self.client.get(&url).send()
+-        ).await??;
++        let url = format!(
++            "https://api.dexscreener.com/latest/dex/tokens/{}",
++            mint_address
++        );
++        let response = timeout(Duration::from_secs(3), self.client.get(&url).send()).await??;
+         let data: DexScreenerData = response.json().await?;
+         Ok(data)
+     }
+ 
+     async fn get_pump_fun_data(&self, mint_address: &str) -> Result<PumpFunData> {
+-        let url = format!("https://frontend-api-v3.pump.fun/coins/{}?sync=true", mint_address);
++        let url = format!(
++            "https://frontend-api-v3.pump.fun/coins/{}?sync=true",
++            mint_address
++        );
+         let jwt = env::var("PUMP_FUN_JWT").unwrap_or_default();
+         let response = timeout(
+             Duration::from_secs(5),
+-            self.client.get(&url).bearer_auth(jwt).send()
+-        ).await??;
++            self.client.get(&url).bearer_auth(jwt).send(),
++        )
++        .await??;
+         if response.status() == 404 {
+             return Err(anyhow!("Token not found on pump.fun"));
+         }
+@@ -131,34 +140,46 @@ impl ApiClient {
+     }
+ 
+     async fn fetch_jupiter_token_data(&self, mint_address: &str) -> Result<JupiterTokenData> {
+-        let url = format!("https://lite-api.jup.ag/tokens/v2/search?query={}", mint_address);
+-        let response = timeout(
+-            Duration::from_secs(5),
+-            self.client.get(&url).send()
+-        ).await??;
++        let url = format!(
++            "https://lite-api.jup.ag/tokens/v2/search?query={}",
++            mint_address
++        );
++        let response = timeout(Duration::from_secs(5), self.client.get(&url).send()).await??;
+ 
+         if response.status().is_client_error() || response.status().is_server_error() {
+             if response.status() == reqwest::StatusCode::NOT_FOUND {
+                 return Err(anyhow!("Token not found on Jupiter (404)"));
+             }
+-            return Err(anyhow!("Jupiter API returned an error: {}", response.status()));
++            return Err(anyhow!(
++                "Jupiter API returned an error: {}",
++                response.status()
++            ));
+         }
+         let data: Vec<JupiterTokenData> = response.json().await?;
+-        data.into_iter().next().ok_or_else(|| anyhow!("No Jupiter data found"))
++        data.into_iter()
++            .next()
++            .ok_or_else(|| anyhow!("No Jupiter data found"))
+     }
+ 
+-    async fn get_dexscreener_orders_data(&self, chain_id: &str, token_address: &str) -> Result<Vec<DexScreenerOrder>> {
+-        let url = format!("https://api.dexscreener.com/orders/v1/{}/{}", chain_id, token_address);
+-        let response = timeout(
+-            Duration::from_secs(5),
+-            self.client.get(&url).send()
+-        ).await??;
++    async fn get_dexscreener_orders_data(
++        &self,
++        chain_id: &str,
++        token_address: &str,
++    ) -> Result<Vec<DexScreenerOrder>> {
++        let url = format!(
++            "https://api.dexscreener.com/orders/v1/{}/{}",
++            chain_id, token_address
++        );
++        let response = timeout(Duration::from_secs(5), self.client.get(&url).send()).await??;
+ 
+         if response.status().is_client_error() || response.status().is_server_error() {
+             if response.status() == reqwest::StatusCode::NOT_FOUND {
+                 return Err(anyhow!("DexScreener Orders: Token not found (404)"));
+             }
+-            return Err(anyhow!("DexScreener Orders API returned an error: {}", response.status()));
++            return Err(anyhow!(
++                "DexScreener Orders API returned an error: {}",
++                response.status()
++            ));
+         }
+ 
+         let data: Vec<DexScreenerOrder> = response.json().await?;
+diff --git a/src/bot.rs b/src/bot.rs
+index 38f332a..9e5c3e4 100644
+--- a/src/bot.rs
++++ b/src/bot.rs
+@@ -12,20 +12,14 @@ pub async fn start_bot(bot_token: String, api_client: ApiClient) -> Result<()> {
+ 
+     teloxide::repl(bot, move |bot: Bot, msg: Message| {
+         let api_client = Arc::clone(&api_client);
+-        async move {
+-            handle_message(bot, msg, api_client).await
+-        }
++        async move { handle_message(bot, msg, api_client).await }
+     })
+     .await;
+ 
+     Ok(())
+ }
+ 
+-async fn handle_message(
+-    bot: Bot,
+-    msg: Message,
+-    api_client: Arc<ApiClient>,
+-) -> ResponseResult<()> {
++async fn handle_message(bot: Bot, msg: Message, api_client: Arc<ApiClient>) -> ResponseResult<()> {
+     if let Some(text) = msg.text() {
+         if let Some(contract_address) = detect_contract_address(text) {
+             // Start timing
+@@ -43,7 +37,7 @@ async fn handle_message(
+                     let mut message_chunk = String::new();
+ 
+                     for line in lines {
+-                        if message_chunk.len() + line.len() + 1 > 4000 {
++                        if message_chunk.len() + line.len() + 1 > 4096 {
+                             bot.send_message(msg.chat.id, &message_chunk)
+                                 .parse_mode(teloxide::types::ParseMode::Html)
+                                 .disable_web_page_preview(true)
+@@ -66,13 +60,15 @@ async fn handle_message(
+                     let timing_text = format!("⚡ {}ms!", elapsed.as_millis());
+                     let error_text = format!("{}\n\n❌ Error analyzing token: {}", timing_text, e);
+ 
+-                    bot.send_message(msg.chat.id, error_text)
+-                        .await?;
++                    bot.send_message(msg.chat.id, error_text).await?;
+                 }
+             }
+         } else {
+-            bot.send_message(msg.chat.id, "🪙 Send me a contract address to analyze token data!")
+-                .await?;
++            bot.send_message(
++                msg.chat.id,
++                "🪙 Send me a contract address to analyze token data!",
++            )
++            .await?;
+         }
+     }
+ 
+@@ -90,7 +86,11 @@ fn format_jupiter_data(jup_data: &JupiterTokenData) -> String {
+     parts.push("🪐 <b>Jupiter Token Analysis</b>".to_string());
+ 
+     if let Some(score) = jup_data.organic_score {
+-        parts.push(format!("- <b>Organic Score:</b> {:.2} ({})", score, jup_data.organic_score_label.as_deref().unwrap_or("N/A")));
++        parts.push(format!(
++            "- <b>Organic Score:</b> {:.2} ({})",
++            score,
++            jup_data.organic_score_label.as_deref().unwrap_or("N/A")
++        ));
+     }
+ 
+     if let Some(tags) = &jup_data.tags {
+@@ -144,12 +144,29 @@ fn format_jupiter_data(jup_data: &JupiterTokenData) -> String {
+     if let Some(audit) = &jup_data.audit {
+         parts.push("".to_string());
+         parts.push("  <b>Security Audit (Jup):</b>".to_string());
+-        parts.push(format!("  - Mint Authority: {}", if audit.mint_authority_disabled.unwrap_or(false) { "Disabled ✅" } else { "Enabled ⚠️" }));
+-        parts.push(format!("  - Freeze Authority: {}", if audit.freeze_authority_disabled.unwrap_or(false) { "Disabled ✅" } else { "Enabled ⚠️" }));
++        parts.push(format!(
++            "  - Mint Authority: {}",
++            if audit.mint_authority_disabled.unwrap_or(false) {
++                "Disabled ✅"
++            } else {
++                "Enabled ⚠️"
++            }
++        ));
++        parts.push(format!(
++            "  - Freeze Authority: {}",
++            if audit.freeze_authority_disabled.unwrap_or(false) {
++                "Disabled ✅"
++            } else {
++                "Enabled ⚠️"
++            }
++        ));
+         if let Some(top_holders) = audit.top_holders_percentage {
+             parts.push(format!("  - Top Holders: {:.2}%", top_holders));
+         }
+-        parts.push(format!("  - Snipers: {:.2}%", audit.snipers_holding_percentage.unwrap_or(0.0)));
++        parts.push(format!(
++            "  - Snipers: {:.2}%",
++            audit.snipers_holding_percentage.unwrap_or(0.0)
++        ));
+         if let Some(dev_migrations) = audit.dev_migrations {
+             parts.push(format!("  - Dev Migrations: {}", dev_migrations));
+         }
+@@ -161,12 +178,36 @@ fn format_jupiter_data(jup_data: &JupiterTokenData) -> String {
+     fn format_stats(name: &str, stats: &Option<Stats>) -> Option<String> {
+         stats.as_ref().map(|s| {
+             let mut stat_parts = vec![format!("  <b>{} Stats:</b>", name)];
+-            stat_parts.push(format!("    Price Change: {:.2}%", s.price_change.unwrap_or(0.0)));
+-            stat_parts.push(format!("    Volume: ${:.0} (B: ${:.0} / S: ${:.0})", s.buy_volume.unwrap_or(0.0) + s.sell_volume.unwrap_or(0.0), s.buy_volume.unwrap_or(0.0), s.sell_volume.unwrap_or(0.0)));
+-            stat_parts.push(format!("    Organic Volume: ${:.0} (B: ${:.0} / S: ${:.0})", s.buy_organic_volume.unwrap_or(0.0) + s.sell_organic_volume.unwrap_or(0.0), s.buy_organic_volume.unwrap_or(0.0), s.sell_organic_volume.unwrap_or(0.0)));
+-            stat_parts.push(format!("    Traders: {} (B: {} / S: {})", s.num_traders.unwrap_or(0), s.num_buys.unwrap_or(0), s.num_sells.unwrap_or(0)));
+-            stat_parts.push(format!("    Holder Change: {:.2}%", s.holder_change.unwrap_or(0.0)));
+-            stat_parts.push(format!("    Liquidity Change: {:.2}%", s.liquidity_change.unwrap_or(0.0)));
++            stat_parts.push(format!(
++                "    Price Change: {:.2}%",
++                s.price_change.unwrap_or(0.0)
++            ));
++            stat_parts.push(format!(
++                "    Volume: ${:.0} (B: ${:.0} / S: ${:.0})",
++                s.buy_volume.unwrap_or(0.0) + s.sell_volume.unwrap_or(0.0),
++                s.buy_volume.unwrap_or(0.0),
++                s.sell_volume.unwrap_or(0.0)
++            ));
++            stat_parts.push(format!(
++                "    Organic Volume: ${:.0} (B: ${:.0} / S: ${:.0})",
++                s.buy_organic_volume.unwrap_or(0.0) + s.sell_organic_volume.unwrap_or(0.0),
++                s.buy_organic_volume.unwrap_or(0.0),
++                s.sell_organic_volume.unwrap_or(0.0)
++            ));
++            stat_parts.push(format!(
++                "    Traders: {} (B: {} / S: {})",
++                s.num_traders.unwrap_or(0),
++                s.num_buys.unwrap_or(0),
++                s.num_sells.unwrap_or(0)
++            ));
++            stat_parts.push(format!(
++                "    Holder Change: {:.2}%",
++                s.holder_change.unwrap_or(0.0)
++            ));
++            stat_parts.push(format!(
++                "    Liquidity Change: {:.2}%",
++                s.liquidity_change.unwrap_or(0.0)
++            ));
+             stat_parts.join("\n")
+         })
+     }
+@@ -185,10 +226,12 @@ fn format_jupiter_data(jup_data: &JupiterTokenData) -> String {
+         parts.push(stats_str);
+     }
+ 
+-
+     if let Some(bonding_curve) = jup_data.bonding_curve {
+         parts.push("".to_string());
+-        parts.push(format!("- <b>Bonding Curve (Jup):</b> {:.2}%", bonding_curve));
++        parts.push(format!(
++            "- <b>Bonding Curve (Jup):</b> {:.2}%",
++            bonding_curve
++        ));
+     }
+ 
+     parts.join("\n")
+@@ -210,7 +253,13 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
+         if let Some(on_chain) = &metadata.on_chain_metadata {
+             if let Some(meta) = &on_chain.metadata {
+                 name = meta.data.name.clone().unwrap_or(name).trim().to_string();
+-                symbol = meta.data.symbol.clone().unwrap_or(symbol).trim().to_string();
++                symbol = meta
++                    .data
++                    .symbol
++                    .clone()
++                    .unwrap_or(symbol)
++                    .trim()
++                    .to_string();
+             }
+         }
+         if let Some(off_chain) = &metadata.off_chain_metadata {
+@@ -229,9 +278,15 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
+         symbol = pf.symbol.clone().unwrap_or(symbol);
+         description = pf.description.clone().unwrap_or(description);
+         image_url = pf.image_uri.clone();
+-        if pf.twitter.is_some() { social_links.insert("Twitter".to_string(), pf.twitter.clone()); }
+-        if pf.telegram.is_some() { social_links.insert("Telegram".to_string(), pf.telegram.clone()); }
+-        if pf.website.is_some() { social_links.insert("Website".to_string(), pf.website.clone()); }
++        if pf.twitter.is_some() {
++            social_links.insert("Twitter".to_string(), pf.twitter.clone());
++        }
++        if pf.telegram.is_some() {
++            social_links.insert("Telegram".to_string(), pf.telegram.clone());
++        }
++        if pf.website.is_some() {
++            social_links.insert("Website".to_string(), pf.website.clone());
++        }
+     }
+ 
+     // Extract social links from dexscreener
+@@ -268,7 +323,13 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
+     // Market Data (from dexscreener)
+     let (market_cap, fdv, liquidity_usd) = if let Some(dexscreener_data) = &data.dexscreener_data {
+         if let Some(pair) = dexscreener_data.pairs.as_ref().and_then(|p| p.first()) {
+-            (pair.market_cap.unwrap_or(0.0), pair.fdv.unwrap_or(0.0), pair.liquidity.as_ref().map_or(0.0, |l| l.usd.unwrap_or(0.0)))
++            (
++                pair.market_cap.unwrap_or(0.0),
++                pair.fdv.unwrap_or(0.0),
++                pair.liquidity
++                    .as_ref()
++                    .map_or(0.0, |l| l.usd.unwrap_or(0.0)),
++            )
+         } else {
+             (0.0, 0.0, 0.0)
+         }
+@@ -289,48 +350,128 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
+                 parts.push(format!("<a href=\"{}\">View on DexScreener</a>", url));
+             }
+             if let (Some(base), Some(quote)) = (&pair.base_token, &pair.quote_token) {
+-                parts.push(format!("<b>Base:</b> {} ({}) - <code>{}</code>", base.name.as_deref().unwrap_or("N/A"), base.symbol.as_deref().unwrap_or("N/A"), base.address.as_deref().unwrap_or("N/A")));
+-                parts.push(format!("<b>Quote:</b> {} ({}) - <code>{}</code>", quote.name.as_deref().unwrap_or("N/A"), quote.symbol.as_deref().unwrap_or("N/A"), quote.address.as_deref().unwrap_or("N/A")));
++                parts.push(format!(
++                    "<b>Base:</b> {} ({}) - <code>{}</code>",
++                    base.name.as_deref().unwrap_or("N/A"),
++                    base.symbol.as_deref().unwrap_or("N/A"),
++                    base.address.as_deref().unwrap_or("N/A")
++                ));
++                parts.push(format!(
++                    "<b>Quote:</b> {} ({}) - <code>{}</code>",
++                    quote.name.as_deref().unwrap_or("N/A"),
++                    quote.symbol.as_deref().unwrap_or("N/A"),
++                    quote.address.as_deref().unwrap_or("N/A")
++                ));
+             }
+ 
+-            parts.push(format!("🧢 <b>MC (dex):</b> ${:.0}", pair.market_cap.unwrap_or(0.0)));
+-            parts.push(format!("💎 <b>FDV (dex):</b> ${:.0}", pair.fdv.unwrap_or(0.0)));
+-            parts.push(format!("💧 <b>Liq (dex):</b> ${:.0}", pair.liquidity.as_ref().map_or(0.0, |l| l.usd.unwrap_or(0.0))));
++            parts.push(format!(
++                "🧢 <b>MC (dex):</b> ${:.0}",
++                pair.market_cap.unwrap_or(0.0)
++            ));
++            parts.push(format!(
++                "💎 <b>FDV (dex):</b> ${:.0}",
++                pair.fdv.unwrap_or(0.0)
++            ));
++            parts.push(format!(
++                "💧 <b>Liq (dex):</b> ${:.0}",
++                pair.liquidity
++                    .as_ref()
++                    .map_or(0.0, |l| l.usd.unwrap_or(0.0))
++            ));
+             if let Some(liquidity) = &pair.liquidity {
+-                parts.push(format!("<b>Liq (base/quote):</b> {:.2} / {:.2}", liquidity.base.unwrap_or(0.0), liquidity.quote.unwrap_or(0.0)));
++                parts.push(format!(
++                    "<b>Liq (base/quote):</b> {:.2} / {:.2}",
++                    liquidity.base.unwrap_or(0.0),
++                    liquidity.quote.unwrap_or(0.0)
++                ));
+             }
+ 
+             if let Some(price_native) = &pair.price_native {
+                 parts.push(format!("💰 <b>Price (native):</b> {}", price_native));
+             }
+             if let Some(volume) = &pair.volume {
+-                parts.push(format!("📊 <b>Volume (24h):</b> ${:.0}", volume.h24.unwrap_or(0.0)));
+-                parts.push(format!("<b>Volume (6h/1h/5m):</b> ${:.0} / ${:.0} / ${:.0}", volume.h6.unwrap_or(0.0), volume.h1.unwrap_or(0.0), volume.m5.unwrap_or(0.0)));
++                parts.push(format!(
++                    "📊 <b>Volume (24h):</b> ${:.0}",
++                    volume.h24.unwrap_or(0.0)
++                ));
++                parts.push(format!(
++                    "<b>Volume (6h/1h/5m):</b> ${:.0} / ${:.0} / ${:.0}",
++                    volume.h6.unwrap_or(0.0),
++                    volume.h1.unwrap_or(0.0),
++                    volume.m5.unwrap_or(0.0)
++                ));
+             }
+             if let Some(price_change) = &pair.price_change {
+-                parts.push(format!("📉 <b>Price Change (24h/6h/1h/5m):</b> {:.2}% / {:.2}% / {:.2}% / {:.2}%", price_change.h24.unwrap_or(0.0), price_change.h6.unwrap_or(0.0), price_change.h1.unwrap_or(0.0), price_change.m5.unwrap_or(0.0)));
++                parts.push(format!(
++                    "📉 <b>Price Change (24h/6h/1h/5m):</b> {:.2}% / {:.2}% / {:.2}% / {:.2}%",
++                    price_change.h24.unwrap_or(0.0),
++                    price_change.h6.unwrap_or(0.0),
++                    price_change.h1.unwrap_or(0.0),
++                    price_change.m5.unwrap_or(0.0)
++                ));
+             }
+             if let Some(created_at) = &pair.pair_created_at {
+-                parts.push(format!("<b>Created:</b> {}", chrono::DateTime::from_timestamp_millis(*created_at).unwrap().format("%Y-%m-%d %H:%M")));
++                parts.push(format!(
++                    "<b>Created:</b> {}",
++                    chrono::DateTime::from_timestamp_millis(*created_at)
++                        .unwrap()
++                        .format("%Y-%m-%d %H:%M")
++                ));
+             }
+             if let Some(txns) = &pair.txns {
+-                if let (Some(h24), Some(h6), Some(h1), Some(m5)) = (&txns.h24, &txns.h6, &txns.h1, &txns.m5) {
++                if let (Some(h24), Some(h6), Some(h1), Some(m5)) =
++                    (&txns.h24, &txns.h6, &txns.h1, &txns.m5)
++                {
+                     parts.push("🔄 <b>Transactions</b>".to_string());
+-                    parts.push(format!("<b>24h:</b> {} buys / {} sells", h24.buys.unwrap_or(0), h24.sells.unwrap_or(0)));
+-                    parts.push(format!("<b>6h:</b> {} buys / {} sells", h6.buys.unwrap_or(0), h6.sells.unwrap_or(0)));
+-                    parts.push(format!("<b>1h:</b> {} buys / {} sells", h1.buys.unwrap_or(0), h1.sells.unwrap_or(0)));
+-                    parts.push(format!("<b>5m:</b> {} buys / {} sells", m5.buys.unwrap_or(0), m5.sells.unwrap_or(0)));
++                    parts.push(format!(
++                        "<b>24h:</b> {} buys / {} sells",
++                        h24.buys.unwrap_or(0),
++                        h24.sells.unwrap_or(0)
++                    ));
++                    parts.push(format!(
++                        "<b>6h:</b> {} buys / {} sells",
++                        h6.buys.unwrap_or(0),
++                        h6.sells.unwrap_or(0)
++                    ));
++                    parts.push(format!(
++                        "<b>1h:</b> {} buys / {} sells",
++                        h1.buys.unwrap_or(0),
++                        h1.sells.unwrap_or(0)
++                    ));
++                    parts.push(format!(
++                        "<b>5m:</b> {} buys / {} sells",
++                        m5.buys.unwrap_or(0),
++                        m5.sells.unwrap_or(0)
++                    ));
+                 }
+             }
+             if let Some(info) = &pair.info {
+                 if let Some(socials) = &info.socials {
+-                    let social_links: Vec<String> = socials.iter().filter_map(|s| s.handle.as_ref().map(|h| format!("<a href=\"{}\">{}</a>", h, s.platform.as_deref().unwrap_or("Social")))).collect();
++                    let social_links: Vec<String> = socials
++                        .iter()
++                        .filter_map(|s| {
++                            s.handle.as_ref().map(|h| {
++                                format!(
++                                    "<a href=\"{}\">{}</a>",
++                                    h,
++                                    s.platform.as_deref().unwrap_or("Social")
++                                )
++                            })
++                        })
++                        .collect();
+                     if !social_links.is_empty() {
+                         parts.push(format!("<b>Socials:</b> {}", social_links.join(" | ")));
+                     }
+                 }
+                 if let Some(websites) = &info.websites {
+-                    let website_links: Vec<String> = websites.iter().filter_map(|w| w.url.as_ref().map(|u| format!("<a href=\"{}\">Website</a>", u))).collect();
++                    let website_links: Vec<String> = websites
++                        .iter()
++                        .filter_map(|w| {
++                            w.url
++                                .as_ref()
++                                .map(|u| format!("<a href=\"{}\">Website</a>", u))
++                        })
++                        .collect();
+                     if !website_links.is_empty() {
+                         parts.push(format!("<b>Websites:</b> {}", website_links.join(" | ")));
+                     }
+@@ -341,11 +482,25 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
+         }
+     }
+ 
+-    let ath_market_cap = data.pump_fun_data.as_ref().and_then(|pf| pf.ath_market_cap).unwrap_or(0.0);
+-    let total_supply_pf = data.pump_fun_data.as_ref().and_then(|pf| pf.total_supply).unwrap_or(0);
++    let ath_market_cap = data
++        .pump_fun_data
++        .as_ref()
++        .and_then(|pf| pf.ath_market_cap)
++        .unwrap_or(0.0);
++    let total_supply_pf = data
++        .pump_fun_data
++        .as_ref()
++        .and_then(|pf| pf.total_supply)
++        .unwrap_or(0);
+ 
+     parts.push(format!("🧢 <b>MC (pf):</b> ${:.0}", market_cap));
+-    parts.push(format!("Market Cap (SOL): {:.2}", data.pump_fun_data.as_ref().and_then(|pf| pf.market_cap).unwrap_or(0.0)));
++    parts.push(format!(
++        "Market Cap (SOL): {:.2}",
++        data.pump_fun_data
++            .as_ref()
++            .and_then(|pf| pf.market_cap)
++            .unwrap_or(0.0)
++    ));
+     parts.push(format!("🔥 <b>ATH (pf):</b> ${:.0}", ath_market_cap));
+     parts.push(format!("📦 <b>Supply (pf):</b> {}", total_supply_pf));
+     if fdv > 0.0 {
+@@ -360,17 +515,37 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
+     if let Some(pf) = &data.pump_fun_data {
+         parts.push("🗓️ <b>Timestamps (pf)</b>".to_string());
+         if let Some(created_ts) = pf.created_timestamp {
+-            parts.push(format!("<b>Created:</b> {}", chrono::DateTime::from_timestamp_millis(created_ts).unwrap().format("%Y-%m-%d %H:%M")));
++            parts.push(format!(
++                "<b>Created:</b> {}",
++                chrono::DateTime::from_timestamp_millis(created_ts)
++                    .unwrap()
++                    .format("%Y-%m-%d %H:%M")
++            ));
+         }
+         if let Some(last_trade_ts) = pf.last_trade_timestamp {
+-            parts.push(format!("<b>Last Trade:</b> {}", chrono::DateTime::from_timestamp_millis(last_trade_ts).unwrap().format("%Y-%m-%d %H:%M")));
++            parts.push(format!(
++                "<b>Last Trade:</b> {}",
++                chrono::DateTime::from_timestamp_millis(last_trade_ts)
++                    .unwrap()
++                    .format("%Y-%m-%d %H:%M")
++            ));
+         }
+         if let Some(ath_ts) = pf.ath_market_cap_timestamp {
+-            parts.push(format!("<b>ATH Date:</b> {}", chrono::DateTime::from_timestamp_millis(ath_ts).unwrap().format("%Y-%m-%d %H:%M")));
++            parts.push(format!(
++                "<b>ATH Date:</b> {}",
++                chrono::DateTime::from_timestamp_millis(ath_ts)
++                    .unwrap()
++                    .format("%Y-%m-%d %H:%M")
++            ));
+         }
+         if let Some(koth_ts) = pf.king_of_the_hill_timestamp {
+             if koth_ts > 0 {
+-                parts.push(format!("<b>King of Hill:</b> {}", chrono::DateTime::from_timestamp_millis(koth_ts).unwrap().format("%Y-%m-%d %H:%M")));
++                parts.push(format!(
++                    "<b>King of Hill:</b> {}",
++                    chrono::DateTime::from_timestamp_millis(koth_ts)
++                        .unwrap()
++                        .format("%Y-%m-%d %H:%M")
++                ));
+             }
+         }
+         parts.push(String::new());
+@@ -381,7 +556,10 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
+         parts.push("💬 <b>Engagement (pf)</b>".to_string());
+         let replies = pf.reply_count.unwrap_or(0);
+         let participants = pf.num_participants.unwrap_or(0);
+-        parts.push(format!("Replies: {} | Participants: {}", replies, participants));
++        parts.push(format!(
++            "Replies: {} | Participants: {}",
++            replies, participants
++        ));
+         parts.push(String::new());
+     }
+ 
+@@ -391,7 +569,10 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
+         let real_sol = pf.real_sol_reserves.unwrap_or(0.0) / 1e9;
+         let virtual_sol = pf.virtual_sol_reserves.unwrap_or(0.0) / 1e9;
+         let virtual_tokens = pf.virtual_token_reserves.unwrap_or(0.0);
+-        parts.push(format!("Real SOL: {:.2} | Virtual SOL: {:.2}", real_sol, virtual_sol));
++        parts.push(format!(
++            "Real SOL: {:.2} | Virtual SOL: {:.2}",
++            real_sol, virtual_sol
++        ));
+         parts.push(format!("Virtual Tokens: {:.0}", virtual_tokens));
+         let real_tokens = pf.real_token_reserves.unwrap_or(0.0);
+         parts.push(format!("Real Tokens: {:.0}", real_tokens));
+@@ -399,7 +580,10 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
+             parts.push(format!("Address: <code>{}</code>", bonding_curve_addr));
+         }
+         if let Some(assoc_bonding_curve) = &pf.associated_bonding_curve {
+-            parts.push(format!("Assoc. Address: <code>{}</code>", assoc_bonding_curve));
++            parts.push(format!(
++                "Assoc. Address: <code>{}</code>",
++                assoc_bonding_curve
++            ));
+         }
+         parts.push(String::new());
+     }
+@@ -408,14 +592,40 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
+     if let Some(pf) = &data.pump_fun_data {
+         parts.push("🚦 <b>Status (pf)</b>".to_string());
+         let mut status_parts = Vec::new();
+-        status_parts.push(if pf.is_currently_live.unwrap_or(false) { "🟢 Live" } else { "🔴 Not Live" }.to_string());
+-        status_parts.push(if pf.complete.unwrap_or(false) { "✅ Complete" } else { "❌ Incomplete" }.to_string());
+-        if pf.is_banned.unwrap_or(false) { status_parts.push("🚫 Banned".to_string()); }
+-        if pf.nsfw.unwrap_or(false) { status_parts.push("🔞 NSFW".to_string()); }
+-        if pf.hidden.unwrap_or(false) { status_parts.push("Hidden".to_string()); }
+-        if pf.show_name.unwrap_or(false) { status_parts.push("Show Name".to_string()); }
+-        if pf.inverted.unwrap_or(false) { status_parts.push("Inverted".to_string()); }
+-        if pf.initialized.unwrap_or(false) { status_parts.push("Initialized".to_string()); }
++        status_parts.push(
++            if pf.is_currently_live.unwrap_or(false) {
++                "🟢 Live"
++            } else {
++                "🔴 Not Live"
++            }
++            .to_string(),
++        );
++        status_parts.push(
++            if pf.complete.unwrap_or(false) {
++                "✅ Complete"
++            } else {
++                "❌ Incomplete"
++            }
++            .to_string(),
++        );
++        if pf.is_banned.unwrap_or(false) {
++            status_parts.push("🚫 Banned".to_string());
++        }
++        if pf.nsfw.unwrap_or(false) {
++            status_parts.push("🔞 NSFW".to_string());
++        }
++        if pf.hidden.unwrap_or(false) {
++            status_parts.push("Hidden".to_string());
++        }
++        if pf.show_name.unwrap_or(false) {
++            status_parts.push("Show Name".to_string());
++        }
++        if pf.inverted.unwrap_or(false) {
++            status_parts.push("Inverted".to_string());
++        }
++        if pf.initialized.unwrap_or(false) {
++            status_parts.push("Initialized".to_string());
++        }
+         parts.push(status_parts.join(" | "));
+         parts.push(String::new());
+     }
+@@ -423,24 +633,56 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
+     // System Info (pf)
+     if let Some(pf) = &data.pump_fun_data {
+         parts.push("⚙️ <b>System Info (pf)</b>".to_string());
+-        if let Some(prog) = &pf.program { parts.push(format!("Program: {}", prog)); }
+-        if let Some(plat) = &pf.platform { parts.push(format!("Platform: {}", plat)); }
+-        if let Some(market) = &pf.market_id { parts.push(format!("Market ID: {}", market)); }
+-        if let Some(ts) = pf.last_reply { parts.push(format!("Last Reply: {}", chrono::DateTime::from_timestamp_millis(ts).unwrap().format("%Y-%m-%d %H:%M"))); }
+-        if let Some(ts) = pf.updated_at { parts.push(format!("Updated At: {}", chrono::DateTime::from_timestamp_millis(ts).unwrap().format("%Y-%m-%d %H:%M"))); }
+-        if pf.hide_banner.unwrap_or(false) { parts.push("Banner Hidden: ✅".to_string()); }
++        if let Some(prog) = &pf.program {
++            parts.push(format!("Program: {}", prog));
++        }
++        if let Some(plat) = &pf.platform {
++            parts.push(format!("Platform: {}", plat));
++        }
++        if let Some(market) = &pf.market_id {
++            parts.push(format!("Market ID: {}", market));
++        }
++        if let Some(ts) = pf.last_reply {
++            parts.push(format!(
++                "Last Reply: {}",
++                chrono::DateTime::from_timestamp_millis(ts)
++                    .unwrap()
++                    .format("%Y-%m-%d %H:%M")
++            ));
++        }
++        if let Some(ts) = pf.updated_at {
++            parts.push(format!(
++                "Updated At: {}",
++                chrono::DateTime::from_timestamp_millis(ts)
++                    .unwrap()
++                    .format("%Y-%m-%d %H:%M")
++            ));
++        }
++        if pf.hide_banner.unwrap_or(false) {
++            parts.push("Banner Hidden: ✅".to_string());
++        }
+         parts.push(String::new());
+     }
+ 
+     // Livestream (pf)
+     if let Some(pf) = &data.pump_fun_data {
+-        if pf.livestream_ban_expiry.unwrap_or(0) > 0 || pf.livestream_downrank_score.unwrap_or(0.0) > 0.0 {
++        if pf.livestream_ban_expiry.unwrap_or(0) > 0
++            || pf.livestream_downrank_score.unwrap_or(0.0) > 0.0
++        {
+             parts.push("📺 <b>Livestream (pf)</b>".to_string());
+             if pf.livestream_ban_expiry.unwrap_or(0) > 0 {
+-                parts.push(format!("Ban Expiry: {}", chrono::DateTime::from_timestamp_millis(pf.livestream_ban_expiry.unwrap()).unwrap().format("%Y-%m-%d %H:%M")));
++                parts.push(format!(
++                    "Ban Expiry: {}",
++                    chrono::DateTime::from_timestamp_millis(pf.livestream_ban_expiry.unwrap())
++                        .unwrap()
++                        .format("%Y-%m-%d %H:%M")
++                ));
+             }
+             if pf.livestream_downrank_score.unwrap_or(0.0) > 0.0 {
+-                parts.push(format!("Downrank Score: {:.2}", pf.livestream_downrank_score.unwrap()));
++                parts.push(format!(
++                    "Downrank Score: {:.2}",
++                    pf.livestream_downrank_score.unwrap()
++                ));
+             }
+             parts.push(String::new());
+         }
+@@ -449,7 +691,16 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
+     // Socials
+     parts.push("🌐 <b>Socials</b>".to_string());
+     if !social_links.is_empty() {
+-        let social_parts: Vec<String> = social_links.iter().map(|(name, url)| format!("<a href=\"{}\">{}</a>", url.as_ref().unwrap_or(&"".to_string()), name)).collect();
++        let social_parts: Vec<String> = social_links
++            .iter()
++            .map(|(name, url)| {
++                format!(
++                    "<a href=\"{}\">{}</a>",
++                    url.as_ref().unwrap_or(&"".to_string()),
++                    name
++                )
++            })
++            .collect();
+         parts.push(social_parts.join(" | "));
+     } else {
+         parts.push("No social links found.".to_string());
+@@ -468,4 +719,4 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
+     }
+ 
+     (parts.join("\n"), image_url)
+-}
+\ No newline at end of file
++}
+diff --git a/src/main.rs b/src/main.rs
+index 2401cab..167f054 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -32,4 +32,4 @@ async fn main() -> Result<()> {
+     bot::start_bot(bot_token, api_client).await?;
+ 
+     Ok(())
+-}
+\ No newline at end of file
++}
+diff --git a/src/types.rs b/src/types.rs
+index 6821a7d..4df7b28 100644
+--- a/src/types.rs
++++ b/src/types.rs
+@@ -214,8 +214,6 @@ pub struct CreatorInfo {
+     pub sol_balance: Option<f64>,
+ }
+ 
+-
+-
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct PumpFunData {
+     pub mint: Option<String>,
+@@ -269,7 +267,6 @@ pub struct PumpFunData {
+     pub video_uri: Option<String>,
+ }
+ 
+-
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct JupiterTokenData {

@@ -1,0 +1,879 @@
+[2025-09-23T20:25:24] OpenAI Codex v0.0.0 (research preview)
+--------
+workdir: /root/.code/working/telegram_token_bot/branches/code-code-implement-approved-plan
+model: gpt-5-codex
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: medium
+reasoning summaries: auto
+--------
+[2025-09-23T20:25:24] User instructions:
+Context: Goal: augment format_token_data in src/bot.rs (and any helpers) so everything previously displayed remains intact while adding comprehensive pump.fun sections for the remaining fields (media URIs, pools, moderation flags, etc.). Consider splitting work into helper functions, manage message length gracefully, and ensure optional fields render cleanly. You may add tests/fixtures if helpful. Do not delete existing information; only extend.
+
+Agent: Implement the approved plan to expand the Rust Telegram bot so it surfaces every PumpFunData field without removing any existing output. Repository: /root/telegram_token_bot. Key files: src/bot.rs (message formatting), src/types.rs (PumpFunData struct), src/api.rs (fetches pump.fun data). Requirements: maintain existing sections, append new pump.fun sections that expose all remaining fields, keep Telegram-safe HTML formatting, respect 4096-character chunks, and add tests/UX improvements as needed. Provided sample PumpFunData JSON can guide formatting. Run cargo fmt/clippy/test before finishing.
+
+[2025-09-23T20:25:39] thinking
+
+**Evaluating read-only sandbox constraints**
+[2025-09-23T20:25:39] exec bash -lc pwd in /root/.code/working/telegram_token_bot/branches/code-code-implement-approved-plan/.
+[2025-09-23T20:25:39] bash -lc pwd succeeded in 12ms:
+/root/.code/working/telegram_token_bot/branches/code-code-implement-approved-plan
+[2025-09-23T20:25:39] tokens used: 6,723
+
+[2025-09-23T20:25:41] thinking
+
+**Checking git status**
+[2025-09-23T20:25:41] exec bash -lc 'git status -sb' in /root/.code/working/telegram_token_bot/branches/code-code-implement-approved-plan/.
+[2025-09-23T20:25:41] bash -lc 'git status -sb' succeeded in 13ms:
+## code-code-implement-approved-plan
+[2025-09-23T20:25:41] tokens used: 13,561
+
+[2025-09-23T20:25:43] thinking
+
+**Inspecting source files**
+[2025-09-23T20:25:44] exec bash -lc ls in /root/.code/working/telegram_token_bot/branches/code-code-implement-approved-plan/.
+[2025-09-23T20:25:44] bash -lc ls succeeded in 13ms:
+Cargo.lock
+Cargo.toml
+README.md
+README_RUST.md
+requirements.txt
+s.py
+src
+telegram_bot.py
+[2025-09-23T20:25:44] tokens used: 13,819
+
+[2025-09-23T20:25:47] thinking
+
+**Browsing source code**
+[2025-09-23T20:25:47] exec bash -lc 'ls src' in /root/.code/working/telegram_token_bot/branches/code-code-implement-approved-plan/.
+[2025-09-23T20:25:47] bash -lc 'ls src' succeeded in 11ms:
+api.rs
+bot.rs
+bot.rs.backup
+main.rs
+types.rs
+[2025-09-23T20:25:47] tokens used: 14,060
+
+[2025-09-23T20:25:48] thinking
+
+**Identifying missing context**
+[2025-09-23T20:25:49] exec bash -lc "sed -n '1,200p' src/bot.rs" in /root/.code/working/telegram_token_bot/branches/code-code-implement-approved-plan/.
+[2025-09-23T20:25:49] bash -lc "sed -n '1,200p' src/bot.rs" succeeded in 11ms:
+use crate::api::ApiClient;
+use crate::types::*;
+use anyhow::Result;
+use regex::Regex;
+use std::sync::Arc;
+use std::time::Instant;
+use teloxide::{prelude::*, utils::html};
+
+pub async fn start_bot(bot_token: String, api_client: ApiClient) -> Result<()> {
+    let bot = Bot::new(bot_token);
+    let api_client = Arc::new(api_client);
+
+    teloxide::repl(bot, move |bot: Bot, msg: Message| {
+        let api_client = Arc::clone(&api_client);
+        async move {
+            handle_message(bot, msg, api_client).await
+        }
+    })
+    .await;
+
+[2025-09-23T20:25:49] tokens used: 14,399
+
+[2025-09-23T20:25:50] thinking
+
+**Continuing exploration**
+[2025-09-23T20:25:51] exec bash -lc "sed -n '200,400p' src/bot.rs" in /root/.code/working/telegram_token_bot/branches/code-code-implement-approved-plan/.
+[2025-09-23T20:25:51] bash -lc "sed -n '200,400p' src/bot.rs" succeeded in 10ms:
+
+    // Default values
+    let mut name = "Unknown".to_string();
+    let mut symbol = "N/A".to_string();
+    let mut description = "".to_string();
+    let mut image_url: Option<String> = None;
+    let mut social_links = std::collections::HashMap::new();
+
+    // Extract from Helius Metadata if available
+    if let Some(metadata) = &data.metadata {
+        if let Some(on_chain) = &metadata.on_chain_metadata {
+            if let Some(meta) = &on_chain.metadata {
+                name = meta.data.name.clone().unwrap_or(name).trim().to_string();
+                symbol = meta.data.symbol.clone().unwrap_or(symbol).trim().to_string();
+            }
+        }
+        if let Some(off_chain) = &metadata.off_chain_metadata {
+            if let Some(meta) = &off_chain.metadata {
+                name = meta.name.clone().unwrap_or(name);
+                symbol = meta.symbol.clone().unwrap_or(symbol);
+[2025-09-23T20:25:51] tokens used: 17,125
+
+[2025-09-23T20:25:53] thinking
+
+**Proceeding with continuation**
+[2025-09-23T20:25:53] exec bash -lc "sed -n '400,800p' src/bot.rs" in /root/.code/working/telegram_token_bot/branches/code-code-implement-approved-plan/.
+[2025-09-23T20:25:53] bash -lc "sed -n '400,800p' src/bot.rs" succeeded in 11ms:
+        }
+        if let Some(assoc_bonding_curve) = &pf.associated_bonding_curve {
+            parts.push(format!("Assoc. Address: <code>{}</code>", assoc_bonding_curve));
+        }
+        parts.push(String::new());
+    }
+
+    // Status (pf)
+    if let Some(pf) = &data.pump_fun_data {
+        parts.push("🚦 <b>Status (pf)</b>".to_string());
+        let mut status_parts = Vec::new();
+        status_parts.push(if pf.is_currently_live.unwrap_or(false) { "🟢 Live" } else { "🔴 Not Live" }.to_string());
+        status_parts.push(if pf.complete.unwrap_or(false) { "✅ Complete" } else { "❌ Incomplete" }.to_string());
+        if pf.is_banned.unwrap_or(false) { status_parts.push("🚫 Banned".to_string()); }
+        if pf.nsfw.unwrap_or(false) { status_parts.push("🔞 NSFW".to_string()); }
+        if pf.hidden.unwrap_or(false) { status_parts.push("Hidden".to_string()); }
+        if pf.show_name.unwrap_or(false) { status_parts.push("Show Name".to_string()); }
+        if pf.inverted.unwrap_or(false) { status_parts.push("Inverted".to_string()); }
+        if pf.initialized.unwrap_or(false) { status_parts.push("Initialized".to_string()); }
+        parts.push(status_parts.join(" | "));
+[2025-09-23T20:25:53] tokens used: 23,108
+
+[2025-09-23T20:25:56] thinking
+
+**Reviewing large file and types**
+[2025-09-23T20:25:56] exec bash -lc "sed -n '1,200p' src/types.rs" in /root/.code/working/telegram_token_bot/branches/code-code-implement-approved-plan/.
+[2025-09-23T20:25:56] bash -lc "sed -n '1,200p' src/types.rs" succeeded in 11ms:
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenData {
+    pub mint_address: String,
+    pub metadata: Option<MetadataResponse>,
+    pub dexscreener_data: Option<DexScreenerData>,
+    pub holders: Option<HoldersData>,
+    pub supply_info: Option<SupplyInfo>,
+    pub creator_info: Option<CreatorInfo>,
+    pub pump_fun_data: Option<PumpFunData>,
+    pub jupiter_data: Option<JupiterTokenData>,
+    pub dexscreener_orders_data: Option<Vec<DexScreenerOrder>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DexScreenerOrder {
+    pub r#type: String,
+    pub status: String,
+[2025-09-23T20:25:56] tokens used: 27,817
+
+[2025-09-23T20:25:58] thinking
+
+**Inspecting PumpFunData struct**
+[2025-09-23T20:25:59] exec bash -lc 'rg -n "PumpFunData" -n src/types.rs' in /root/.code/working/telegram_token_bot/branches/code-code-implement-approved-plan/.
+[2025-09-23T20:25:59] bash -lc 'rg -n "PumpFunData" -n src/types.rs' exited 127 in 11ms:
+ERROR
+bash: line 1: rg: command not found
+[2025-09-23T20:25:59] tokens used: 29,595
+
+[2025-09-23T20:26:01] thinking
+
+**Checking for alternative search tools**
+[2025-09-23T20:26:01] exec bash -lc 'grep -n "PumpFunData" -n src/types.rs' in /root/.code/working/telegram_token_bot/branches/code-code-implement-approved-plan/.
+[2025-09-23T20:26:01] bash -lc 'grep -n "PumpFunData" -n src/types.rs' succeeded in 11ms:
+11:    pub pump_fun_data: Option<PumpFunData>,
+220:pub struct PumpFunData {
+[2025-09-23T20:26:01] tokens used: 32,625
+
+[2025-09-23T20:26:03] thinking
+
+**Requesting additional input**
+[2025-09-23T20:26:03] exec bash -lc "sed -n '220,520p' src/types.rs" in /root/.code/working/telegram_token_bot/branches/code-code-implement-approved-plan/.
+[2025-09-23T20:26:03] bash -lc "sed -n '220,520p' src/types.rs" succeeded in 10ms:
+pub struct PumpFunData {
+    pub mint: Option<String>,
+    pub name: Option<String>,
+    pub symbol: Option<String>,
+    pub description: Option<String>,
+    pub image_uri: Option<String>,
+    pub metadata_uri: Option<String>,
+    pub twitter: Option<String>,
+    pub telegram: Option<String>,
+    pub website: Option<String>,
+    pub bonding_curve: Option<String>,
+    pub associated_bonding_curve: Option<String>,
+    pub creator: Option<String>,
+    pub created_timestamp: Option<i64>,
+    pub last_trade_timestamp: Option<i64>,
+    pub ath_market_cap_timestamp: Option<i64>,
+    pub king_of_the_hill_timestamp: Option<i64>,
+    pub total_supply: Option<u64>,
+    pub market_cap: Option<f64>,
+    pub usd_market_cap: Option<f64>,
+[2025-09-23T20:26:03] tokens used: 32,966
+
+[2025-09-23T20:26:12] thinking
+
+**Considering planning approach**
+[2025-09-23T20:26:13] exec bash -lc "sed -n '1,200p' src/bot.rs.backup" in /root/.code/working/telegram_token_bot/branches/code-code-implement-approved-plan/.
+[2025-09-23T20:26:13] bash -lc "sed -n '1,200p' src/bot.rs.backup" succeeded in 24ms:
+use crate::api::ApiClient;
+use crate::types::*;
+use anyhow::Result;
+use regex::Regex;
+use std::sync::Arc;
+use teloxide::{prelude::*, utils::html};
+
+pub async fn start_bot(bot_token: String, api_client: ApiClient) -> Result<()> {
+    let bot = Bot::new(bot_token);
+    let api_client = Arc::new(api_client);
+
+    teloxide::repl(bot, move |bot: Bot, msg: Message| {
+        let api_client = Arc::clone(&api_client);
+        async move {
+            handle_message(bot, msg, api_client).await
+        }
+    })
+    .await;
+
+    Ok(())
+[2025-09-23T20:26:13] tokens used: 35,191
+
+[2025-09-23T20:26:30] thinking
+
+**Reviewing PumpFunData fields for display**
+
+I'm analyzing the many fields in PumpFunData to ensure all relevant ones appear in the existing `format_token_data` output. I see some are already included across sections like Stats, Timestamps, Engagement, Bonding curve, Status, System info, and Livestream, but others like `creator`, `usd_market_cap`, `raydium_pool`, and media URIs are missing. I’m also noting the inconsistency with market cap naming tied to Dexscreener data versus PumpFunData. Next, I’ll consider gathering sample data to inform how best to incorporate the missing fields.
+[2025-09-23T20:26:31] exec bash -lc 'grep -R "PumpFun" -n' in /root/.code/working/telegram_token_bot/branches/code-code-implement-approved-plan/.
+[2025-09-23T20:26:31] bash -lc 'grep -R "PumpFun" -n' succeeded in 12ms:
+src/api.rs:119:    async fn get_pump_fun_data(&self, mint_address: &str) -> Result<PumpFunData> {
+src/api.rs:129:        let data: PumpFunData = response.json().await?;
+src/types.rs:11:    pub pump_fun_data: Option<PumpFunData>,
+src/types.rs:220:pub struct PumpFunData {
+[2025-09-23T20:26:31] tokens used: 38,395
+
+[2025-09-23T20:27:52] thinking
+
+**Preparing helper function strategy**
+**Designing detailed helper implementations**
+
+I'm mapping out the precise helper functions to format all PumpFunData fields—timestamps, media links, status flags, pools, ownership info, etc.—to fully expose every piece cleanly while preserving existing sections and formatting. I'll assemble these helpers to neatly match the required output structure and avoid duplication.
+**Planning patch for chrono import and pump.fun restructuring**
+
+I’m outlining patch steps to add `use chrono::Utc;` near the top and replace the existing multiple pump.fun section blocks in `format_token_data` with a single call to a new helper that formats all those sections cohesively, also extending metrics to include `usd_market_cap`. This sets the stage for clean, maintainable helper implementation soon.
+[2025-09-23T20:29:48] codex
+**Designing detailed helper implementations**
+
+I'm mapping out the precise helper functions to format all PumpFunData fields—timestamps, media links, status flags, pools, ownership info, etc.—to fully expose every piece cleanly while preserving existing sections and formatting. I'll assemble these helpers to neatly match the required output structure and avoid duplication.
+[2025-09-23T20:29:48] codex
+**Planning patch for chrono import and pump.fun restructuring**
+
+I’m outlining patch steps to add `use chrono::Utc;` near the top and replace the existing multiple pump.fun section blocks in `format_token_data` with a single call to a new helper that formats all those sections cohesively, also extending metrics to include `usd_market_cap`. This sets the stage for clean, maintainable helper implementation soon.
+[2025-09-23T20:29:49] tokens used: 54,546
+
+[2025-09-23T20:31:44] thinking
+
+**Handling read-only environment limitations**
+**Adding comprehensive PumpFun formatting helpers**
+
+I’m constructing detailed helper functions to neatly format all PumpFunData sections, including timestamps, engagement, bonding curve, pools, status, system info, livestream, and media links, carefully adding HTML escaping and avoiding extra blank lines. These helpers will integrate smoothly after the existing formatting function to keep the output organized and clean.
+**Preparing final patch with chrono import and helper integration**
+
+I’m putting together the final code changes to import chrono’s Utc, update format_token_data to call the new PumpFun formatting helpers, and add the newly defined helper functions—all organized to ensure clean integration and avoid trailing blank lines. This will be presented as a patch showing precise code modifications.
+**Integrating pump.fun data and adding formatting helpers**
+
+I’m updating the token formatting function to incorporate the pump.fun data sections—rewriting the metrics output to include new fields, removing old timestamp and engagement blocks, and then adding extensive helper functions after `format_token_data` to format all pump.fun details consistently with proper HTML escaping and timestamp formatting. This will be wrapped as a precise patch for the `src/bot.rs` file.
+**Adding detailed pump.fun formatting helpers and adjusting metrics output**
+
+I prepared a comprehensive patch for `src/bot.rs` that replaces the previous inline pump.fun sections with a new helper function `format_pump_fun_sections`. This helper neatly organizes timestamps, engagement, bonding curve data, pool info, status flags, system info, livestream, and media links with proper HTML escaping and timestamp formatting. The main token formatting now calls this helper to keep code cleaner and consistent. The patch also includes new utility functions for timestamp and media link formatting and adds the necessary chrono Utc import. Since the environment is read-only, I can't apply or test this directly, but here’s the full patch and suggested next steps:
+
+- Updated `src/bot.rs` to:
+  - Import `chrono::Utc` for timestamp formatting.
+  - Revise token data formatting to integrate pump.fun data via `format_pump_fun_sections`.
+  - Remove old repeated pump.fun blocks and replace with a single helper call.
+  - Define `format_pump_fun_sections` and helper functions (`format_pf_timestamp`, `format_timestamp`, `format_media_link`) after `format_token_data`.
+  - Use `html::escape` to sanitize display strings.
+  - Trim trailing blank lines from the generated sections.
+- Left `format_jupiter_data` and other parts intact, just ensured the new helpers fit in cleanly.
+
+**Next steps to verify and finalize:**  
+1. Manually apply the patch below to `src/bot.rs`.  
+2. Run `cargo fmt` to keep formatting consistent.  
+3. Run `cargo clippy` to check for lints.  
+4. Execute existing tests (e.g., `cargo test`) to ensure no regressions.  
+5. Optionally, test the bot’s output formatting in a staging environment.
+
+```diff
+diff --git a/src/bot.rs b/src/bot.rs
+index xxxx..xxxx 100644
+--- a/src/bot.rs
++++ b/src/bot.rs
+@@ -1,8 +1,10 @@
+-use anyhow::Result;
+-use regex::Regex;
++use anyhow::Result;
++use chrono::Utc;
++use regex::Regex;
+@@ -1500,55 +1500,64 @@
+-    parts.push(format!("🧢 <b>MC (pf):</b> ${:.0}", market_cap));
+-    parts.push(format!("Market Cap (SOL): {:.2}", data.pump_fun_data.as_ref().and_then(|pf| pf.market_cap).unwrap_or(0.0)));
+-    parts.push(format!("🔥 <b>ATH (pf):</b> ${:.0}", ath_market_cap));
+-    parts.push(format!("📦 <b>Supply (pf):</b> {}", total_supply_pf));
++    parts.push(format!("🧢 <b>MC (pf):</b> ${:.0}", market_cap));
++    parts.push(format!(
++        "Market Cap (SOL): {:.2}",
++        data.pump_fun_data
++            .as_ref()
++            .and_then(|pf| pf.market_cap)
++            .unwrap_or(0.0)
++    ));
++    if let Some(pf) = &data.pump_fun_data {
++        if let Some(usd_market_cap) = pf.usd_market_cap {
++            parts.push(format!("🧢 <b>MC (pf USD):</b> ${:.0}", usd_market_cap));
++        }
++    }
++    parts.push(format!("🔥 <b>ATH (pf):</b> ${:.0}", ath_market_cap));
++    parts.push(format!("📦 <b>Supply (pf):</b> {}", total_supply_pf));
+@@ -1555,68 +1564,260 @@
+-    if let Some(pf) = &data.pump_fun_data {
+-        parts.push("🗓️ <b>Timestamps (pf)</b>".to_string());
+-        if let Some(created_ts) = pf.created_timestamp {
+-            parts.push(format!("<b>Created:</b> {}", chrono::DateTime::from_timestamp_millis(created_ts).unwrap().format("%Y-%m-%d %H:%M")));
+-        }
+-        if let Some(last_trade_ts) = pf.last_trade_timestamp {
+-            parts.push(format!("<b>Last Trade:</b> {}", chrono::DateTime::from_timestamp_millis(last_trade_ts).unwrap().format("%Y-%m-%d %H:%M")));
+-        }
+-        if let Some(ath_ts) = pf.ath_market_cap_timestamp {
+-            parts.push(format!("<b>ATH Date:</b> {}", chrono::DateTime::from_timestamp_millis(ath_ts).unwrap().format("%Y-%m-%d %H:%M")));
+-        }
+-        if let Some(koth_ts) = pf.king_of_the_hill_timestamp {
+-            if koth_ts > 0 {
+-                parts.push(format!("<b>King of Hill:</b> {}", chrono::DateTime::from_timestamp_millis(koth_ts).unwrap().format("%Y-%m-%d %H:%M")));
+-            }
+-        }
+-        parts.push(String::new());
+-    }
+-
+-    // Engagement (pf)
+-    if let Some(pf) = &data.pump_fun_data {
+-        parts.push("💬 <b>Engagement (pf)</b>".to_string());
+-        let replies = pf.reply_count.unwrap_or(0);
+-        let participants = pf.num_participants.unwrap_or(0);
+-        parts.push(format!("Replies: {} | Participants: {}", replies, participants));
+-        parts.push(String::new());
+-    }
+-
+-    // Bonding Curve (pf)
+-    if let Some(pf) = &data.pump_fun_data {
+-        parts.push("🎢 <b>Bonding Curve (pf)</b>".to_string());
+-        let real_sol = pf.real_sol_reserves.unwrap_or(0.0) / 1e9;
+-        let virtual_sol = pf.virtual_sol_reserves.unwrap_or(0.0) / 1e9;
+-        let virtual_tokens = pf.virtual_token_reserves.unwrap_or(0.0);
+-        parts.push(format!("Real SOL: {:.2} | Virtual SOL: {:.2}", real_sol, virtual_sol));
+-        parts.push(format!("Virtual Tokens: {:.0}", virtual_tokens));
+-        let real_tokens = pf.real_token_reserves.unwrap_or(0.0);
+-        parts.push(format!("Real Tokens: {:.0}", real_tokens));
+-        if let Some(bonding_curve_addr) = &pf.bonding_curve {
+-            parts.push(format!("Address: <code>{}</code>", bonding_curve_addr));
+-        }
+-        if let Some(assoc_bonding_curve) = &pf.associated_bonding_curve {
+-            parts.push(format!("Assoc. Address: <code>{}</code>", assoc_bonding_curve));
+-        }
+-        parts.push(String::new());
+-    }
+-
+-    // Status (pf)
+-    if let Some(pf) = &data.pump_fun_data {
+-        parts.push("🚦 <b>Status (pf)</b>".to_string());
+-        let mut status_parts = Vec::new();
+-        status_parts.push(if pf.is_currently_live.unwrap_or(false) { "🟢 Live" } else { "🔴 Not Live" }.to_string());
+-        status_parts.push(if pf.complete.unwrap_or(false) { "✅ Complete" } else { "❌ Incomplete" }.to_string());
+-        if pf.is_banned.unwrap_or(false) { status_parts.push("🚫 Banned".to_string()); }
+-        if pf.nsfw.unwrap_or(false) { status_parts.push("🔞 NSFW".to_string()); }
+-        if pf.hidden.unwrap_or(false) { status_parts.push("Hidden".to_string()); }
+-        if pf.show_name.unwrap_or(false) { status_parts.push("Show Name".to_string()); }
+-        if pf.inverted.unwrap_or(false) { status_parts.push("Inverted".to_string()); }
+-        if pf.initialized.unwrap_or(false) { status_parts.push("Initialized".to_string()); }
+-        parts.push(status_parts.join(" | "));
+-        parts.push(String::new());
+-    }
+-
+-    // System Info (pf)
+-    if let Some(pf) = &data.pump_fun_data {
+-        parts.push("⚙️ <b>System Info (pf)</b>".to_string());
+-        if let Some(prog) = &pf.program { parts.push(format!("Program: {}", prog)); }
+-        if let Some(plat) = &pf.platform { parts.push(format!("Platform: {}", plat)); }
+-        if let Some(market) = &pf.market_id { parts.push(format!("Market ID: {}", market)); }
+-        if let Some(ts) = pf.last_reply { parts.push(format!("Last Reply: {}", chrono::DateTime::from_timestamp_millis(ts).unwrap().format("%Y-%m-%d %H:%M"))); }
+-        if let Some(ts) = pf.updated_at { parts.push(format!("Updated At: {}", chrono::DateTime::from_timestamp_millis(ts).unwrap().format("%Y-%m-%d %H:%M"))); }
+-        if pf.hide_banner.unwrap_or(false) { parts.push("Banner Hidden: ✅".to_string()); }
+-        parts.push(String::new());
+-    }
+-
+-    // Livestream (pf)
+-    if let Some(pf) = &data.pump_fun_data {
+-        if pf.livestream_ban_expiry.unwrap_or(0) > 0 || pf.livestream_downrank_score.unwrap_or(0.0) > 0
+[2025-09-23T20:38:41] codex
+**Adding comprehensive PumpFun formatting helpers**
+
+I’m constructing detailed helper functions to neatly format all PumpFunData sections, including timestamps, engagement, bonding curve, pools, status, system info, livestream, and media links, carefully adding HTML escaping and avoiding extra blank lines. These helpers will integrate smoothly after the existing formatting function to keep the output organized and clean.
+[2025-09-23T20:38:41] codex
+**Preparing final patch with chrono import and helper integration**
+
+I’m putting together the final code changes to import chrono’s Utc, update format_token_data to call the new PumpFun formatting helpers, and add the newly defined helper functions—all organized to ensure clean integration and avoid trailing blank lines. This will be presented as a patch showing precise code modifications.
+[2025-09-23T20:38:41] codex
+**Integrating pump.fun data and adding formatting helpers**
+
+I’m updating the token formatting function to incorporate the pump.fun data sections—rewriting the metrics output to include new fields, removing old timestamp and engagement blocks, and then adding extensive helper functions after `format_token_data` to format all pump.fun details consistently with proper HTML escaping and timestamp formatting. This will be wrapped as a precise patch for the `src/bot.rs` file.
+[2025-09-23T20:38:41] codex
+**Adding detailed pump.fun formatting helpers and adjusting metrics output**
+
+I prepared a comprehensive patch for `src/bot.rs` that replaces the previous inline pump.fun sections with a new helper function `format_pump_fun_sections`. This helper neatly organizes timestamps, engagement, bonding curve data, pool info, status flags, system info, livestream, and media links with proper HTML escaping and timestamp formatting. The main token formatting now calls this helper to keep code cleaner and consistent. The patch also includes new utility functions for timestamp and media link formatting and adds the necessary chrono Utc import. Since the environment is read-only, I can't apply or test this directly, but here’s the full patch and suggested next steps:
+
+- Updated `src/bot.rs` to:
+  - Import `chrono::Utc` for timestamp formatting.
+  - Revise token data formatting to integrate pump.fun data via `format_pump_fun_sections`.
+  - Remove old repeated pump.fun blocks and replace with a single helper call.
+  - Define `format_pump_fun_sections` and helper functions (`format_pf_timestamp`, `format_timestamp`, `format_media_link`) after `format_token_data`.
+  - Use `html::escape` to sanitize display strings.
+  - Trim trailing blank lines from the generated sections.
+- Left `format_jupiter_data` and other parts intact, just ensured the new helpers fit in cleanly.
+
+**Next steps to verify and finalize:**  
+1. Manually apply the patch below to `src/bot.rs`.  
+2. Run `cargo fmt` to keep formatting consistent.  
+3. Run `cargo clippy` to check for lints.  
+4. Execute existing tests (e.g., `cargo test`) to ensure no regressions.  
+5. Optionally, test the bot’s output formatting in a staging environment.
+
+```diff
+diff --git a/src/bot.rs b/src/bot.rs
+index xxxx..xxxx 100644
+--- a/src/bot.rs
++++ b/src/bot.rs
+@@ -1,8 +1,10 @@
+-use anyhow::Result;
+-use regex::Regex;
++use anyhow::Result;
++use chrono::Utc;
++use regex::Regex;
+@@ -1500,55 +1500,64 @@
+-    parts.push(format!("🧢 <b>MC (pf):</b> ${:.0}", market_cap));
+-    parts.push(format!("Market Cap (SOL): {:.2}", data.pump_fun_data.as_ref().and_then(|pf| pf.market_cap).unwrap_or(0.0)));
+-    parts.push(format!("🔥 <b>ATH (pf):</b> ${:.0}", ath_market_cap));
+-    parts.push(format!("📦 <b>Supply (pf):</b> {}", total_supply_pf));
++    parts.push(format!("🧢 <b>MC (pf):</b> ${:.0}", market_cap));
++    parts.push(format!(
++        "Market Cap (SOL): {:.2}",
++        data.pump_fun_data
++            .as_ref()
++            .and_then(|pf| pf.market_cap)
++            .unwrap_or(0.0)
++    ));
++    if let Some(pf) = &data.pump_fun_data {
++        if let Some(usd_market_cap) = pf.usd_market_cap {
++            parts.push(format!("🧢 <b>MC (pf USD):</b> ${:.0}", usd_market_cap));
++        }
++    }
++    parts.push(format!("🔥 <b>ATH (pf):</b> ${:.0}", ath_market_cap));
++    parts.push(format!("📦 <b>Supply (pf):</b> {}", total_supply_pf));
+@@ -1555,68 +1564,260 @@
+-    if let Some(pf) = &data.pump_fun_data {
+-        parts.push("🗓️ <b>Timestamps (pf)</b>".to_string());
+-        if let Some(created_ts) = pf.created_timestamp {
+-            parts.push(format!("<b>Created:</b> {}", chrono::DateTime::from_timestamp_millis(created_ts).unwrap().format("%Y-%m-%d %H:%M")));
+-        }
+-        if let Some(last_trade_ts) = pf.last_trade_timestamp {
+-            parts.push(format!("<b>Last Trade:</b> {}", chrono::DateTime::from_timestamp_millis(last_trade_ts).unwrap().format("%Y-%m-%d %H:%M")));
+-        }
+-        if let Some(ath_ts) = pf.ath_market_cap_timestamp {
+-            parts.push(format!("<b>ATH Date:</b> {}", chrono::DateTime::from_timestamp_millis(ath_ts).unwrap().format("%Y-%m-%d %H:%M")));
+-        }
+-        if let Some(koth_ts) = pf.king_of_the_hill_timestamp {
+-            if koth_ts > 0 {
+-                parts.push(format!("<b>King of Hill:</b> {}", chrono::DateTime::from_timestamp_millis(koth_ts).unwrap().format("%Y-%m-%d %H:%M")));
+-            }
+-        }
+-        parts.push(String::new());
+-    }
+-
+-    // Engagement (pf)
+-    if let Some(pf) = &data.pump_fun_data {
+-        parts.push("💬 <b>Engagement (pf)</b>".to_string());
+-        let replies = pf.reply_count.unwrap_or(0);
+-        let participants = pf.num_participants.unwrap_or(0);
+-        parts.push(format!("Replies: {} | Participants: {}", replies, participants));
+-        parts.push(String::new());
+-    }
+-
+-    // Bonding Curve (pf)
+-    if let Some(pf) = &data.pump_fun_data {
+-        parts.push("🎢 <b>Bonding Curve (pf)</b>".to_string());
+-        let real_sol = pf.real_sol_reserves.unwrap_or(0.0) / 1e9;
+-        let virtual_sol = pf.virtual_sol_reserves.unwrap_or(0.0) / 1e9;
+-        let virtual_tokens = pf.virtual_token_reserves.unwrap_or(0.0);
+-        parts.push(format!("Real SOL: {:.2} | Virtual SOL: {:.2}", real_sol, virtual_sol));
+-        parts.push(format!("Virtual Tokens: {:.0}", virtual_tokens));
+-        let real_tokens = pf.real_token_reserves.unwrap_or(0.0);
+-        parts.push(format!("Real Tokens: {:.0}", real_tokens));
+-        if let Some(bonding_curve_addr) = &pf.bonding_curve {
+-            parts.push(format!("Address: <code>{}</code>", bonding_curve_addr));
+-        }
+-        if let Some(assoc_bonding_curve) = &pf.associated_bonding_curve {
+-            parts.push(format!("Assoc. Address: <code>{}</code>", assoc_bonding_curve));
+-        }
+-        parts.push(String::new());
+-    }
+-
+-    // Status (pf)
+-    if let Some(pf) = &data.pump_fun_data {
+-        parts.push("🚦 <b>Status (pf)</b>".to_string());
+-        let mut status_parts = Vec::new();
+-        status_parts.push(if pf.is_currently_live.unwrap_or(false) { "🟢 Live" } else { "🔴 Not Live" }.to_string());
+-        status_parts.push(if pf.complete.unwrap_or(false) { "✅ Complete" } else { "❌ Incomplete" }.to_string());
+-        if pf.is_banned.unwrap_or(false) { status_parts.push("🚫 Banned".to_string()); }
+-        if pf.nsfw.unwrap_or(false) { status_parts.push("🔞 NSFW".to_string()); }
+-        if pf.hidden.unwrap_or(false) { status_parts.push("Hidden".to_string()); }
+-        if pf.show_name.unwrap_or(false) { status_parts.push("Show Name".to_string()); }
+-        if pf.inverted.unwrap_or(false) { status_parts.push("Inverted".to_string()); }
+-        if pf.initialized.unwrap_or(false) { status_parts.push("Initialized".to_string()); }
+-        parts.push(status_parts.join(" | "));
+-        parts.push(String::new());
+-    }
+-
+-    // System Info (pf)
+-    if let Some(pf) = &data.pump_fun_data {
+-        parts.push("⚙️ <b>System Info (pf)</b>".to_string());
+-        if let Some(prog) = &pf.program { parts.push(format!("Program: {}", prog)); }
+-        if let Some(plat) = &pf.platform { parts.push(format!("Platform: {}", plat)); }
+-        if let Some(market) = &pf.market_id { parts.push(format!("Market ID: {}", market)); }
+-        if let Some(ts) = pf.last_reply { parts.push(format!("Last Reply: {}", chrono::DateTime::from_timestamp_millis(ts).unwrap().format("%Y-%m-%d %H:%M"))); }
+-        if let Some(ts) = pf.updated_at { parts.push(format!("Updated At: {}", chrono::DateTime::from_timestamp_millis(ts).unwrap().format("%Y-%m-%d %H:%M"))); }
+-        if pf.hide_banner.unwrap_or(false) { parts.push("Banner Hidden: ✅".to_string()); }
+-        parts.push(String::new());
+-    }
+-
+-    // Livestream (pf)
+-    if let Some(pf) = &data.pump_fun_data {
+-        if pf.livestream_ban_expiry.unwrap_or(0) > 0 || pf.livestream_downrank_score.unwrap_or(0.0) > 0
+[2025-09-23T20:38:41] codex
+
+Read-only sandbox prevented me from updating the repository directly, so here’s the full patch to apply manually.
+
+```diff
+diff --git a/src/bot.rs b/src/bot.rs
+index 26a6fbf..3e77e5d 100644
+--- a/src/bot.rs
++++ b/src/bot.rs
+@@
+-use crate::api::ApiClient;
+-use crate::types::*;
+-use anyhow::Result;
+-use regex::Regex;
++use crate::api::ApiClient;
++use crate::types::*;
++use anyhow::Result;
++use chrono::Utc;
++use regex::Regex;
+@@
+-    let ath_market_cap = data.pump_fun_data.as_ref().and_then(|pf| pf.ath_market_cap).unwrap_or(0.0);
+-    let total_supply_pf = data.pump_fun_data.as_ref().and_then(|pf| pf.total_supply).unwrap_or(0);
+-
+-    parts.push(format!("🧢 <b>MC (pf):</b> ${:.0}", market_cap));
+-    parts.push(format!("Market Cap (SOL): {:.2}", data.pump_fun_data.as_ref().and_then(|pf| pf.market_cap).unwrap_or(0.0)));
+-    parts.push(format!("🔥 <b>ATH (pf):</b> ${:.0}", ath_market_cap));
+-    parts.push(format!("📦 <b>Supply (pf):</b> {}", total_supply_pf));
++    let ath_market_cap = data
++        .pump_fun_data
++        .as_ref()
++        .and_then(|pf| pf.ath_market_cap)
++        .unwrap_or(0.0);
++    let total_supply_pf = data
++        .pump_fun_data
++        .as_ref()
++        .and_then(|pf| pf.total_supply)
++        .unwrap_or(0);
++
++    parts.push(format!("🧢 <b>MC (pf):</b> ${:.0}", market_cap));
++    parts.push(format!(
++        "Market Cap (SOL): {:.2}",
++        data.pump_fun_data
++            .as_ref()
++            .and_then(|pf| pf.market_cap)
++            .unwrap_or(0.0)
++    ));
++    if let Some(pf) = &data.pump_fun_data {
++        if let Some(usd_market_cap) = pf.usd_market_cap {
++            parts.push(format!("🧢 <b>MC (pf USD):</b> ${:.0}", usd_market_cap));
++        }
++    }
++    parts.push(format!("🔥 <b>ATH (pf):</b> ${:.0}", ath_market_cap));
++    parts.push(format!("📦 <b>Supply (pf):</b> {}", total_supply_pf));
+@@
+-    // Timestamps (pf)
+-    if let Some(pf) = &data.pump_fun_data {
+-        parts.push("🗓️ <b>Timestamps (pf)</b>".to_string());
+-        if let Some(created_ts) = pf.created_timestamp {
+-            parts.push(format!(
+-                "<b>Created:</b> {}",
+-                chrono::DateTime::from_timestamp_millis(created_ts)
+-                    .unwrap()
+-                    .format("%Y-%m-%d %H:%M")
+-            ));
+-        }
+-        if let Some(last_trade_ts) = pf.last_trade_timestamp {
+-            parts.push(format!(
+-                "<b>Last Trade:</b> {}",
+-                chrono::DateTime::from_timestamp_millis(last_trade_ts)
+-                    .unwrap()
+-                    .format("%Y-%m-%d %H:%M")
+-            ));
+-        }
+-        if let Some(ath_ts) = pf.ath_market_cap_timestamp {
+-            parts.push(format!(
+-                "<b>ATH Date:</b> {}",
+-                chrono::DateTime::from_timestamp_millis(ath_ts)
+-                    .unwrap()
+-                    .format("%Y-%m-%d %H:%M")
+-            ));
+-        }
+-        if let Some(koth_ts) = pf.king_of_the_hill_timestamp {
+-            if koth_ts > 0 {
+-                parts.push(format!(
+-                    "<b>King of Hill:</b> {}",
+-                    chrono::DateTime::from_timestamp_millis(koth_ts)
+-                        .unwrap()
+-                        .format("%Y-%m-%d %H:%M")
+-                ));
+-            }
+-        }
+-        parts.push(String::new());
+-    }
+-
+-    // Engagement (pf)
+-    if let Some(pf) = &data.pump_fun_data {
+-        parts.push("💬 <b>Engagement (pf)</b>".to_string());
+-        let replies = pf.reply_count.unwrap_or(0);
+-        let participants = pf.num_participants.unwrap_or(0);
+-        parts.push(format!("Replies: {} | Participants: {}", replies, participants));
+-        parts.push(String::new());
+-    }
+-
+-    // Bonding Curve (pf)
+-    if let Some(pf) = &data.pump_fun_data {
+-        parts.push("🎢 <b>Bonding Curve (pf)</b>".to_string());
+-        let real_sol = pf.real_sol_reserves.unwrap_or(0.0) / 1e9;
+-        let virtual_sol = pf.virtual_sol_reserves.unwrap_or(0.0) / 1e9;
+-        let virtual_tokens = pf.virtual_token_reserves.unwrap_or(0.0);
+-        parts.push(format!(
+-            "Real SOL: {:.2} | Virtual SOL: {:.2}",
+-            real_sol, virtual_sol
+-        ));
+-        parts.push(format!("Virtual Tokens: {:.0}", virtual_tokens));
+-        let real_tokens = pf.real_token_reserves.unwrap_or(0.0);
+-        parts.push(format!("Real Tokens: {:.0}", real_tokens));
+-        if let Some(bonding_curve_addr) = &pf.bonding_curve {
+-            parts.push(format!("Address: <code>{}</code>", bonding_curve_addr));
+-        }
+-        if let Some(assoc_bonding_curve) = &pf.associated_bonding_curve {
+-            parts.push(format!(
+-                "Assoc. Address: <code>{}</code>",
+-                assoc_bonding_curve
+-            ));
+-        }
+-        parts.push(String::new());
+-    }
+-
+-    // Status (pf)
+-    if let Some(pf) = &data.pump_fun_data {
+-        parts.push("🚦 <b>Status (pf)</b>".to_string());
+-        let mut status_parts = Vec::new();
+-        status_parts.push(
+-            if pf.is_currently_live.unwrap_or(false) {
+-                "🟢 Live"
+-            } else {
+-                "🔴 Not Live"
+-            }
+-            .to_string(),
+-        );
+-        status_parts.push(
+-            if pf.complete.unwrap_or(false) {
+-                "✅ Complete"
+-            } else {
+-                "❌ Incomplete"
+-            }
+-            .to_string(),
+-        );
+-        if pf.is_banned.unwrap_or(false) {
+-            status_parts.push("🚫 Banned".to_string());
+-        }
+-        if pf.nsfw.unwrap_or(false) {
+-            status_parts.push("🔞 NSFW".to_string());
+-        }
+-        if pf.hidden.unwrap_or(false) {
+-            status_parts.push("Hidden".to_string());
+-        }
+-        if pf.show_name.unwrap_or(false) {
+-            status_parts.push("Show Name".to_string());
+-        }
+-        if pf.inverted.unwrap_or(false) {
+-            status_parts.push("Inverted".to_string());
+-        }
+-        if pf.initialized.unwrap_or(false) {
+-            status_parts.push("Initialized".to_string());
+-        }
+-        parts.push(status_parts.join(" | "));
+-        parts.push(String::new());
+-    }
+-
+-    // System Info (pf)
+-    if let Some(pf) = &data.pump_fun_data {
+-        parts.push("⚙️ <b>System Info (pf)</b>".to_string());
+-        if let Some(prog) = &pf.program {
+-            parts.push(format!("Program: {}", prog));
+-        }
+-        if let Some(plat) = &pf.platform {
+-            parts.push(format!("Platform: {}", plat));
+-        }
+-        if let Some(market) = &pf.market_id {
+-            parts.push(format!("Market ID: {}", market));
+-        }
+-        if let Some(ts) = pf.last_reply {
+-            parts.push(format!(
+-                "Last Reply: {}",
+-                chrono::DateTime::from_timestamp_millis(ts)
+-                    .unwrap()
+-                    .format("%Y-%m-%d %H:%M")
+-            ));
+-        }
+-        if let Some(ts) = pf.updated_at {
+-            parts.push(format!(
+-                "Updated At: {}",
+-                chrono::DateTime::from_timestamp_millis(ts)
+-                    .unwrap()
+-                    .format("%Y-%m-%d %H:%M")
+-            ));
+-        }
+-        if pf.hide_banner.unwrap_or(false) {
+-            parts.push("Banner Hidden: ✅".to_string());
+-        }
+-        parts.push(String::new());
+-    }
+-
+-    // Livestream (pf)
+-    if let Some(pf) = &data.pump_fun_data {
+-        if pf.livestream_ban_expiry.unwrap_or(0) > 0
+-            || pf.livestream_downrank_score.unwrap_or(0.0) > 0.0
+-        {
+-            parts.push("📺 <b>Livestream (pf)</b>".to_string());
+-            if pf.livestream_ban_expiry.unwrap_or(0) > 0 {
+-                parts.push(format!(
+-                    "Ban Expiry: {}",
+-                    chrono::DateTime::from_timestamp_millis(pf.livestream_ban_expiry.unwrap())
+-                        .unwrap()
+-                        .format("%Y-%m-%d %H:%M")
+-                ));
+-            }
+-            if pf.livestream_downrank_score.unwrap_or(0.0) > 0.0 {
+-                parts.push(format!(
+-                    "Downrank Score: {:.2}",
+-                    pf.livestream_downrank_score.unwrap()
+-                ));
+-            }
+-            parts.push(String::new());
+-        }
+-    }
++    if let Some(pf) = &data.pump_fun_data {
++        parts.extend(format_pump_fun_sections(pf));
++    }
+@@
+-    (parts.join("\n"), image_url)
+-}
++    (parts.join("\n"), image_url)
++}
++
++fn format_pump_fun_sections(pf: &PumpFunData) -> Vec<String> {
++    let mut parts = Vec::new();
++
++    let mut timestamp_lines = Vec::new();
++    if let Some(line) = format_pf_timestamp("Created", pf.created_timestamp) {
++        timestamp_lines.push(line);
++    }
++    if let Some(line) = format_pf_timestamp("Last Trade", pf.last_trade_timestamp) {
++        timestamp_lines.push(line);
++    }
++    if let Some(line) = format_pf_timestamp("ATH Date", pf.ath_market_cap_timestamp) {
++        timestamp_lines.push(line);
++    }
++    if let Some(line) = format_pf_timestamp("King of Hill", pf.king_of_the_hill_timestamp) {
++        timestamp_lines.push(line);
++    }
++    if !timestamp_lines.is_empty() {
++        parts.push("🗓️ <b>Timestamps (pf)</b>".to_string());
++        parts.extend(timestamp_lines);
++        parts.push(String::new());
++    }
++
++    let mut engagement_lines = Vec::new();
++    if let Some(replies) = pf.reply_count {
++        engagement_lines.push(format!("Replies: {}", replies));
++    }
++    if let Some(participants) = pf.num_participants {
++        engagement_lines.push(format!("Participants: {}", participants));
++    }
++    if !engagement_lines.is_empty() {
++        parts.push("💬 <b>Engagement (pf)</b>".to_string());
++        parts.push(engagement_lines.join(" | "));
++        parts.push(String::new());
++    }
++
++    if pf.real_sol_reserves.is_some()
++        || pf.virtual_sol_reserves.is_some()
++        || pf.virtual_token_reserves.is_some()
++        || pf.real_token_reserves.is_some()
++        || pf.bonding_curve.is_some()
++        || pf.associated_bonding_curve.is_some()
++    {
++        parts.push("🎢 <b>Bonding Curve (pf)</b>".to_string());
++        let real_sol = pf.real_sol_reserves.unwrap_or(0.0) / 1e9;
++        let virtual_sol = pf.virtual_sol_reserves.unwrap_or(0.0) / 1e9;
++        let virtual_tokens = pf.virtual_token_reserves.unwrap_or(0.0);
++        let real_tokens = pf.real_token_reserves.unwrap_or(0.0);
++        parts.push(format!(
++            "Real SOL: {:.2} | Virtual SOL: {:.2}",
++            real_sol, virtual_sol
++        ));
++        parts.push(format!("Virtual Tokens: {:.0}", virtual_tokens));
++        parts.push(format!("Real Tokens: {:.0}", real_tokens));
++        if let Some(bonding_curve_addr) = &pf.bonding_curve {
++            parts.push(format!(
++                "Address: <code>{}</code>",
++                html::escape(bonding_curve_addr)
++            ));
++        }
++        if let Some(assoc_bonding_curve) = &pf.associated_bonding_curve {
++            parts.push(format!(
++                "Assoc. Address: <code>{}</code>",
++                html::escape(assoc_bonding_curve)
++            ));
++        }
++        parts.push(String::new());
++    }
++
++    let mut pool_lines = Vec::new();
++    if let Some(ray) = &pf.raydium_pool {
++        pool_lines.push(format!(
++            "<b>Raydium Pool:</b> <code>{}</code>",
++            html::escape(ray)
++        ));
++    }
++    if let Some(pump_swap) = &pf.pump_swap_pool {
++        pool_lines.push(format!(
++            "<b>Pump Swap Pool:</b> <code>{}</code>",
++            html::escape(pump_swap)
++        ));
++    }
+[2025-09-23T20:39:25] ERROR: stream error: stream disconnected before completion: Transport error: error decoding response body; retrying 1/5 in 205ms…
+
+[2025-09-23T20:39:29] thinking
+
+**Recognizing read-only environment limitations**
+I’m currently in a read-only workspace (approval policy `never`), so I can’t modify the repository or run `cargo fmt/clippy/test`. Please drop me into a writable session and I’ll happily make the PumpFun output changes and run the requested commands.
+[2025-09-23T20:39:31] tokens used: 68,719

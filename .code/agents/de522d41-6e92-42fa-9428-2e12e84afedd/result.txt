@@ -1,0 +1,322 @@
+I'll help you develop a systematic investigation plan to understand both the Python `app` package and the Rust `telegram_token_bot` crate. Let me create a detailed plan for comprehending this codebase.
+
+Let me start by exploring the overall project structure and dependencies:
+
+Let me continue exploring the Rust crate structure:
+
+Now let me examine the main Python application files to understand the architecture:
+
+Now let me check the main.py file and the Rust main file to understand how these components might interact:
+
+Let me continue reading the main.py file to understand the full architecture:
+
+Now let me examine the Rust main file to understand how these components connect:
+
+Let me also check the Rust bot implementation to understand its functionality:
+
+Now let me look at the Rust API module to understand how it integrates with different services:
+
+Now let me look at the config module in the Python app to understand how these components connect:
+
+Let me also check the management bot to understand the interface:
+
+Now let me look at the userbot manager to understand how it manages userbots:
+
+Let me check the userbot manager:
+
+Let me check the Rust types module to better understand the data structures:
+
+Now I'll update my todo list to mark the first task as completed and continue with the next one:
+
+Let me continue investigating the Python app package architecture by looking at the services and models:
+
+Let me also look at some service files to understand how the architecture works:
+
+Now I'll update the todo to mark the Python app investigation as completed and move to the Rust investigation:
+
+Let me continue analyzing the Rust telegram_token_bot crate:
+
+Now let me check the other Rust files to understand the full structure:
+
+Now I'll update the todo to mark the Rust investigation as completed and move to identifying entry points:
+
+Let me identify the entry points and main execution flows in both components:
+
+Now let me check the Python entry point:
+
+Now let me check the main.py entry point to see how it works:
+
+Let me check the end of the main.py file to see how it's structured:
+
+Now let me update the todo to mark entry points identification as completed and move to mapping data flows:
+
+Based on my analysis of the codebase, I can now map the data flows and integration points between the Python and Rust components:
+
+## Investigation Plan for the Telegram Userbot Manager System
+
+### Overview
+This repository contains two interconnected systems:
+1. **Python App Package**: A comprehensive Telegram bot management system with userbot orchestration, monitoring, and forwarding capabilities
+2. **Rust Telegram Token Bot**: A high-performance Solana token analysis bot
+
+### Architecture Analysis
+
+#### Python App Package (`/app`)
+The Python application follows a modular architecture with several key components:
+
+1. **Entry Point**: `app/runner.py` - Main system orchestrator
+2. **Management Bot**: `app/management_bot.py` - Telegram command interface with UI handlers
+3. **Userbot Manager**: `app/userbot/manager.py` - Manages multiple userbot workers
+4. **Services**: 
+   - `app/services/call_dispatcher.py` - Processes job queues and delegates to userbots
+   - `app/dex.py` - DexScreener API integration
+   - `app/events.py` - Event routing system
+5. **Models**: Database models for bots, groups, tokens, events, etc.
+6. **UI Components**: Interactive keyboards and state management in `app/ui/`
+
+#### Rust Telegram Token Bot (`/telegram_token_bot`)
+The Rust application is a standalone Solana token analysis bot:
+
+1. **Entry Point**: `src/main.rs` - Initializes API client and starts bot
+2. **Bot Handler**: `src/bot.rs` - Processes messages and formats responses
+3. **API Client**: `src/api.rs` - Multi-service API integration (Helius, DexScreener, pump.fun, Jupiter)
+4. **Data Types**: `src/types.rs` - Strongly-typed data structures
+
+### Data Flows
+
+#### Python Application Data Flow:
+1. **Initialization**: `runner.py` initializes all components in order:
+   - Event router
+   - DexScreener service
+   - Scheduler
+   - Userbot manager
+   - Management bot
+   - Call dispatcher
+
+2. **Userbot Operations**:
+   - Userbots listen to specific channels/groups/users
+   - Detect Solana addresses using regex patterns
+   - Send token data to DexScreener for market info
+   - Store detected tokens in database
+   - Track market cap changes and send alerts
+
+3. **Management Interface**:
+   - Admin commands via `/menu` trigger database queries
+   - UI handlers process user actions
+   - Configuration changes update database and worker states
+
+4. **Call Forwarding**:
+   - Source managers detect incoming tokens
+   - Event router processes and validates events
+   - Call dispatcher selects appropriate userbot
+   - Call executor sends messages to target channels
+
+#### Rust Application Data Flow:
+1. **Initialization**: `main.rs` loads config, initializes API client, starts bot
+2. **Message Processing**: `bot.rs` detects contract addresses in messages
+3. **API Integration**: `api.rs` concurrently calls multiple services
+4. **Response Formatting**: `bot.rs` formats comprehensive token data with HTML
+
+### Integration Points
+
+The two systems appear to be **separate and independent** - there are no direct integration points between them:
+
+1. **Python System**: Focuses on userbot management, monitoring, and message forwarding between Telegram groups
+2. **Rust System**: Focuses on Solana token analysis and providing detailed token information via Telegram
+
+They share the common domain of:
+- Telegram bot integration
+- Solana token processing
+- DexScreener API usage
+- Database storage (PostgreSQL/SUPABASE)
+
+### Key Components Analysis
+
+#### Python Models:
+- `BotModel`: Manages userbot records and assignments
+- `CallDispatcher`: Processes job queues and delegates to userbots
+- `UserbotWorker`: Modular architecture with session management, message handling, token monitoring
+
+#### Configuration Files:
+- `.env.example`: Both systems use environment variables for configuration
+- `requirements.txt`: Python dependencies
+- `Cargo.toml`: Rust dependencies
+
+### Potential Areas for Integration
+
+If integration were desired, possible connection points could include:
+1. Using Rust bot's token analysis as data source for Python system's token monitoring
+2. Sharing database connections for consistent token tracking
+3. Coordinating userbot actions based on Rust bot's analysis results
+
+Let me complete the remaining tasks:
+
+Let me review the configuration files and setup procedures:
+
+Now let me check for tests and tooling in both components:
+
+It looks like there are no dedicated test files in the codebase. Let me check for any test-related configuration or tooling:
+
+Now I'll create a comprehensive architecture document summarizing all my findings:
+
+## Comprehensive Architecture Document: Telegram Userbot Manager System
+
+### Overview
+This repository contains two distinct but complementary systems for managing Telegram bots in the context of Solana token analysis and monitoring:
+
+1. **Python App Package** (`/app`): A comprehensive Telegram bot management system with userbot orchestration, monitoring, and forwarding capabilities
+2. **Rust Telegram Token Bot** (`/telegram_token_bot`): A high-performance Solana token analysis bot
+
+Both systems are independent but share a common domain focus on Telegram bot integration and Solana token processing.
+
+### Python App Package Architecture
+
+#### Core Components
+The Python application follows a modular, service-oriented architecture:
+
+1. **System Orchestrator** (`app/runner.py`):
+   - Main entry point that initializes and manages all system components
+   - Coordinates startup/shutdown of services
+   - Handles graceful shutdown with signal handlers
+
+2. **Management Bot** (`app/management_bot.py`):
+   - Interactive Telegram bot for admin control
+   - Provides UI with inline keyboards and FSM states
+   - Handles commands for bot management, scheduling, alerts, monitoring
+
+3. **Userbot Manager** (`app/userbot/manager.py`):
+   - Manages multiple concurrent userbot workers
+   - Handles worker lifecycle (start/stop/restart)
+   - Provides health checks and status monitoring
+
+4. **Service Layer**:
+   - **Call Dispatcher** (`app/services/call_dispatcher.py`): Processes job queues and delegates to userbots
+   - **DexScreener Service** (`app/dex.py`): Integration with market data APIs
+   - **Event Router** (`app/events.py`): Routes and processes incoming events
+
+5. **Database Layer** (`app/db.py`):
+   - PostgreSQL/SUPABASE integration with connection pooling
+   - Async database operations
+
+6. **Data Models** (`app/models/`):
+   - `BotModel`: Userbot session and status management
+   - `GroupModel`: Group configuration and scheduling
+   - `TokenModel`: Token tracking and monitoring
+   - `EventModel`: Event processing and routing
+   - Additional models for notifications, templates, etc.
+
+7. **UI Layer** (`app/ui/`):
+   - Interactive keyboards and FSM state management
+   - Handler modules for different UI sections
+
+#### Data Flow in Python System
+1. **Initialization**: System manager initializes all components in dependency order
+2. **Userbot Operations**: 
+   - Userbots connect to Telegram via Telethon
+   - Monitor configured groups/channels/users
+   - Detect Solana addresses using regex patterns
+   - Process market data via DexScreener API
+   - Store events in database
+3. **Management Interface**:
+   - Admin commands processed via FSM
+   - Database queries update configuration
+   - Real-time updates to worker configurations
+4. **Call Forwarding**:
+   - Source monitoring detects tokens
+   - Event router processes and validates
+   - Call dispatcher selects appropriate userbot
+   - Messages forwarded to target channels
+
+### Rust Telegram Token Bot Architecture
+
+#### Core Components
+The Rust application uses an asynchronous, concurrent design:
+
+1. **Entry Point** (`src/main.rs`):
+   - Environment variable loading
+   - API client initialization
+   - Telegram bot startup using teloxide
+
+2. **Bot Handler** (`src/bot.rs`):
+   - Message processing and contract address detection
+   - Response formatting with HTML markup
+   - Error handling and timing metrics
+
+3. **API Client** (`src/api.rs`):
+   - Concurrent API calls to multiple services (Helius, DexScreener, pump.fun, Jupiter)
+   - Connection pooling and rate limiting
+   - Timeout management
+
+4. **Data Types** (`src/types.rs`):
+   - Strongly-typed data structures for all token information
+   - Comprehensive token metadata, holders, market data
+
+#### Data Flow in Rust System
+1. **Initialization**: Load environment variables, initialize API client
+2. **Message Processing**: Detect contract addresses in incoming messages
+3. **API Integration**: Concurrently query multiple services for token data
+4. **Response Formatting**: Compile comprehensive token information with HTML formatting
+5. **Output**: Send formatted response back to Telegram user
+
+### Configuration and Setup
+
+#### Python System Configuration
+- **Environment Variables** (`.env` file):
+  - Telegram API credentials (API_ID, API_HASH)
+  - Bot tokens (MGMT_BOT_TOKEN)
+  - Admin IDs for authorization
+  - Database connection (SUPABASE_POOLER_URL)
+  - DexScreener API settings
+  - Timezone and scheduling parameters
+
+#### Rust System Configuration
+- **Environment Variables** (`.env` file):
+  - Telegram bot token (BOT_TOKEN)
+  - Helius API key (HELIUS_API_KEY)
+  - Optional pump.fun JWT token
+
+### Performance Characteristics
+
+#### Python System
+- Uses Telethon for Telegram API communication
+- Async/await architecture for concurrency
+- Database connection pooling
+- Modular component architecture for scalability
+
+#### Rust System
+- High-performance async runtime (tokio)
+- Connection pooling and rate limiting
+- Concurrent API calls using async/await
+- Optimized binary with LTO (~8MB release build)
+- Significantly lower memory and CPU usage compared to Python
+
+### Integration Points
+
+The two systems operate independently with no direct integration. However, potential integration opportunities include:
+
+1. **Data Sharing**: The Rust token analysis could enhance the Python system's market data processing
+2. **Shared Database**: Both could utilize shared token tracking data
+3. **Coordinated Actions**: Python management could trigger Rust analysis for detailed token information
+
+### Deployment and Tooling
+
+#### Python System
+- **Dependencies**: Managed via `requirements.txt`
+- **Database**: PostgreSQL/SUPABASE with asyncpg driver
+- **Framework**: Uses aiogram for Telegram bot, Telethon for userbots
+- **Start Command**: `python app/runner.py`
+
+#### Rust System
+- **Dependencies**: Managed via `Cargo.toml`
+- **Framework**: Uses teloxide for Telegram integration
+- **Start Command**: `cargo run --release` (optimized build)
+- **Optimizations**: LTO and panic abort for smaller binary size
+
+### Testing and Tooling
+- No dedicated test files were found in the repository
+- Both systems appear to be in production-focused states
+- Error handling is implemented throughout both systems
+
+### Summary
+
+The repository contains two independently operating systems that serve the Telegram bot and Solana token analysis ecosystem. The Python system provides comprehensive userbot orchestration and management capabilities, while the Rust system provides high-performance token analysis. Both systems demonstrate well-designed architectures for their respective purposes but currently operate independently.
