@@ -1,6 +1,7 @@
 use crate::types::*;
 use anyhow::{anyhow, Result};
 use reqwest::Client;
+use serde::Serialize;
 use serde_json::json;
 use std::env;
 use std::time::Duration;
@@ -9,6 +10,13 @@ use tokio::time::timeout;
 pub struct ApiClient {
     client: Client,
     api_key: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DexPayload {
+    pub pairs: Vec<TokenPair>,
+    pub orders: Vec<DexScreenerOrder>,
+    pub pump_fun: Option<PumpFunData>,
 }
 
 impl ApiClient {
@@ -62,6 +70,24 @@ impl ApiClient {
         };
 
         Ok(token_data)
+    }
+
+    pub async fn fetch_dex_payload(&self, mint_address: &str) -> Result<DexPayload> {
+        let (pairs_res, orders_res, pump_fun_res) = tokio::join!(
+            self.get_dexscreener_data(mint_address),
+            self.get_dexscreener_orders_data("solana", mint_address),
+            self.get_pump_fun_data(mint_address),
+        );
+
+        let pairs = pairs_res?.pairs.unwrap_or_default();
+        let orders = orders_res?;
+        let pump_fun = pump_fun_res.ok();
+
+        Ok(DexPayload {
+            pairs,
+            orders,
+            pump_fun,
+        })
     }
 
     async fn get_token_largest_accounts(&self, mint_address: &str) -> Result<HoldersData> {

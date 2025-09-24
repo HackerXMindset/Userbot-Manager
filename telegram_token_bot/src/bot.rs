@@ -6,9 +6,8 @@ use std::sync::Arc;
 use std::time::Instant;
 use teloxide::{prelude::*, utils::html};
 
-pub async fn start_bot(bot_token: String, api_client: ApiClient) -> Result<()> {
+pub async fn start_bot(bot_token: String, api_client: Arc<ApiClient>) -> Result<()> {
     let bot = Bot::new(bot_token);
-    let api_client = Arc::new(api_client);
 
     teloxide::repl(bot, move |bot: Bot, msg: Message| {
         let api_client = Arc::clone(&api_client);

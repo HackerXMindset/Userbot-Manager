@@ -27,7 +27,10 @@ class Settings(BaseSettings):
     dex_poll_secs: int = Field(default=5, env='DEX_POLL_SECS')
     dex_timeout: int = Field(default=10, env='DEX_TIMEOUT')
     dex_max_retries: int = Field(default=3, env='DEX_MAX_RETRIES')
-    
+
+    # Rust integration
+    rust_analysis_base_url: str = Field(default='http://127.0.0.1:8080', env='RUST_ANALYSIS_BASE_URL')
+
     # Scanner Bot
     scanner_bot_id: Optional[int] = Field(default=None, env='SCANNER_BOT_ID')
     scanner_button_text: str = Field(default='🛰 Just Scanning', env='SCANNER_BUTTON_TEXT')

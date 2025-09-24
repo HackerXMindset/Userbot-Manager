@@ -154,7 +154,6 @@ class CallDispatcher:
                     await self.management_bot.bot.send_message(
                         chat_id=target_chat_id,
                         text=message_content,
-                        parse_mode="Markdown",
                         disable_web_page_preview=True
                     )
                     success = True

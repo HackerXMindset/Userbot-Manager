@@ -7,6 +7,7 @@ from app.db import db
 from app.models.token import TokenModel
 from app.dex import get_dex_service
 from app.services.call_history_service import CallHistoryService
+from app.services.rust_bridge import rust_dex_bridge
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,45 @@ def format_time_diff(start_dt: Optional[datetime]) -> str:
         return f"{minutes}m ago"
     return "Just now"
 
+
+def format_bool(value: Optional[bool]) -> str:
+    if value is None:
+        return "N/A"
+    return "Yes" if value else "No"
+
+
+def format_number(value: Optional[float], decimals: int = 2) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        return f"{float(value):.{decimals}f}"
+    except (ValueError, TypeError):
+        return str(value)
+
+
+def format_int(value: Optional[int]) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        return f"{int(value):,}"
+    except (ValueError, TypeError):
+        return str(value)
+
+
+def format_timestamp_value(timestamp: Optional[int]) -> Dict[str, str]:
+    if not timestamp:
+        return {"ago": "N/A", "iso": "N/A"}
+
+    try:
+        ts_int = int(timestamp)
+        if ts_int > 1_000_000_000_000:
+            ts_int = ts_int // 1000
+        dt = datetime.fromtimestamp(ts_int, tz=timezone.utc)
+    except (ValueError, TypeError, OSError, OverflowError):
+        return {"ago": "N/A", "iso": str(timestamp)}
+
+    return {"ago": format_time_diff(dt), "iso": dt.isoformat()}
+
 class PlaceholderService:
     """Gathers and formats data for template placeholders."""
 
@@ -67,6 +107,12 @@ class PlaceholderService:
             'ath': 'N/A',
             'pair_created_at': 'N/A',
             'dex_id': 'N/A',
+            'dex_pair_chain_id': 'N/A',
+            'dex_pair_dex_id': 'N/A',
+            'dex_pair_url': 'N/A',
+            'dex_pair_address': 'N/A',
+            'dex_pair_market_cap_raw': 'N/A',
+            'dex_pair_fdv_raw': 'N/A',
             'dex_paid': 'N/A',
             'volume_h1': 'N/A',
             'volume_h6': 'N/A',
@@ -95,36 +141,150 @@ class PlaceholderService:
             'price_usd': 'N/A',
             'fdv': 'N/A',
             'liquidity_usd': 'N/A',
+            'liquidity_base': 'N/A',
+            'liquidity_quote': 'N/A',
             'call_history': 'N/A',
+            'dex_info_image_url': 'N/A',
+            'dex_info_header': 'N/A',
+            'dex_info_open_graph': 'N/A',
+            'dex_info_websites': 'N/A',
+            'dex_info_socials': 'N/A',
+            'dex_boosts_active': 'N/A',
+            'pf_mint': 'N/A',
+            'pf_name': 'N/A',
+            'pf_symbol': 'N/A',
+            'pf_description': 'N/A',
+            'pf_image_uri': 'N/A',
+            'pf_metadata_uri': 'N/A',
+            'pf_twitter': 'N/A',
+            'pf_telegram': 'N/A',
+            'pf_website': 'N/A',
+            'pf_bonding_curve': 'N/A',
+            'pf_associated_bonding_curve': 'N/A',
+            'pf_creator': 'N/A',
+            'pf_creator_short': 'N/A',
+            'pf_creator_solscan': 'N/A',
+            'pf_creator_stats': 'N/A',
+            'pf_created_timestamp': 'N/A',
+            'pf_created_timestamp_iso': 'N/A',
+            'pf_created_timestamp_ago': 'N/A',
+            'pf_last_trade_timestamp': 'N/A',
+            'pf_last_trade_timestamp_iso': 'N/A',
+            'pf_last_trade_timestamp_ago': 'N/A',
+            'pf_ath_market_cap_timestamp': 'N/A',
+            'pf_ath_market_cap_timestamp_iso': 'N/A',
+            'pf_ath_market_cap_timestamp_ago': 'N/A',
+            'pf_koth_timestamp': 'N/A',
+            'pf_koth_timestamp_iso': 'N/A',
+            'pf_koth_timestamp_ago': 'N/A',
+            'pf_total_supply': 'N/A',
+            'pf_market_cap_sol': 'N/A',
+            'pf_market_cap_usd': 'N/A',
+            'pf_ath_market_cap': 'N/A',
+            'pf_real_sol_reserves': 'N/A',
+            'pf_virtual_sol_reserves': 'N/A',
+            'pf_virtual_token_reserves': 'N/A',
+            'pf_real_token_reserves': 'N/A',
+            'pf_reply_count': 'N/A',
+            'pf_num_participants': 'N/A',
+            'pf_is_currently_live': 'N/A',
+            'pf_complete': 'N/A',
+            'pf_raydium_pool': 'N/A',
+            'pf_pump_swap_pool': 'N/A',
+            'pf_hidden': 'N/A',
+            'pf_show_name': 'N/A',
+            'pf_nsfw': 'N/A',
+            'pf_inverted': 'N/A',
+            'pf_is_banned': 'N/A',
+            'pf_initialized': 'N/A',
+            'pf_hide_banner': 'N/A',
+            'pf_livestream_ban_expiry': 'N/A',
+            'pf_livestream_ban_expiry_iso': 'N/A',
+            'pf_livestream_ban_expiry_ago': 'N/A',
+            'pf_livestream_downrank_score': 'N/A',
+            'pf_downrank_score': 'N/A',
+            'pf_program': 'N/A',
+            'pf_platform': 'N/A',
+            'pf_market_id': 'N/A',
+            'pf_updated_at': 'N/A',
+            'pf_updated_at_iso': 'N/A',
+            'pf_updated_at_ago': 'N/A',
+            'pf_last_reply': 'N/A',
+            'pf_last_reply_iso': 'N/A',
+            'pf_last_reply_ago': 'N/A',
+            'pf_thumbnail_updated_at': 'N/A',
+            'pf_thumbnail_updated_at_iso': 'N/A',
+            'pf_thumbnail_updated_at_ago': 'N/A',
+            'pf_banner_uri': 'N/A',
+            'pf_thumbnail_uri': 'N/A',
+            'pf_video_uri': 'N/A',
         }
 
-        # Fetch data
-        dex_service = get_dex_service()
+        for i in range(1, 6):
+            placeholders[f'dex_info_website_{i}'] = 'N/A'
+            placeholders[f'dex_info_social_{i}_platform'] = 'N/A'
+            placeholders[f'dex_info_social_{i}_handle'] = 'N/A'
+
+        for i in range(1, 21):
+            placeholders[f'dex_order_{i}_type'] = 'N/A'
+            placeholders[f'dex_order_{i}_status'] = 'N/A'
+            placeholders[f'dex_order_{i}_timestamp'] = 'N/A'
+            placeholders[f'dex_order_{i}_timestamp_iso'] = 'N/A'
+
+        # Fetch data from Rust service first
         db_token = await self.token_model.get_by_address(self.token_address)
-        dex_pairs = await dex_service._fetch_token_data(self.token_address)
+        rust_payload = await rust_dex_bridge.fetch_dex_payload(self.token_address)
+
+        dex_pairs = []
+        dex_orders = []
+        pump_fun_payload = None
+        if rust_payload:
+            dex_pairs = rust_payload.get('pairs') or []
+            dex_orders = rust_payload.get('orders') or []
+            pump_fun_payload = rust_payload.get('pump_fun')
+
+        if not dex_pairs:
+            logger.warning(
+                "Rust dex payload unavailable for %s, falling back to internal client",
+                self.token_address,
+            )
+            dex_service = get_dex_service()
+            dex_pairs = await dex_service._fetch_token_data(self.token_address) or []
 
         current_mc = None
 
-        # Populate from DexScreener first
         if dex_pairs:
             pair_data = dex_pairs[0]
+            base_token = pair_data.get('baseToken', {})
+            quote_token = pair_data.get('quoteToken', {})
             placeholders.update({
-                'token_symbol': pair_data.get('baseToken', {}).get('symbol', 'N/A'),
-                'token_name': pair_data.get('baseToken', {}).get('name', 'N/A'),
-                'dex_id': pair_data.get('dexId', 'N/A'),
-                'chain_id': pair_data.get('chainId', 'N/A'),
-                'pair_address': pair_data.get('pairAddress', 'N/A'),
-                'quote_token_name': pair_data.get('quoteToken', {}).get('name', 'N/A'),
-                'quote_token_symbol': pair_data.get('quoteToken', {}).get('symbol', 'N/A'),
-                'price_native': pair_data.get('priceNative', 'N/A'),
-                'price_usd': pair_data.get('priceUsd', 'N/A'),
+                'token_symbol': base_token.get('symbol') or 'N/A',
+                'token_name': base_token.get('name') or 'N/A',
+                'dex_id': pair_data.get('dexId') or 'N/A',
+                'dex_pair_chain_id': pair_data.get('chainId') or 'N/A',
+                'dex_pair_dex_id': pair_data.get('dexId') or 'N/A',
+                'dex_pair_url': pair_data.get('url') or 'N/A',
+                'dex_pair_address': pair_data.get('pairAddress') or 'N/A',
+                'pair_address': pair_data.get('pairAddress') or 'N/A',
+                'quote_token_name': quote_token.get('name') or 'N/A',
+                'quote_token_symbol': quote_token.get('symbol') or 'N/A',
+                'price_native': pair_data.get('priceNative') or 'N/A',
+                'price_usd': pair_data.get('priceUsd') or 'N/A',
                 'fdv': format_market_cap(pair_data.get('fdv')),
             })
 
             mc_raw = pair_data.get('marketCap')
             if mc_raw:
-                current_mc = Decimal(mc_raw)
+                try:
+                    current_mc = Decimal(str(mc_raw))
+                except Exception:
+                    current_mc = Decimal(str(float(mc_raw)))
                 placeholders['market_cap'] = format_market_cap(current_mc)
+                placeholders['dex_pair_market_cap_raw'] = f"{mc_raw:.2f}" if isinstance(mc_raw, (int, float)) else str(mc_raw)
+
+            fdv_raw = pair_data.get('fdv')
+            if fdv_raw is not None:
+                placeholders['dex_pair_fdv_raw'] = f"{fdv_raw:.2f}" if isinstance(fdv_raw, (int, float)) else str(fdv_raw)
 
             volume = pair_data.get('volume', {})
             placeholders.update({
@@ -136,10 +296,10 @@ class PlaceholderService:
 
             price_change = pair_data.get('priceChange', {})
             placeholders.update({
-                'price_change_h1': f"{price_change.get('h1', 0):.2f}",
-                'price_change_h6': f"{price_change.get('h6', 0):.2f}",
-                'price_change_h24': f"{price_change.get('h24', 0):.2f}",
-                'price_change_m5': f"{price_change.get('m5', 0):.2f}",
+                'price_change_h1': f"{price_change.get('h1', 0) or 0:.2f}",
+                'price_change_h6': f"{price_change.get('h6', 0) or 0:.2f}",
+                'price_change_h24': f"{price_change.get('h24', 0) or 0:.2f}",
+                'price_change_m5': f"{price_change.get('m5', 0) or 0:.2f}",
             })
 
             txns = pair_data.get('txns', {})
@@ -156,15 +316,148 @@ class PlaceholderService:
 
             liquidity = pair_data.get('liquidity', {})
             placeholders['liquidity_usd'] = format_market_cap(liquidity.get('usd'))
-            placeholders['bonding_status'] = "Bonded" if float(liquidity.get('usd', 0)) > 1 else "Not Bonded"
+            placeholders['liquidity_base'] = format_market_cap(liquidity.get('base'))
+            placeholders['liquidity_quote'] = format_market_cap(liquidity.get('quote'))
+            usd_liquidity = liquidity.get('usd') or 0
+            try:
+                usd_liquidity_value = float(usd_liquidity)
+            except (TypeError, ValueError):
+                usd_liquidity_value = 0
+            placeholders['bonding_status'] = (
+                "Bonded" if usd_liquidity_value and usd_liquidity_value > 1 else "Not Bonded"
+            )
 
             if pair_data.get('pairCreatedAt'):
                 pair_dt = datetime.fromtimestamp(pair_data['pairCreatedAt'] / 1000, tz=timezone.utc)
                 placeholders['pair_created_at'] = format_time_diff(pair_dt)
 
-            info = pair_data.get('info', {})
-            is_paid = any(key in info for key in ["imageUrl", "header", "openGraph", "websites", "socials"])
+            info = pair_data.get('info') or {}
+            placeholders['dex_info_image_url'] = info.get('imageUrl', 'N/A') or 'N/A'
+            placeholders['dex_info_header'] = info.get('header', 'N/A') or 'N/A'
+            placeholders['dex_info_open_graph'] = info.get('openGraph', 'N/A') or 'N/A'
+
+            websites = info.get('websites') or []
+            if websites:
+                formatted_websites = []
+                for idx, entry in enumerate(websites[:5], start=1):
+                    url_value = entry.get('url') or 'N/A'
+                    placeholders[f'dex_info_website_{idx}'] = url_value
+                    formatted_websites.append(url_value)
+                placeholders['dex_info_websites'] = '\n'.join(formatted_websites)
+
+            socials = info.get('socials') or []
+            if socials:
+                formatted_socials = []
+                for idx, entry in enumerate(socials[:5], start=1):
+                    platform = entry.get('platform') or 'N/A'
+                    handle = entry.get('handle') or 'N/A'
+                    placeholders[f'dex_info_social_{idx}_platform'] = platform
+                    placeholders[f'dex_info_social_{idx}_handle'] = handle
+                    formatted_socials.append(f"{platform}: {handle}")
+                placeholders['dex_info_socials'] = '\n'.join(formatted_socials)
+
+            boosts = pair_data.get('boosts', {})
+            if boosts:
+                placeholders['dex_boosts_active'] = boosts.get('active', 'N/A') or 'N/A'
+
+            is_paid = any(info.get(key) for key in ["imageUrl", "header", "openGraph"]) or bool(websites) or bool(socials)
             placeholders['dex_paid'] = "✅" if is_paid else "❌"
+
+        # Dex orders placeholders
+        if dex_orders:
+            for idx, order in enumerate(dex_orders[:20], start=1):
+                prefix = f'dex_order_{idx}'
+                placeholders[f'{prefix}_type'] = order.get('type', 'N/A') or 'N/A'
+                placeholders[f'{prefix}_status'] = order.get('status', 'N/A') or 'N/A'
+                timestamp = order.get('paymentTimestamp')
+                if timestamp:
+                    try:
+                        ts_int = int(timestamp)
+                        if ts_int > 1_000_000_000_000:
+                            ts_int = ts_int // 1000
+                        dt = datetime.fromtimestamp(ts_int, tz=timezone.utc)
+                        placeholders[f'{prefix}_timestamp'] = format_time_diff(dt)
+                        placeholders[f'{prefix}_timestamp_iso'] = dt.isoformat()
+                    except (ValueError, OSError, OverflowError):
+                        placeholders[f'{prefix}_timestamp'] = str(timestamp)
+                        placeholders[f'{prefix}_timestamp_iso'] = str(timestamp)
+
+        # Pump.fun placeholders
+        if pump_fun_payload:
+            pf = pump_fun_payload
+
+            placeholders['pf_mint'] = pf.get('mint') or 'N/A'
+            placeholders['pf_name'] = pf.get('name') or 'N/A'
+            placeholders['pf_symbol'] = pf.get('symbol') or 'N/A'
+            placeholders['pf_description'] = pf.get('description') or 'N/A'
+            placeholders['pf_image_uri'] = pf.get('image_uri') or 'N/A'
+            placeholders['pf_metadata_uri'] = pf.get('metadata_uri') or 'N/A'
+            placeholders['pf_twitter'] = pf.get('twitter') or 'N/A'
+            placeholders['pf_telegram'] = pf.get('telegram') or 'N/A'
+            placeholders['pf_website'] = pf.get('website') or 'N/A'
+            placeholders['pf_bonding_curve'] = pf.get('bonding_curve') or 'N/A'
+            placeholders['pf_associated_bonding_curve'] = pf.get('associated_bonding_curve') or 'N/A'
+
+            creator = pf.get('creator')
+            if creator:
+                placeholders['pf_creator'] = creator
+                placeholders['pf_creator_short'] = f"{creator[:6]}...{creator[-6:]}" if len(creator) > 12 else creator
+                placeholders['pf_creator_solscan'] = f"https://solscan.io/account/{creator}"
+                placeholders['pf_creator_stats'] = f"https://t.me/phanes_bot?start=pfdev_{creator}"
+
+            timestamp_mappings = {
+                'pf_created_timestamp': pf.get('created_timestamp'),
+                'pf_last_trade_timestamp': pf.get('last_trade_timestamp'),
+                'pf_ath_market_cap_timestamp': pf.get('ath_market_cap_timestamp'),
+                'pf_koth_timestamp': pf.get('king_of_the_hill_timestamp'),
+                'pf_livestream_ban_expiry': pf.get('livestream_ban_expiry'),
+                'pf_updated_at': pf.get('updated_at'),
+                'pf_last_reply': pf.get('last_reply'),
+                'pf_thumbnail_updated_at': pf.get('thumbnail_updated_at'),
+            }
+
+            for base_key, raw_value in timestamp_mappings.items():
+                iso_key = f"{base_key}_iso"
+                ago_key = f"{base_key}_ago"
+                if raw_value is not None:
+                    placeholders[base_key] = str(raw_value)
+                    formatted = format_timestamp_value(raw_value)
+                    placeholders[iso_key] = formatted['iso']
+                    placeholders[ago_key] = formatted['ago']
+                else:
+                    placeholders[base_key] = 'N/A'
+                    placeholders[iso_key] = 'N/A'
+                    placeholders[ago_key] = 'N/A'
+
+            placeholders['pf_total_supply'] = format_int(pf.get('total_supply'))
+            placeholders['pf_market_cap_sol'] = format_number(pf.get('market_cap'))
+            placeholders['pf_market_cap_usd'] = format_market_cap(pf.get('usd_market_cap'))
+            placeholders['pf_ath_market_cap'] = format_market_cap(pf.get('ath_market_cap'))
+            placeholders['pf_real_sol_reserves'] = format_number(pf.get('real_sol_reserves'))
+            placeholders['pf_virtual_sol_reserves'] = format_number(pf.get('virtual_sol_reserves'))
+            placeholders['pf_virtual_token_reserves'] = format_number(pf.get('virtual_token_reserves'), decimals=0)
+            placeholders['pf_real_token_reserves'] = format_number(pf.get('real_token_reserves'), decimals=0)
+            placeholders['pf_reply_count'] = format_int(pf.get('reply_count'))
+            placeholders['pf_num_participants'] = format_int(pf.get('num_participants'))
+            placeholders['pf_is_currently_live'] = format_bool(pf.get('is_currently_live'))
+            placeholders['pf_complete'] = format_bool(pf.get('complete'))
+            placeholders['pf_raydium_pool'] = pf.get('raydium_pool') or 'N/A'
+            placeholders['pf_pump_swap_pool'] = pf.get('pump_swap_pool') or 'N/A'
+            placeholders['pf_hidden'] = format_bool(pf.get('hidden'))
+            placeholders['pf_show_name'] = format_bool(pf.get('show_name'))
+            placeholders['pf_nsfw'] = format_bool(pf.get('nsfw'))
+            placeholders['pf_inverted'] = format_bool(pf.get('inverted'))
+            placeholders['pf_is_banned'] = format_bool(pf.get('is_banned'))
+            placeholders['pf_initialized'] = format_bool(pf.get('initialized'))
+            placeholders['pf_hide_banner'] = format_bool(pf.get('hide_banner'))
+            placeholders['pf_livestream_downrank_score'] = format_number(pf.get('livestream_downrank_score'))
+            placeholders['pf_downrank_score'] = format_number(pf.get('downrank_score'))
+            placeholders['pf_program'] = pf.get('program') or 'N/A'
+            placeholders['pf_platform'] = pf.get('platform') or 'N/A'
+            placeholders['pf_market_id'] = pf.get('market_id') or 'N/A'
+            placeholders['pf_banner_uri'] = pf.get('banner_uri') or 'N/A'
+            placeholders['pf_thumbnail_uri'] = pf.get('thumbnail') or 'N/A'
+            placeholders['pf_video_uri'] = pf.get('video_uri') or 'N/A'
 
         # Fallback and supplement with DB data
         if db_token:

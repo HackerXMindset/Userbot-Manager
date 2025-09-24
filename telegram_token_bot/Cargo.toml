@@ -17,6 +17,9 @@ teloxide = { version = "0.12", features = ["macros"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
+# HTTP server
+axum = { version = "0.7", features = ["json"] }
+
 # Error handling
 anyhow = "1.0"
 
@@ -32,6 +35,7 @@ dotenv = "0.15"
 
 # Logging
 tracing-subscriber = "0.3"
+tracing = "0.1"
 
 
 [profile.release]
