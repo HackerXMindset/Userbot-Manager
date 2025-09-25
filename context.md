@@ -1,56 +1,85 @@
 # Project Context
-
-## Purpose
-- Replace Python-based DexScreener fetching with Rust-powered API calls exposed via the `telegram_token_bot` HTTP endpoint.
-- Drive all message templates from the new Rust data so operators can configure placeholders for any DexScreener field without manual edits.
-- Provide two template modes (pump.fun vs non pump.fun) with fresh, non-cached data every request.
-
-## Current Architecture Snapshot
-- `telegram_token_bot` (Rust)
-  - Exposes `/dex/{mint}` HTTP endpoint returning DexScreener pairs + paid order history.
-  - Bot formatting code (`bot_fixed.rs`) demonstrates full placeholder usage and message layout.
-- Python app (`app/`)
-  - `PlaceholderService` now queries the Rust endpoint via `rust_dex_bridge.fetch_dex_payload` before falling back to legacy client.
-  - Templates managed in the UI/DB use placeholders defined by `PlaceholderService`.
-- Template workflow
-  1. User selects template (pump.fun or generic) in UI.
-  2. App collects placeholders, filling values from Rust payload, DB, and computed helpers.
-  3. Template text is rendered and posted.
-
-## Completed Work (Phase 1 – Dex Data Migration)
-- Hooked Python placeholder service to Rust HTTP endpoint for Dex pairs + orders.
-- Enumerated every DexScreener-derived placeholder (market data, volume, price deltas, txns, liquidity, pair metadata, paid info, websites/socials/boosts, order timelines).
-- Delivered a “kitchen-sink” reference template using all placeholders so operators can copy into UI.
-- Removed unused UI preview placeholders (Header/OpenGraph/websites/socials/boosts) per latest request.
-- Limited Dex paid order placeholders consumed in templates to the first three entries to match product needs.
-- Verified HTTP endpoint returns live data (example request against VPS IP showed expected JSON payload).
-
-## Outstanding Work / Next Phases
-1. **Pump.fun Specific Template Support**
-   - Create dedicated placeholder sets that highlight pump.fun-only fields (bonding curve, livestream, dev stats, timestamps, engagement, status flags).
-   - Provide default pump.fun template text mirroring Rust bot formatting but customizable.
-   - Ensure template assignment UI allows toggling between pump.fun vs non pump.fun modes.
-2. **Jupiter / Advanced Analysis Integration**
-   - Map Jupiter token analysis fields (organic score, tags, social metrics, liquidity, price, holders, CEX listings, audit flags, per-interval stats) into placeholder service.
-   - Update templates to expose these placeholders and educate operators on usage.
-3. **Rust → Python Transport Hardening**
-   - Add retries and error surfacing for Rust endpoint failures; avoid silent fallback to stale data if requirements insist on “100% fresh” responses.
-   - Consider adding request parameters to explicitly select pump.fun vs non pump.fun template pipelines.
-4. **Template Management UX**
-   - Pre-load new template examples into DB (`add_example_templates.py`) or via migration so UI users can adopt quickly.
-   - Provide inline documentation listing every placeholder and its data source for non-technical operators.
-5. **Operational Runbooks**
-   - Document how to build and run the Rust service in production (cargo build, systemd or docker instructions) since earlier commands showed missing toolchain on VPS.
-   - Clarify deployment endpoints (public IP/port mappings) and how to stop/start the bot cleanly.
-
-## Known Gaps / Open Questions
-- Need confirmation on final production base URL/port for exposed Rust HTTP service.
-- Clarify caching expectations: current placeholder service still allows fallback to internal client; may need to disable to guarantee “fresh only”.
-- Determine storage plan for template variants (per group, per category) once pump.fun segregation is implemented.
-- Establish testing strategy for verifying placeholder population (unit tests or integration tests hitting Rust endpoint).
-
-## Immediate Next Actions
-1. Extend `PlaceholderService` to include pump.fun fields currently only used inside Rust bot formatting.
-2. Produce draft pump.fun and non pump.fun templates in UI using new placeholders.
-3. Sync with ops on installing Rust toolchain on VPS (`cargo` missing) and define deployment commands.
-4. Update documentation for stopping/starting Telegram bot processes to avoid stale handlers.
+#
+# Mission
+- Serve all token intelligence through the Rust microservice (`telegram_token_bot`) so the Python automation app uses fresh, uncached data on every run.
+- Expose every data point as a placeholder in `PlaceholderService`, letting operators craft pump.fun and non pump.fun templates without code changes.
+- Keep legacy Python fetchers only as emergency fallbacks; the Rust bridge now owns DexScreener, pump.fun, Jupiter, and Helius data collection.
+#
+# Components
+- **Rust service (`telegram_token_bot`)**
+  - HTTP endpoint `/dex/{mint}` (binds to `RUST_HTTP_ADDR`, default `0.0.0.0:8080`).
+  - Payload fields:
+    - `pairs`: DexScreener pools
+    - `orders`: DexScreener paid orders
+    - `pump_fun`: pump.fun metadata
+    - `jupiter`: Jupiter token analysis
+    - `dev_sol_balance`: SOL balance of the Jupiter dev address (when available)
+    - `holders`: Helius `getTokenLargestAccounts` result
+    - `supply_ui_amount`: Helius `getTokenSupply` UI amount
+- **Python automation app**
+  - `app/services/rust_bridge.py` – aiohttp client calling the Rust endpoint.
+  - `app/services/placeholder_service.py` – merges Rust payloads with DB context to produce placeholders.
+  - `app/services/call_dispatcher.py` – resolves templates and sends messages (now without Telegram parse mode to avoid Markdown issues).
+  - `app/ui/handlers/templates.py` – operator UI for template management.
+#
+# Placeholder Coverage
+(All placeholders are plain strings; missing data remains `N/A`.)
+#
+- **DexScreener**: metadata (`dex_id`, `dex_pair_chain_id`, ...), pricing (`price_usd`, `market_cap`, ...), liquidity, volume/price deltas, transaction counts, info blocks (`dex_info_*`), paid orders (`dex_order_{1..20}_*`), CTO detection (`cto_status`, `cto_time`, `dex_time`), links (`dexscreener_link`, `defined_link`), `bonding_status`, `pair_created_at`.
+- **pump.fun (`pf_`)**: identity/media, bonding + creator links, timestamp triples (raw/ISO/ago), economics (supply, reserves, ATH), engagement flags, pool/system metadata (`pf_program`, `pf_market_id`, ...), combined social links (`pf_social`), ATH comparison (`pf_ath_comparison`).
+- **Jupiter (`jup_`)**: identity & supply, market metrics, audit/dev info, engagement and social fields, plus interval stats for `5m`, `1h`, `6h`, `24h` (`jup_stats_<tf>_*`).
+- **Helius (`helius_`)**: snapshot (`helius_data_slot`, `helius_holder_count`, `helius_holder_total_ui_amount`, `helius_remaining_share`), aggregate shares (`helius_top{1|5|10|20}_*`), per-holder fields for top 20, creator holding stats, and `helius_holder_table` for preformatted output.
+- **General helpers**: `token_symbol`, `token_name`, `address`, `multiplier`, `mention_count`, `call_history`, `dexscreener_link`, `defined_link`, `bonding_status`, `pair_created_at`.
+#
+# Reference Inventories
+- `pumpfun_placeholders.md`
+- `jupiter_placeholders.md`
+- `helius_placeholders.md`
+#
+# Template Execution Flow
+1. Dispatcher pulls a queued call, fetches the assigned template.
+2. `PlaceholderService.get_all_placeholders()` calls the Rust endpoint, merges DB fallbacks, and produces placeholder values.
+3. Template text is rendered **without** Telegram parse mode (no Markdown parsing).
+4. Message is sent via management bot or userbot depending on template settings.
+#
+# Operational Notes
+- Run the Rust service with `cargo run`; build with `cargo build` after code changes. Manage the process via tmux/systemd.
+- Required secrets: Helius API key, `PUMP_FUN_JWT`. Missing values degrade placeholders to `N/A` but keep execution safe.
+- Python still contains a Dex fallback; disable it if “always fresh” becomes mandatory.
+- Management bot occasionally logs “call queue schema outdated” for curated alpha flows—cosmetic warning.
+#
+# Phase History
+- **Phase 1** – Rust bridge + Dex placeholders + `/dex/{mint}` integration.
+- **Phase 2** – pump.fun payload/placeholder coverage, reference templates.
+- **Phase 3** – Jupiter analytics placeholders (organic score, audit, socials, interval stats) and compact Jupiter template.
+- **Phase 4** – Removed Telegram parse mode to avoid Markdown errors.
+- **Phase 5** – Integrated Helius holders + supply; exposed creator holdings and aggregate shares.
+- **Phase 6** – Added CTO detection (`cto_status`, `cto_time`, `dex_time`), combined social links (`pf_social`), ATH comparison (`pf_ath_comparison`), and fixed type conversion errors in placeholder calculations.
+#
+# Pending Enhancements
+- UI control to switch pump.fun vs generic templates.
+- Retries & telemetry in `rust_bridge` for better error surfacing.
+- Optional: extend payload with additional Solana analytics if ops requires.
+- Automated placeholder tests using fixture payloads.
+- Deployment runbook for installing Rust toolchain, managing service lifecycle, and monitoring.
+#
+# Debug Snippets
+- Dump all placeholders:
+  ```
+python - <<'PY'
+from app.services.placeholder_service import PlaceholderService
+import asyncio
+async def main():
+    ps = PlaceholderService('MINT_ADDRESS', {})
+    data = await ps.get_all_placeholders()
+    for key in sorted(data):
+        print(key, ':', data[key])
+asyncio.run(main())
+PY
+  ```
+- Inspect raw Rust payload:
+  ```
+curl http://<server>:8080/dex/<mint>
+  ```
+#
+# This dossier lets future engineers or AI assistants recreate the scanner output purely from templates, extend placeholder coverage, and debug end-to-end without trawling commit history.

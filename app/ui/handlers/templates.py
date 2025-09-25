@@ -128,10 +128,11 @@ class TemplatesHandler:
 
             assigned_groups = await self.assignment_model.get_assigned_groups(template_id)
 
+            import html
             text = f"<b>📝 Template: {template['name']}</b>\n\n"
             text += f"<b>Assignments:</b> {len(assigned_groups)} groups\n\n"
             text += "<b>Preview:</b>\n"
-            text += f"<pre>{template['template_text']}</pre>"
+            text += f"<pre>{html.escape(template['template_text'])}</pre>"
 
             sender_text = "Sender: Mgmt Bot" if template.get('use_management_bot') else "Sender: Userbot"
             keyboard = InlineKeyboardMarkup(inline_keyboard=[

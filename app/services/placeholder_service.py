@@ -124,6 +124,9 @@ class PlaceholderService:
             'dex_pair_market_cap_raw': 'N/A',
             'dex_pair_fdv_raw': 'N/A',
             'dex_paid': 'N/A',
+            'dex_time': 'N/A',
+            'cto_status': 'N/A',
+            'cto_time': 'N/A',
             'volume_h1': 'N/A',
             'volume_h6': 'N/A',
             'volume_h24': 'N/A',
@@ -169,6 +172,8 @@ class PlaceholderService:
             'pf_twitter': 'N/A',
             'pf_telegram': 'N/A',
             'pf_website': 'N/A',
+            'pf_social': 'N/A',
+            'pf_ath_comparison': 'N/A',
             'pf_bonding_curve': 'N/A',
             'pf_associated_bonding_curve': 'N/A',
             'pf_creator': 'N/A',
@@ -493,6 +498,56 @@ class PlaceholderService:
                         placeholders[f'{prefix}_timestamp'] = str(timestamp)
                         placeholders[f'{prefix}_timestamp_iso'] = str(timestamp)
 
+        # Process CTO and DEX time placeholders
+        placeholders['cto_status'] = '❌'
+        placeholders['cto_time'] = 'N/A'
+        placeholders['dex_time'] = 'N/A'
+
+        if dex_orders:
+            cto_order = None
+            dex_paid_order = None
+
+            for order in dex_orders:
+                order_type = order.get('type')
+                order_status = order.get('status')
+
+                # Find most recent approved CTO order
+                if order_type == 'communityTakeover' and order_status == 'approved':
+                    if not cto_order:
+                        cto_order = order
+
+                # Find most recent tokenProfile order
+                if order_type == 'tokenProfile':
+                    if not dex_paid_order:
+                        dex_paid_order = order
+
+            # Set CTO placeholders
+            if cto_order:
+                placeholders['cto_status'] = '✅'
+                timestamp = cto_order.get('paymentTimestamp')
+                if timestamp:
+                    try:
+                        ts_int = int(timestamp)
+                        if ts_int > 1_000_000_000_000:
+                            ts_int = ts_int // 1000
+                        dt = datetime.fromtimestamp(ts_int, tz=timezone.utc)
+                        placeholders['cto_time'] = format_time_diff(dt)
+                    except (ValueError, OSError, OverflowError):
+                        placeholders['cto_time'] = 'N/A'
+
+            # Set DEX time placeholder
+            if dex_paid_order:
+                timestamp = dex_paid_order.get('paymentTimestamp')
+                if timestamp:
+                    try:
+                        ts_int = int(timestamp)
+                        if ts_int > 1_000_000_000_000:
+                            ts_int = ts_int // 1000
+                        dt = datetime.fromtimestamp(ts_int, tz=timezone.utc)
+                        placeholders['dex_time'] = format_time_diff(dt)
+                    except (ValueError, OSError, OverflowError):
+                        placeholders['dex_time'] = 'N/A'
+
         # Pump.fun placeholders
         if pump_fun_payload:
             pf = pump_fun_payload
@@ -506,6 +561,17 @@ class PlaceholderService:
             placeholders['pf_twitter'] = pf.get('twitter') or 'N/A'
             placeholders['pf_telegram'] = pf.get('telegram') or 'N/A'
             placeholders['pf_website'] = pf.get('website') or 'N/A'
+
+            # Combined social links in hyperlink format
+            social_links = []
+            if pf.get('twitter') and pf.get('twitter') != 'N/A':
+                social_links.append(f'<a href="{pf.get("twitter")}">Twitter</a>')
+            if pf.get('telegram') and pf.get('telegram') != 'N/A':
+                social_links.append(f'<a href="{pf.get("telegram")}">Telegram</a>')
+            if pf.get('website') and pf.get('website') != 'N/A':
+                social_links.append(f'<a href="{pf.get("website")}">Website</a>')
+
+            placeholders['pf_social'] = ' | '.join(social_links) if social_links else 'N/A'
             placeholders['pf_bonding_curve'] = pf.get('bonding_curve') or 'N/A'
             placeholders['pf_associated_bonding_curve'] = pf.get('associated_bonding_curve') or 'N/A'
 
@@ -569,6 +635,42 @@ class PlaceholderService:
             placeholders['pf_banner_uri'] = pf.get('banner_uri') or 'N/A'
             placeholders['pf_thumbnail_uri'] = pf.get('thumbnail') or 'N/A'
             placeholders['pf_video_uri'] = pf.get('video_uri') or 'N/A'
+
+            # ATH comparison calculation
+            current_mc = pf.get('usd_market_cap', 0)
+            ath_mc = pf.get('ath_market_cap', 0)
+            ath_timestamp = pf.get('ath_market_cap_timestamp')
+
+            if current_mc and ath_mc and current_mc > 0 and ath_mc > 0:
+                ratio = float(current_mc) / float(ath_mc)
+                ath_comparison = f"{ratio:.2f}x from ATH"
+
+                # Add time component if ATH timestamp exists
+                if ath_timestamp:
+                    try:
+                        ts_int = int(ath_timestamp)
+                        if ts_int > 1_000_000_000_000:
+                            ts_int = ts_int // 1000
+                        dt = datetime.fromtimestamp(ts_int, tz=timezone.utc)
+                        now = datetime.now(timezone.utc)
+                        diff = now - dt
+
+                        # Convert to compact format (Xh:Ym)
+                        hours = int(diff.total_seconds() // 3600)
+                        minutes = int((diff.total_seconds() % 3600) // 60)
+
+                        if hours > 0:
+                            time_str = f"{hours}h:{minutes:02d}m"
+                        else:
+                            time_str = f"{minutes}m"
+
+                        ath_comparison += f" ({time_str})"
+                    except (ValueError, OSError, OverflowError):
+                        pass
+
+                placeholders['pf_ath_comparison'] = ath_comparison
+            else:
+                placeholders['pf_ath_comparison'] = 'N/A'
 
         if jupiter_payload:
             jup = jupiter_payload
@@ -650,6 +752,114 @@ class PlaceholderService:
         if dev_sol_balance is not None:
             placeholders['jup_dev_sol_balance'] = format_number(dev_sol_balance, decimals=4)
 
+        if holders_payload:
+            holders_result = holders_payload.get('result') or {}
+            context = holders_result.get('context') or {}
+            holder_list = holders_result.get('value') or []
+
+            slot = context.get('slot')
+            placeholders['helius_data_slot'] = str(slot) if slot is not None else 'N/A'
+            placeholders['helius_holder_count'] = str(len(holder_list))
+
+            total_ui = 0.0
+            holder_entries = []
+            for idx, holder in enumerate(holder_list[:20], start=1):
+                address = holder.get('address') or 'N/A'
+                ui_amount = holder.get('uiAmount')
+                ui_amount_value = float(ui_amount) if isinstance(ui_amount, (int, float)) else 0.0
+                ui_amount_string = holder.get('uiAmountString') or 'N/A'
+                raw_amount = holder.get('amount') or 'N/A'
+                decimals = holder.get('decimals')
+
+                total_ui += ui_amount_value
+                short_addr = address[:6] + '...' + address[-6:] if len(address) > 12 else address
+
+                placeholders[f'helius_holder_{idx}_address'] = address
+                placeholders[f'helius_holder_{idx}_short'] = short_addr
+                placeholders[f'helius_holder_{idx}_ui_amount'] = format_number(ui_amount_value, decimals=6)
+                placeholders[f'helius_holder_{idx}_ui_amount_string'] = ui_amount_string
+                placeholders[f'helius_holder_{idx}_raw_amount'] = raw_amount
+                placeholders[f'helius_holder_{idx}_decimals'] = decimals if decimals is not None else 'N/A'
+
+                holder_entries.append({
+                    'index': idx,
+                    'address': address,
+                    'ui_amount': ui_amount_value,
+                    'ui_amount_fmt': format_number(ui_amount_value, decimals=6),
+                    'ui_amount_string': ui_amount_string,
+                    'raw_amount': raw_amount,
+                    'short': short_addr,
+                })
+
+            placeholders['helius_holder_total_ui_amount'] = format_number(total_ui, decimals=6)
+
+            if total_ui > 0:
+                ranges = [(1, 'helius_top1'), (5, 'helius_top5'), (10, 'helius_top10'), (20, 'helius_top20')]
+                for cutoff, prefix in ranges:
+                    subset = [entry for entry in holder_entries if entry['index'] <= cutoff]
+                    subset_total = sum(entry['ui_amount'] for entry in subset)
+                    placeholders[f'{prefix}_ui_amount'] = format_number(subset_total, decimals=6)
+                    placeholders[f'{prefix}_share'] = format_number((subset_total / total_ui) * 100.0, decimals=2)
+
+                top20 = placeholders.get('helius_top20_share')
+                if top20 not in (None, 'N/A'):
+                    try:
+                        placeholders['helius_remaining_share'] = format_number(100.0 - float(top20), decimals=2)
+                    except ValueError:
+                        placeholders['helius_remaining_share'] = 'N/A'
+
+                for entry in holder_entries:
+                    placeholders[f"helius_holder_{entry['index']}_percent_of_sample"] = format_number(
+                        (entry['ui_amount'] / total_ui) * 100.0,
+                        decimals=2,
+                    )
+
+            supply_value = None
+            if supply_ui_amount is not None:
+                try:
+                    supply_value = float(supply_ui_amount)
+                except (TypeError, ValueError):
+                    supply_value = None
+
+            if supply_value and supply_value > 0:
+                for entry in holder_entries:
+                    placeholders[f"helius_holder_{entry['index']}_percent_of_supply"] = format_number(
+                        (entry['ui_amount'] / supply_value) * 100.0,
+                        decimals=2,
+                    )
+
+            holder_lines = []
+            for entry in holder_entries:
+                share = placeholders.get(f"helius_holder_{entry['index']}_percent_of_sample", 'N/A')
+                holder_lines.append(
+                    f"{entry['index']}. {entry['short']} | Amount: {entry['ui_amount_fmt']} | Raw: {entry['raw_amount']} | Share: {share}%"
+                )
+            if holder_lines:
+                placeholders['helius_holder_table'] = '\n'.join(holder_lines)
+
+            creator_addr = placeholders.get('pf_creator')
+            if not creator_addr or creator_addr == 'N/A':
+                creator_addr = placeholders.get('jup_dev_address')
+
+            if creator_addr and creator_addr != 'N/A':
+                match_entry = next((entry for entry in holder_entries if entry['address'] == creator_addr), None)
+                if match_entry:
+                    placeholders['helius_creator_is_holder'] = 'Yes'
+                    placeholders['helius_creator_holding_ui_amount'] = match_entry['ui_amount_fmt']
+                    placeholders['helius_creator_holding_ui_amount_string'] = match_entry['ui_amount_string']
+                    placeholders['helius_creator_holding_raw_amount'] = match_entry['raw_amount']
+                    placeholders['helius_creator_holding_percent_of_sample'] = placeholders.get(
+                        f"helius_holder_{match_entry['index']}_percent_of_sample",
+                        'N/A',
+                    )
+                    if supply_value and supply_value > 0:
+                        placeholders['helius_creator_holding_percent_of_supply'] = format_number(
+                            (match_entry['ui_amount'] / supply_value) * 100.0,
+                            decimals=2,
+                        )
+                else:
+                    placeholders['helius_creator_is_holder'] = 'No'
+
         # Fallback and supplement with DB data
         if db_token:
             if placeholders['token_symbol'] == 'N/A':
@@ -661,7 +871,7 @@ class PlaceholderService:
             
             initial_mc = db_token.get('first_seen_mc')
             if initial_mc and current_mc and initial_mc > 0:
-                multiplier = (current_mc / initial_mc)
+                multiplier = (float(current_mc) / float(initial_mc))
                 placeholders['multiplier'] = f"{multiplier:.2f}"
 
             peak_mc = db_token.get('peak_mc')
