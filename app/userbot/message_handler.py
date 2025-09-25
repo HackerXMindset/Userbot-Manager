@@ -184,7 +184,27 @@ class MessageHandler:
                 return
 
             source = permission_check['source']
-            logger.info(f"[SPLIT-RESP] Source validated - ID: {source['id']}, Name: {source.get('name', 'N/A')}")
+            live_source_name = self.utils.get_chat_title(getattr(event, 'chat', None))
+
+            source_type_value = source.get('source_type')
+            if not source_type_value:
+                if event.is_private:
+                    source_type_value = 'dm'
+                elif event.is_channel:
+                    source_type_value = 'channel'
+                else:
+                    source_type_value = 'group'
+
+            if live_source_name:
+                try:
+                    await self.source_model.update(source['id'], {'display_name': live_source_name})
+                    source['display_name'] = live_source_name
+                except Exception as update_error:
+                    logger.debug(f"[SPLIT-RESP] Unable to update source display name: {update_error}")
+
+            logger.info(
+                f"[SPLIT-RESP] Source validated - ID: {source['id']}, Name: {live_source_name or source.get('display_name') or source.get('name', 'N/A')}"
+            )
 
             # Check if this userbot is assigned to monitor this source
             routing_rules = await self.source_model.get_routing_rules(source['id'])
@@ -327,12 +347,24 @@ class MessageHandler:
                 for address in addresses_to_forward:
                     try:
                         # Get source info for the call
-                        source_info = f"From {source.get('name') or source.get('title') or event.chat_id}"
+                        display_source_name = live_source_name or source.get('display_name') or source.get('name') or source.get('title')
+                        source_info = f"From {display_source_name or event.chat_id}"
                         additional_info_dict = {
                             "message_text": self.utils.get_message_text(event.message) if hasattr(event, 'message') else "",
                             "caller_name": self.utils.get_user_name(event.sender),
-                            "source_name": source.get('name') or source.get('title'),
-                            "source_type": source.get('source_type')
+                            "source_name": display_source_name,
+                            "source_type": source_type_value,
+                            "source_chat_id": event.chat_id,
+                            "seen_sources": [
+                                {
+                                    'chat_id': event.chat_id,
+                                    'name': display_source_name,
+                                    'source_type': source_type_value,
+                                    'caller_name': self.utils.get_user_name(event.sender),
+                                    'caller_user_id': event.sender_id,
+                                }
+                            ],
+                            "caller_user_id": event.sender_id,
                         }
 
                         logger.debug(f"[SPLIT-RESP] Queueing token {address[:8]}... for target {target_group['id']} via userbot {forwarding_userbot_id}")
@@ -781,6 +813,12 @@ class MessageHandler:
 
             logger.debug(f"[CuratedAlpha] Source {source_chat_id} is part of {len(rules)} rule(s).")
 
+            source_record = await self.source_model.get_source_by_chat_id(source_chat_id)
+            source_type_value = source_record.get('source_type') if source_record and source_record.get('source_type') else (
+                'dm' if event.is_private else 'channel' if event.is_channel else 'group'
+            )
+            current_source_name = self.utils.get_chat_title(getattr(event, 'chat', None))
+
             for address in addresses:
                 for rule in rules:
                     rule_id = rule['id']
@@ -857,6 +895,50 @@ class MessageHandler:
 
                         source_info = f"Curated Alpha: Rule '{rule.get('name', rule_id)}'"
 
+                        # Gather friendly names for all contributing sources
+                        seen_source_details = [
+                            {
+                                'chat_id': source_chat_id,
+                                'name': current_source_name,
+                                'source_type': source_type_value,
+                                'caller_name': self.utils.get_user_name(event.sender),
+                                'caller_user_id': event.sender_id,
+                            }
+                        ]
+                        try:
+                            ordered_seen_sources = sorted(seen_in_rule_sources)
+                        except TypeError:
+                            ordered_seen_sources = list(seen_in_rule_sources)
+
+                        for seen_chat_id in ordered_seen_sources:
+                            try:
+                                seen_chat_id_int = int(seen_chat_id)
+                            except (TypeError, ValueError):
+                                seen_chat_id_int = seen_chat_id
+
+                            if seen_chat_id_int == source_chat_id:
+                                continue
+
+                            seen_source_record = await self.source_model.get_source_by_chat_id(seen_chat_id_int)
+                            if seen_source_record:
+                                display_name = (
+                                    seen_source_record.get('display_name')
+                                    or seen_source_record.get('name')
+                                    or seen_source_record.get('title')
+                                )
+                                seen_source_type = seen_source_record.get('source_type')
+                            else:
+                                display_name = f"Chat {seen_chat_id_int}"
+                                seen_source_type = 'group'
+
+                            seen_source_details.append(
+                                {
+                                    'chat_id': seen_chat_id_int,
+                                    'name': display_name,
+                                    'source_type': seen_source_type,
+                                }
+                            )
+
                         # Look up target group ID for template support
                         target_group_id = None
                         try:
@@ -870,14 +952,15 @@ class MessageHandler:
                             logger.debug(f"Could not find group for destination chat {rule['destination_chat_id']}: {group_lookup_error}")
 
                         # Get source object to pass its details
-                        source = await self.source_model.get_source_by_chat_id(source_chat_id)
-
                         additional_info_dict = {
                             "message_text": self.utils.get_message_text(event.message) if hasattr(event, 'message') else "",
                             "target_group_id_fallback": target_group_id,
                             "caller_name": self.utils.get_user_name(event.sender),
-                            "source_name": source.get('name') or source.get('title') if source else f"Chat {source_chat_id}",
-                            "source_type": source.get('source_type') if source else 'unknown'
+                            "source_name": current_source_name,
+                            "source_type": source_type_value,
+                            "source_chat_id": source_chat_id,
+                            "seen_sources": seen_source_details,
+                            "caller_user_id": event.sender_id,
                         }
                         additional_info = json.dumps(additional_info_dict)
 

@@ -12,6 +12,7 @@ pub struct TokenData {
     pub jupiter_data: Option<JupiterTokenData>,
     pub dexscreener_orders_data: Option<Vec<DexScreenerOrder>>,
     pub dev_sol_balance: Option<f64>,
+    pub dev_token_holding: Option<DevTokenHolding>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -402,4 +403,73 @@ pub struct Stats {
     pub num_organic_buyers: Option<u64>,
     #[serde(default)]
     pub num_net_buyers: Option<u64>,
+}
+
+// Dev's direct token holding data structures
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevTokenHolding {
+    pub owner_address: String,
+    pub mint_address: String,
+    pub token_account: String,
+    pub amount: String,
+    pub decimals: u8,
+    #[serde(rename = "uiAmount")]
+    pub ui_amount: Option<f64>,
+    #[serde(rename = "uiAmountString")]
+    pub ui_amount_string: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenAccountsResponse {
+    pub result: Option<TokenAccountsResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenAccountsResult {
+    pub context: Option<Context>,
+    pub value: Option<Vec<TokenAccountInfo>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenAccountInfo {
+    pub pubkey: String,
+    pub account: TokenAccountData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenAccountData {
+    pub lamports: u64,
+    pub owner: String,
+    pub data: ParsedTokenData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParsedTokenData {
+    pub program: String,
+    pub parsed: TokenParsedInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenParsedInfo {
+    pub info: TokenAccountDetails,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenAccountDetails {
+    pub is_native: bool,
+    pub mint: String,
+    pub owner: String,
+    pub state: String,
+    pub token_amount: TokenAmount,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenAmount {
+    pub amount: String,
+    pub decimals: u8,
+    pub ui_amount: Option<f64>,
+    pub ui_amount_string: String,
 }

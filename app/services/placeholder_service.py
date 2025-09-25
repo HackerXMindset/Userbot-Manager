@@ -26,6 +26,27 @@ def format_market_cap(value: float) -> str:
     except (ValueError, TypeError):
         return "Invalid"
 
+
+def format_compact_number(value: Optional[float]) -> str:
+    """Format a number using compact suffixes (K/M/B) without currency symbols."""
+    if value is None:
+        return "N/A"
+    try:
+        value = float(value)
+    except (ValueError, TypeError):
+        return str(value)
+
+    abs_value = abs(value)
+    if abs_value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f}B"
+    if abs_value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if abs_value >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    if abs_value >= 1:
+        return f"{value:.0f}"
+    return f"{value:.2f}"
+
 def format_time_diff(start_dt: Optional[datetime]) -> str:
     if not start_dt:
         return "N/A"
@@ -201,7 +222,7 @@ class PlaceholderService:
             'liquidity_usd': 'N/A',
             'liquidity_base': 'N/A',
             'liquidity_quote': 'N/A',
-            'call_history': 'N/A',
+            'call_history': '🌕 Recent Callers\nNo history logged yet',
             'dex_info_image_url': 'N/A',
             'dex_info_header': 'N/A',
             'dex_info_open_graph': 'N/A',
@@ -381,6 +402,8 @@ class PlaceholderService:
             placeholders[f'helius_holder_{i}_percent_of_sample'] = 'N/A'
             placeholders[f'helius_holder_{i}_percent_of_supply'] = 'N/A'
 
+        placeholders['helius_top_holders_breakdown'] = 'N/A'
+
         # Fetch data from Rust service first
         db_token = await self.token_model.get_by_address(self.token_address)
         rust_payload = await rust_dex_bridge.fetch_dex_payload(self.token_address)
@@ -392,6 +415,7 @@ class PlaceholderService:
         dev_sol_balance = None
         holders_payload = None
         supply_ui_amount = None
+        dev_token_holding = None
         if rust_payload:
             dex_pairs = rust_payload.get('pairs') or []
             dex_orders = rust_payload.get('orders') or []
@@ -400,6 +424,7 @@ class PlaceholderService:
             dev_sol_balance = rust_payload.get('dev_sol_balance')
             holders_payload = rust_payload.get('holders')
             supply_ui_amount = rust_payload.get('supply_ui_amount')
+            dev_token_holding = rust_payload.get('dev_token_holding')
 
         if not dex_pairs:
             logger.warning(
@@ -831,6 +856,50 @@ class PlaceholderService:
         if dev_sol_balance is not None:
             placeholders['jup_dev_sol_balance'] = format_number(dev_sol_balance, decimals=4)
 
+        # Get supply value for dev holdings calculation
+        supply_value = None
+        if supply_ui_amount is not None:
+            try:
+                supply_value = float(supply_ui_amount)
+            except (TypeError, ValueError):
+                supply_value = None
+
+        # Get creator address for dev holdings
+        creator_addr = placeholders.get('pf_creator')
+        if not creator_addr or creator_addr == 'N/A':
+            creator_addr = placeholders.get('jup_dev_address')
+
+        # Simple dev holdings logic - just process the data directly
+        if dev_token_holding:
+            dev_ui_amount = get_map_value(dev_token_holding, 'ui_amount', 'uiAmount')
+            try:
+                dev_ui_amount_value = float(dev_ui_amount)
+            except (TypeError, ValueError):
+                dev_ui_amount_value = 0.0
+
+            if dev_ui_amount_value > 0:
+                # Dev has tokens
+                placeholders['helius_creator_is_holder'] = 'Yes'
+                placeholders['helius_creator_holding_ui_amount'] = format_number(dev_ui_amount_value, decimals=6)
+                placeholders['helius_creator_holding_ui_amount_string'] = get_map_value(dev_token_holding, 'ui_amount_string', 'uiAmountString') or 'N/A'
+                placeholders['helius_creator_holding_raw_amount'] = dev_token_holding.get('amount', 'N/A')
+
+                # Calculate percentage of supply
+                if supply_value and supply_value > 0:
+                    percent = (dev_ui_amount_value / supply_value) * 100.0
+                    placeholders['helius_creator_holding_percent_of_supply'] = format_number(percent, decimals=2)
+                    placeholders['dev_holdings_indicator'] = f"🔴 ({format_number(percent, decimals=1)}%)"
+                else:
+                    placeholders['dev_holdings_indicator'] = "🔴"
+            else:
+                # Dev sold all tokens
+                placeholders['helius_creator_is_holder'] = 'No'
+                placeholders['dev_holdings_indicator'] = "🟢"
+        else:
+            # No dev token data
+            placeholders['helius_creator_is_holder'] = 'No'
+            placeholders['dev_holdings_indicator'] = "🟢"
+
         if holders_payload:
             holders_result = holders_payload.get('result') or {}
             context = holders_result.get('context') or {}
@@ -839,6 +908,13 @@ class PlaceholderService:
             slot = context.get('slot')
             placeholders['helius_data_slot'] = str(slot) if slot is not None else 'N/A'
             placeholders['helius_holder_count'] = str(len(holder_list))
+
+            supply_value = None
+            if supply_ui_amount is not None:
+                try:
+                    supply_value = float(supply_ui_amount)
+                except (TypeError, ValueError):
+                    supply_value = None
 
             total_ui = 0.0
             holder_entries = []
@@ -868,6 +944,7 @@ class PlaceholderService:
                     'ui_amount_string': ui_amount_string,
                     'raw_amount': raw_amount,
                     'short': short_addr,
+                    'address': address,
                 })
 
             placeholders['helius_holder_total_ui_amount'] = format_number(total_ui, decimals=6)
@@ -893,13 +970,6 @@ class PlaceholderService:
                         decimals=2,
                     )
 
-            supply_value = None
-            if supply_ui_amount is not None:
-                try:
-                    supply_value = float(supply_ui_amount)
-                except (TypeError, ValueError):
-                    supply_value = None
-
             if supply_value and supply_value > 0:
                 for entry in holder_entries:
                     placeholders[f"helius_holder_{entry['index']}_percent_of_supply"] = format_number(
@@ -907,37 +977,56 @@ class PlaceholderService:
                         decimals=2,
                     )
 
-            holder_lines = []
-            for entry in holder_entries:
-                share = placeholders.get(f"helius_holder_{entry['index']}_percent_of_sample", 'N/A')
-                holder_lines.append(
-                    f"{entry['index']}. {entry['short']} | Amount: {entry['ui_amount_fmt']} | Raw: {entry['raw_amount']} | Share: {share}%"
-                )
-            if holder_lines:
-                placeholders['helius_holder_table'] = '\n'.join(holder_lines)
-
-            creator_addr = placeholders.get('pf_creator')
-            if not creator_addr or creator_addr == 'N/A':
-                creator_addr = placeholders.get('jup_dev_address')
-
-            if creator_addr and creator_addr != 'N/A':
-                match_entry = next((entry for entry in holder_entries if entry['address'] == creator_addr), None)
-                if match_entry:
-                    placeholders['helius_creator_is_holder'] = 'Yes'
-                    placeholders['helius_creator_holding_ui_amount'] = match_entry['ui_amount_fmt']
-                    placeholders['helius_creator_holding_ui_amount_string'] = match_entry['ui_amount_string']
-                    placeholders['helius_creator_holding_raw_amount'] = match_entry['raw_amount']
-                    placeholders['helius_creator_holding_percent_of_sample'] = placeholders.get(
-                        f"helius_holder_{match_entry['index']}_percent_of_sample",
-                        'N/A',
-                    )
-                    if supply_value and supply_value > 0:
-                        placeholders['helius_creator_holding_percent_of_supply'] = format_number(
-                            (match_entry['ui_amount'] / supply_value) * 100.0,
-                            decimals=2,
+                # Construct breakdown for holders 2-11 (skip presumed LP at index 1)
+                breakdown_links = []
+                for entry in holder_entries:
+                    address = entry['address']
+                    if (
+                        1 <= entry['index'] <= 10
+                        and entry['ui_amount'] > 0
+                        and address
+                        and address != 'N/A'
+                    ):
+                        percent = (entry['ui_amount'] / supply_value) * 100.0
+                        breakdown_links.append(
+                            f"<a href=\"https://t.me/GMGN_smartmoney_bot?start={address}\">{percent:.1f}%</a>"
                         )
-                else:
-                    placeholders['helius_creator_is_holder'] = 'No'
+
+                if breakdown_links:
+                    placeholders['helius_top_holders_breakdown'] = ' | '.join(breakdown_links)
+
+            top_entries = holder_entries[:10]
+            if top_entries:
+                table_lines = [
+                    'Top 10 Holders',
+                    'User | Holdings | % of Supply',
+                ]
+
+                for entry in top_entries:
+                    address = entry['address']
+                    if not address or address == 'N/A':
+                        continue
+                    tail = address[-4:] if len(address) >= 4 else address
+                    if entry['index'] < 10:
+                        user_label = f"{entry['index']}..{tail}"
+                    else:
+                        user_label = f"{entry['index']}.{tail}"
+
+                    wallet_link = (
+                        f"<a href=\"https://t.me/GMGN_smartmoney_bot?start={address}\">{user_label}</a>"
+                    )
+
+                    holdings_text = format_compact_number(entry['ui_amount'])
+                    if supply_value and supply_value > 0:
+                        percent_val = (entry['ui_amount'] / supply_value) * 100.0
+                        percent_text = f"{percent_val:.2f}%"
+                    else:
+                        percent_text = 'N/A'
+
+                    table_lines.append(f"{wallet_link} | {holdings_text} | {percent_text}")
+
+                if len(table_lines) > 2:
+                    placeholders['helius_holder_table'] = '\n'.join(table_lines)
 
         # Fallback and supplement with DB data
         if db_token:
@@ -964,13 +1053,17 @@ class PlaceholderService:
 
         # Add call history
         try:
-            call_history_text = await self.call_history_service.format_call_history_for_token(
-                self.token_address
+            call_history_text = await self.call_history_service.build_recent_history_block(
+                token_address=self.token_address,
+                current_sources=self.job_context.get('current_call_sources'),
+                market_cap_display=placeholders.get('market_cap'),
+                fallback_caller_name=self.job_context.get('current_caller_name'),
+                fallback_caller_id=self.job_context.get('current_caller_id'),
             )
             placeholders['call_history'] = call_history_text
         except Exception as history_error:
             logger.warning(f"Failed to fetch call history for {self.token_address}: {history_error}")
-            placeholders['call_history'] = "🌕 Recent History\nCall history unavailable"
+            placeholders['call_history'] = "🌕 Recent Callers\nHistory unavailable"
 
         # Add links
         placeholders['defined_link'] = f"https://www.defined.fi/sol/{self.token_address}"

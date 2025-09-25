@@ -6,6 +6,21 @@ use std::sync::Arc;
 use std::time::Instant;
 use teloxide::{prelude::*, utils::html};
 
+fn format_compact_amount(value: f64) -> String {
+    let abs_val = value.abs();
+    if abs_val >= 1_000_000_000.0 {
+        format!("{:.1}B", value / 1_000_000_000.0)
+    } else if abs_val >= 1_000_000.0 {
+        format!("{:.1}M", value / 1_000_000.0)
+    } else if abs_val >= 1_000.0 {
+        format!("{:.1}K", value / 1_000.0)
+    } else if abs_val >= 1.0 {
+        format!("{:.0}", value)
+    } else {
+        format!("{:.2}", value)
+    }
+}
+
 pub async fn start_bot(bot_token: String, api_client: Arc<ApiClient>) -> Result<()> {
     let bot = Bot::new(bot_token);
 
@@ -426,6 +441,14 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
             parts.push(format!("👥 <b>Total Holders (jup):</b> {}", holders));
         }
     }
+    let supply_ui_amount = data
+        .supply_info
+        .as_ref()
+        .and_then(|info| info.result.as_ref())
+        .and_then(|res| res.value.as_ref())
+        .and_then(|val| val.ui_amount)
+        .filter(|amt| *amt > 0.0);
+
     if let Some(holders_data) = &data.holders {
         if let Some(result) = &holders_data.result {
             if let Some(context) = &result.context {
@@ -434,36 +457,70 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
                 }
             }
             if let Some(holders) = &result.value {
-                parts.push(format!("📈 <b>Top {} Holders (helius):</b>", holders.len()));
-                for (index, holder) in holders.iter().enumerate() {
-                    let holder_num = index + 1;
-                    let mut holder_parts = Vec::new();
-                    if let Some(address) = &holder.address {
-                        let short_addr = if address.len() > 8 {
-                            format!("{}...{}", &address[..4], &address[address.len() - 4..])
+                if let Some(total_supply) = supply_ui_amount {
+                    let mut breakdown_links = Vec::new();
+                    for holder in holders.iter().take(10) {
+                        if let (Some(address), Some(ui_amount)) = (&holder.address, holder.ui_amount) {
+                            if ui_amount > 0.0 {
+                                let percent = (ui_amount / total_supply) * 100.0;
+                                breakdown_links.push(format!(
+                                    "<a href=\"https://t.me/GMGN_smartmoney_bot?start={}\">{:.1}%</a>",
+                                    address, percent
+                                ));
+                            }
+                        }
+                    }
+                    if !breakdown_links.is_empty() {
+                        parts.push(format!("Breakdown: {}", breakdown_links.join(" | ")));
+                    }
+                }
+
+                let mut table_lines: Vec<String> = vec![
+                    "Top 10 Holders".to_string(),
+                    "User | Holdings | % of Supply".to_string(),
+                ];
+                let mut displayed_count = 0;
+
+                for (index, holder) in holders.iter().take(10).enumerate() {
+                    if let (Some(address), Some(ui_amount)) = (&holder.address, holder.ui_amount) {
+                        let tail = if address.len() >= 4 {
+                            &address[address.len() - 4..]
                         } else {
-                            address.clone()
+                            address.as_str()
                         };
-                        holder_parts.push(format!(
-                            "{}. <a href=\"https://solscan.io/account/{}\">{}</a>",
-                            holder_num, address, short_addr
+                        let base_label = if index + 1 < 10 {
+                            format!("{}..{}", index + 1, tail)
+                        } else {
+                            format!("{}.{tail}", index + 1)
+                        };
+                        let wallet_link = format!(
+                            "<a href=\"https://t.me/GMGN_smartmoney_bot?start={}\">{}</a>",
+                            address, base_label
+                        );
+                        let holdings_text = format_compact_amount(ui_amount);
+                        let percent_text = if let Some(total_supply) = supply_ui_amount {
+                            if total_supply > 0.0 {
+                                format!("{:.2}%", (ui_amount / total_supply) * 100.0)
+                            } else {
+                                "N/A".to_string()
+                            }
+                        } else {
+                            "N/A".to_string()
+                        };
+
+                        table_lines.push(format!(
+                            "{} | {} | {}",
+                            wallet_link, holdings_text, percent_text
                         ));
+                        displayed_count += 1;
                     }
-                    if let Some(ui_amount) = holder.ui_amount {
-                        holder_parts.push(format!("Amount: {}", ui_amount));
-                    }
-                    if let Some(ui_amount_str) = &holder.ui_amount_string {
-                        holder_parts.push(format!("Exact: {}", ui_amount_str));
-                    }
-                    if let Some(amount) = &holder.amount {
-                        holder_parts.push(format!("Raw: {}", amount));
-                    }
-                    if let Some(decimals) = holder.decimals {
-                        holder_parts.push(format!("Decimals: {}", decimals));
-                    }
-                    if !holder_parts.is_empty() {
-                        parts.push(holder_parts.join(" | "));
-                    }
+                }
+
+                if displayed_count > 0 {
+                    table_lines[0] = format!("Top {} Holders", displayed_count);
+                    parts.extend(table_lines);
+                } else {
+                    parts.push("No holder data available".to_string());
                 }
             } else {
                 parts.push("No holder data available".to_string());
@@ -492,6 +549,46 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
             if let Some(sol_balance) = data.dev_sol_balance {
                 dev_parts.push(format!("💰 <b>SOL Balance:</b> {:.2}", sol_balance));
             }
+
+            // Simple dev holdings indicator
+            if let Some(dev_holding) = &data.dev_token_holding {
+                if let Some(ui_amount) = dev_holding.ui_amount {
+                    if ui_amount > 0.0 {
+                        // Dev is holding tokens - show red dot with percentage
+                        if let Some(supply_info) = &data.supply_info {
+                            if let Some(result) = &supply_info.result {
+                                if let Some(value) = &result.value {
+                                    if let Some(supply_ui) = value.ui_amount {
+                                        if supply_ui > 0.0 {
+                                            let percent = (ui_amount / supply_ui) * 100.0;
+                                            dev_parts.push(format!("🔴 ({:.1}%)", percent));
+                                        } else {
+                                            dev_parts.push("🔴".to_string());
+                                        }
+                                    } else {
+                                        dev_parts.push("🔴".to_string());
+                                    }
+                                } else {
+                                    dev_parts.push("🔴".to_string());
+                                }
+                            } else {
+                                dev_parts.push("🔴".to_string());
+                            }
+                        } else {
+                            dev_parts.push("🔴".to_string());
+                        }
+                    } else {
+                        // Dev sold all tokens - show green dot
+                        dev_parts.push("🟢".to_string());
+                    }
+                } else {
+                    dev_parts.push("🟢".to_string());
+                }
+            } else {
+                // No data available - assume sold
+                dev_parts.push("🟢".to_string());
+            }
+
             parts.push(dev_parts.join(" | "));
             parts.push(String::new());
         }

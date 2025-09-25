@@ -21,6 +21,7 @@ pub struct DexPayload {
     pub dev_sol_balance: Option<f64>,
     pub holders: Option<HoldersData>,
     pub supply_ui_amount: Option<f64>,
+    pub dev_token_holding: Option<DevTokenHolding>,
 }
 
 impl ApiClient {
@@ -41,12 +42,14 @@ impl ApiClient {
             pump_fun_result,
             jupiter_result,
             dexscreener_orders_result,
+            supply_result,
         ) = tokio::join!(
             self.get_dexscreener_data(mint_address),
             self.get_token_largest_accounts(mint_address),
             self.get_pump_fun_data(mint_address),
             self.fetch_jupiter_token_data(mint_address),
             self.get_dexscreener_orders_data("solana", mint_address),
+            self.get_token_supply(mint_address),
         );
 
         // Fetch dev SOL balance if Jupiter data has dev address
@@ -60,17 +63,28 @@ impl ApiClient {
             None
         };
 
+        let dev_token_holding = if let Ok(jupiter_data) = &jupiter_result {
+            if let Some(dev_address) = &jupiter_data.dev {
+                self.get_dev_token_holding(dev_address, mint_address).await.ok().flatten()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let token_data = TokenData {
             mint_address: mint_address.to_string(),
             metadata: None,
             dexscreener_data: dexscreener_result.ok(),
             holders: holders_result.ok(),
-            supply_info: None,
+            supply_info: supply_result.ok(),
             creator_info: None,
             pump_fun_data: pump_fun_result.ok(),
             jupiter_data: jupiter_result.ok(),
             dexscreener_orders_data: dexscreener_orders_result.ok(),
             dev_sol_balance,
+            dev_token_holding,
         };
 
         Ok(token_data)
@@ -107,6 +121,16 @@ impl ApiClient {
             None
         };
 
+        let dev_token_holding = if let Some(jup) = &jupiter {
+            if let Some(dev_address) = &jup.dev {
+                self.get_dev_token_holding(dev_address, mint_address).await.ok().flatten()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(DexPayload {
             pairs,
             orders,
@@ -115,6 +139,7 @@ impl ApiClient {
             dev_sol_balance,
             holders,
             supply_ui_amount,
+            dev_token_holding,
         })
     }
 
@@ -257,5 +282,49 @@ impl ApiClient {
         } else {
             Err(anyhow!("No balance data found"))
         }
+    }
+
+    async fn get_dev_token_holding(&self, owner: &str, mint: &str) -> Result<Option<DevTokenHolding>> {
+        let url = format!("https://mainnet.helius-rpc.com/?api-key={}", self.api_key);
+        let payload = json!({
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "getTokenAccountsByOwner",
+            "params": [
+                owner,
+                {"mint": mint},
+                {"encoding": "jsonParsed"}
+            ]
+        });
+
+        let response = timeout(
+            Duration::from_secs(3),
+            self.client.post(&url).json(&payload).send(),
+        )
+        .await??;
+
+        let data: TokenAccountsResponse = response.json().await?;
+
+        if let Some(result) = data.result {
+            if let Some(accounts) = result.value {
+                if let Some(account) = accounts.into_iter().next() {
+                    let token_details = &account.account.data.parsed.info;
+                    let token_amount = &token_details.token_amount;
+
+                    return Ok(Some(DevTokenHolding {
+                        owner_address: owner.to_string(),
+                        mint_address: mint.to_string(),
+                        token_account: account.pubkey,
+                        amount: token_amount.amount.clone(),
+                        decimals: token_amount.decimals,
+                        ui_amount: token_amount.ui_amount,
+                        ui_amount_string: token_amount.ui_amount_string.clone(),
+                        state: token_details.state.clone(),
+                    }));
+                }
+            }
+        }
+
+        Ok(None) // No token account found
     }
 }

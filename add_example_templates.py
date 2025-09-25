@@ -92,7 +92,61 @@ Buys: {txns_h24_buys} | Sells: {txns_h24_sells}
 ⚠️ DYOR - Not Financial Advice"""
     }
 
-    templates = [simple_template, detailed_template, quick_template, premium_template]
+    dev_holders_template = {
+        "name": "🧑‍💻 Dev + Holders Breakdown",
+        "template_text": """🧑‍💻 DEVELOPER SNAPSHOT
+
+👤 Pump.fun Creator: {pf_creator} ({pf_creator_short})
+🔗 Creator Solscan: {pf_creator_solscan}
+📊 Creator Stats: {pf_creator_stats}
+
+👨‍💻 Jupiter Dev Wallet: <a href=\"https://solscan.io/account/{jup_dev_address}\">{jup_dev_address}</a>
+💼 Dev SOL Balance: {jup_dev_sol_balance}
+🎯 Dev Holding Indicator: {dev_holdings_indicator}
+
+📦 DEV TOKEN HOLDINGS
+• Holding Tokens?: {helius_creator_is_holder}
+• Balance (ui): {helius_creator_holding_ui_amount} ({helius_creator_holding_ui_amount_string})
+• Raw Amount: {helius_creator_holding_raw_amount}
+• % of Sample: {helius_creator_holding_percent_of_sample}%
+• % of Supply: {helius_creator_holding_percent_of_supply}%
+
+👥 HOLDERS SNAPSHOT
+• Data Slot: {helius_data_slot}
+• Holder Count: {helius_holder_count}
+• Total UI Amount: {helius_holder_total_ui_amount}
+• Remaining Share: {helius_remaining_share}%
+
+🏆 TOP HOLDER AGGREGATES
+• Top1: {helius_top1_ui_amount} ({helius_top1_share}%)
+• Top5: {helius_top5_ui_amount} ({helius_top5_share}%)
+• Top10: {helius_top10_ui_amount} ({helius_top10_share}%)
+• Top20: {helius_top20_ui_amount} ({helius_top20_share}%)
+
+🔗 Holder Breakdown: {helius_top_holders_breakdown}
+
+📋 HOLDER TABLE
+{helius_holder_table}
+
+1️⃣ {helius_holder_1_short} | {helius_holder_1_ui_amount} | {helius_holder_1_percent_of_supply}% (Sample: {helius_holder_1_percent_of_sample}%)
+2️⃣ {helius_holder_2_short} | {helius_holder_2_ui_amount} | {helius_holder_2_percent_of_supply}% (Sample: {helius_holder_2_percent_of_sample}%)
+3️⃣ {helius_holder_3_short} | {helius_holder_3_ui_amount} | {helius_holder_3_percent_of_supply}% (Sample: {helius_holder_3_percent_of_sample}%)
+4️⃣ {helius_holder_4_short} | {helius_holder_4_ui_amount} | {helius_holder_4_percent_of_supply}% (Sample: {helius_holder_4_percent_of_sample}%)
+5️⃣ {helius_holder_5_short} | {helius_holder_5_ui_amount} | {helius_holder_5_percent_of_supply}% (Sample: {helius_holder_5_percent_of_sample}%)
+6️⃣ {helius_holder_6_short} | {helius_holder_6_ui_amount} | {helius_holder_6_percent_of_supply}% (Sample: {helius_holder_6_percent_of_sample}%)
+7️⃣ {helius_holder_7_short} | {helius_holder_7_ui_amount} | {helius_holder_7_percent_of_supply}% (Sample: {helius_holder_7_percent_of_sample}%)
+8️⃣ {helius_holder_8_short} | {helius_holder_8_ui_amount} | {helius_holder_8_percent_of_supply}% (Sample: {helius_holder_8_percent_of_sample}%)
+9️⃣ {helius_holder_9_short} | {helius_holder_9_ui_amount} | {helius_holder_9_percent_of_supply}% (Sample: {helius_holder_9_percent_of_sample}%)
+🔟 {helius_holder_10_short} | {helius_holder_10_ui_amount} | {helius_holder_10_percent_of_supply}% (Sample: {helius_holder_10_percent_of_sample}%)"""
+    }
+
+    templates = [
+        simple_template,
+        detailed_template,
+        quick_template,
+        premium_template,
+        dev_holders_template,
+    ]
 
     print("Adding example templates to database...")
 

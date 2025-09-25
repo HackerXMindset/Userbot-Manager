@@ -63,21 +63,108 @@ class CallQueueModel(BaseModel):
 
         except asyncpg.exceptions.UndefinedColumnError:
             logger.warning("Call queue schema appears to be outdated. Forcing fallback query for curated alpha calls.")
-            # Simplified fallback to ensure essential data and template support is saved.
-            fallback_query = """
-                INSERT INTO call_queue (token_address, target_chat_id, forwarding_userbot_id, priority, curated_alpha_rule_id, target_group_id, additional_info, source_info, source_user_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                ON CONFLICT DO NOTHING
-                RETURNING *
-            """
-            try:
-                return await self.db.fetchrow(
-                    fallback_query,
-                    token_address, target_chat_id, forwarding_userbot_id, priority, curated_alpha_rule_id, target_group_id, additional_info, source_info, source_user_id
-                )
-            except Exception as final_fallback_error:
-                logger.error(f"CRITICAL: Final fallback insert failed: {final_fallback_error}")
-                return None
+            attempts = []
+
+            attempts.append((
+                """
+                    INSERT INTO call_queue (
+                        token_address,
+                        source_chat_id,
+                        target_chat_id,
+                        forwarding_userbot_id,
+                        priority,
+                        curated_alpha_rule_id,
+                        target_group_id,
+                        additional_info,
+                        source_info,
+                        source_user_id
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    ON CONFLICT DO NOTHING
+                    RETURNING *
+                """,
+                [
+                    token_address,
+                    source_chat_id,
+                    target_chat_id,
+                    forwarding_userbot_id,
+                    priority,
+                    curated_alpha_rule_id,
+                    target_group_id,
+                    additional_info,
+                    source_info,
+                    source_user_id,
+                ],
+            ))
+
+            attempts.append((
+                """
+                    INSERT INTO call_queue (
+                        token_address,
+                        target_chat_id,
+                        forwarding_userbot_id,
+                        priority,
+                        curated_alpha_rule_id,
+                        target_group_id,
+                        additional_info,
+                        source_info,
+                        source_user_id
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    ON CONFLICT DO NOTHING
+                    RETURNING *
+                """,
+                [
+                    token_address,
+                    target_chat_id,
+                    forwarding_userbot_id,
+                    priority,
+                    curated_alpha_rule_id,
+                    target_group_id,
+                    additional_info,
+                    source_info,
+                    source_user_id,
+                ],
+            ))
+
+            attempts.append((
+                """
+                    INSERT INTO call_queue (
+                        token_address,
+                        target_chat_id,
+                        forwarding_userbot_id,
+                        priority,
+                        curated_alpha_rule_id,
+                        target_group_id,
+                        additional_info,
+                        source_info
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    ON CONFLICT DO NOTHING
+                    RETURNING *
+                """,
+                [
+                    token_address,
+                    target_chat_id,
+                    forwarding_userbot_id,
+                    priority,
+                    curated_alpha_rule_id,
+                    target_group_id,
+                    additional_info,
+                    source_info,
+                ],
+            ))
+
+            for query, params in attempts:
+                try:
+                    return await self.db.fetchrow(query, *params)
+                except asyncpg.exceptions.UndefinedColumnError:
+                    continue
+                except Exception as attempt_error:
+                    logger.debug(f"Fallback insert attempt failed: {attempt_error}")
+
+            logger.error("CRITICAL: All fallback call_queue inserts failed due to missing columns.")
+            return None
 
     async def get_pending_jobs(self, limit: int = 10, userbot_id: int = None) -> List[asyncpg.Record]:
         """Get pending jobs from the queue, optionally filtered by userbot"""
