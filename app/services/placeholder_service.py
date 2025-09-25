@@ -96,6 +96,51 @@ def get_map_value(mapping: Optional[Dict[str, Any]], *keys: str) -> Any:
             return mapping[key]
     return None
 
+def detect_social_platform(url: str) -> str:
+    """Detects the social media platform from a given URL."""
+    if not isinstance(url, str):
+        return "Other"
+    url_lower = url.lower()
+    if "twitter.com" in url_lower or "x.com" in url_lower:
+        return "Twitter"
+    if "t.me" in url_lower:
+        return "Telegram"
+    if "discord.gg" in url_lower or "discord.com" in url_lower:
+        return "Discord"
+    if "github.com" in url_lower:
+        return "GitHub"
+    if "facebook.com" in url_lower:
+        return "Facebook"
+    if "instagram.com" in url_lower:
+        return "Instagram"
+    if "linkedin.com" in url_lower:
+        return "LinkedIn"
+    if "reddit.com" in url_lower:
+        return "Reddit"
+    if "youtube.com" in url_lower:
+        return "YouTube"
+    if "twitch.tv" in url_lower:
+        return "Twitch"
+    if "bitcointalk.org" in url_lower:
+        return "Bitcointalk"
+    if "blog.abcproject.org" in url_lower: # Assuming this is a generic blog indicator
+        return "Blog"
+    if "coingecko.com" in url_lower:
+        return "CoinGecko"
+    if "coinmarketcap.com" in url_lower:
+        return "CoinMarketCap"
+    if "slack.com" in url_lower:
+        return "Slack"
+    if "wechat.com" in url_lower:
+        return "WeChat"
+    if "whitepaper" in url_lower or ".pdf" in url_lower:
+        return "Whitepaper"
+    if "mailto:" in url_lower:
+        return "Email"
+    if "http" in url_lower:
+        return "Website"
+    return "Other"
+
 class PlaceholderService:
     """Gathers and formats data for template placeholders."""
 
@@ -253,6 +298,7 @@ class PlaceholderService:
             'jup_fdv': 'N/A',
             'jup_liquidity': 'N/A',
             'jup_bonding_curve': 'N/A',
+            'jup_bonding_progress_bar': 'N/A',
             'jup_price_block_id': 'N/A',
             'jup_is_verified': 'N/A',
             'jup_audit_mint_authority_disabled': 'N/A',
@@ -271,6 +317,7 @@ class PlaceholderService:
             'jup_twitter': 'N/A',
             'jup_telegram': 'N/A',
             'jup_website': 'N/A',
+            'jup_socials': 'N/A',
             'jup_cexes': 'N/A',
             'helius_data_slot': 'N/A',
             'helius_holder_count': 'N/A',
@@ -726,6 +773,38 @@ class PlaceholderService:
 
             cexes = get_map_value(jup, 'cexes') or []
             placeholders['jup_cexes'] = ', '.join(cexes) if cexes else 'N/A'
+
+            # Create combined jupiter social links
+            jup_social_links = []
+            potential_links = {
+                placeholders.get('jup_twitter'),
+                placeholders.get('jup_telegram'),
+                placeholders.get('jup_website'),
+            }
+            for link in sorted([l for l in potential_links if l and l != 'N/A']):
+                platform_name = detect_social_platform(link)
+                jup_social_links.append(f'<a href="{link}">{platform_name}</a>')
+
+            if jup_social_links:
+                placeholders['jup_socials'] = ' | '.join(jup_social_links)
+
+            # Bonding curve progress bar logic
+            bonding_curve_val = get_map_value(jup, 'bonding_curve', 'bondingCurve')
+            if bonding_curve_val is not None:
+                try:
+                    percentage = float(bonding_curve_val)
+                    if percentage >= 100.0:
+                        placeholders['jup_bonding_progress_bar'] = "Bonded ✅"
+                    else:
+                        total_blocks = 10
+                        filled_blocks = round(percentage / (100.0 / total_blocks))
+                        empty_blocks = total_blocks - filled_blocks
+                        progress_bar = '█' * int(filled_blocks) + '░' * int(empty_blocks)
+                        placeholders['jup_bonding_progress_bar'] = f"[{progress_bar}] {percentage:.1f}%"
+                except (ValueError, TypeError):
+                    placeholders['jup_bonding_progress_bar'] = "N/A"
+            else:
+                placeholders['jup_bonding_progress_bar'] = "N/A"
 
             stats_map = {
                 '5m': get_map_value(jup, 'stats_5m', 'stats5m') or {},
