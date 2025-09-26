@@ -123,10 +123,20 @@ Buys: {txns_h24_buys} | Sells: {txns_h24_sells}
 • Top10: {helius_top10_ui_amount} ({helius_top10_share}%)
 • Top20: {helius_top20_ui_amount} ({helius_top20_share}%)
 
-🔗 Holder Breakdown: {helius_top_holders_breakdown}
+🔗 Holder Breakdown: {helius_breakdown_1}|{helius_breakdown_2}|{helius_breakdown_3}|{helius_breakdown_4}|{helius_breakdown_5}|{helius_breakdown_6}|{helius_breakdown_7}|{helius_breakdown_8}|{helius_breakdown_9}|{helius_breakdown_10}
 
-📋 HOLDER TABLE
-{helius_holder_table}
+📋 HOLDER SNAPSHOT
+User | Holdings | % Supply
+{helius_holder_1_user} | {helius_holder_1_balance_short} | {helius_holder_1_percent_short}
+{helius_holder_2_user} | {helius_holder_2_balance_short} | {helius_holder_2_percent_short}
+{helius_holder_3_user} | {helius_holder_3_balance_short} | {helius_holder_3_percent_short}
+{helius_holder_4_user} | {helius_holder_4_balance_short} | {helius_holder_4_percent_short}
+{helius_holder_5_user} | {helius_holder_5_balance_short} | {helius_holder_5_percent_short}
+{helius_holder_6_user} | {helius_holder_6_balance_short} | {helius_holder_6_percent_short}
+{helius_holder_7_user} | {helius_holder_7_balance_short} | {helius_holder_7_percent_short}
+{helius_holder_8_user} | {helius_holder_8_balance_short} | {helius_holder_8_percent_short}
+{helius_holder_9_user} | {helius_holder_9_balance_short} | {helius_holder_9_percent_short}
+{helius_holder_10_user} | {helius_holder_10_balance_short} | {helius_holder_10_percent_short}
 
 1️⃣ {helius_holder_1_short} | {helius_holder_1_ui_amount} | {helius_holder_1_percent_of_supply}% (Sample: {helius_holder_1_percent_of_sample}%)
 2️⃣ {helius_holder_2_short} | {helius_holder_2_ui_amount} | {helius_holder_2_percent_of_supply}% (Sample: {helius_holder_2_percent_of_sample}%)

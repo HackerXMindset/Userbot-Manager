@@ -65,7 +65,10 @@ impl ApiClient {
 
         let dev_token_holding = if let Ok(jupiter_data) = &jupiter_result {
             if let Some(dev_address) = &jupiter_data.dev {
-                self.get_dev_token_holding(dev_address, mint_address).await.ok().flatten()
+                self.get_dev_token_holding(dev_address, mint_address)
+                    .await
+                    .ok()
+                    .flatten()
             } else {
                 None
             }
@@ -123,7 +126,10 @@ impl ApiClient {
 
         let dev_token_holding = if let Some(jup) = &jupiter {
             if let Some(dev_address) = &jup.dev {
-                self.get_dev_token_holding(dev_address, mint_address).await.ok().flatten()
+                self.get_dev_token_holding(dev_address, mint_address)
+                    .await
+                    .ok()
+                    .flatten()
             } else {
                 None
             }
@@ -284,7 +290,11 @@ impl ApiClient {
         }
     }
 
-    async fn get_dev_token_holding(&self, owner: &str, mint: &str) -> Result<Option<DevTokenHolding>> {
+    async fn get_dev_token_holding(
+        &self,
+        owner: &str,
+        mint: &str,
+    ) -> Result<Option<DevTokenHolding>> {
         let url = format!("https://mainnet.helius-rpc.com/?api-key={}", self.api_key);
         let payload = json!({
             "jsonrpc": "2.0",

@@ -4,7 +4,11 @@ use anyhow::Result;
 use regex::Regex;
 use std::sync::Arc;
 use std::time::Instant;
-use teloxide::{prelude::*, utils::html};
+use teloxide::update_listeners::{AsUpdateStream, UpdateListener};
+use teloxide::{prelude::*, types::UpdateKind, update_listeners, utils::html};
+use tokio::sync::watch;
+use tokio_stream::StreamExt;
+use tracing::error;
 
 fn format_compact_amount(value: f64) -> String {
     let abs_val = value.abs();
@@ -21,14 +25,49 @@ fn format_compact_amount(value: f64) -> String {
     }
 }
 
-pub async fn start_bot(bot_token: String, api_client: Arc<ApiClient>) -> Result<()> {
+pub async fn start_bot(
+    bot_token: String,
+    api_client: Arc<ApiClient>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> Result<()> {
     let bot = Bot::new(bot_token);
 
-    teloxide::repl(bot, move |bot: Bot, msg: Message| {
-        let api_client = Arc::clone(&api_client);
-        async move { handle_message(bot, msg, api_client).await }
-    })
-    .await;
+    let mut listener = update_listeners::polling_default(bot.clone()).await;
+    let stream = listener.as_stream();
+
+    tokio::pin!(stream);
+
+    loop {
+        tokio::select! {
+            changed = shutdown_rx.changed() => {
+                if changed.is_ok() && *shutdown_rx.borrow() {
+                    listener.stop_token().stop();
+                    break;
+                }
+            }
+            update = stream.next() => {
+                match update {
+                    Some(Ok(update)) => {
+                        if let UpdateKind::Message(message) = update.kind {
+                            let bot_clone = bot.clone();
+                            let client = Arc::clone(&api_client);
+                            if let Err(err) = handle_message(bot_clone, message, client).await {
+                                error!("Handler error: {:?}", err);
+                            }
+                        }
+                    }
+                    Some(Err(err)) => {
+                        if matches!(err, teloxide::RequestError::Api(teloxide::ApiError::TerminatedByOtherGetUpdates)) {
+                            error!("Polling interrupted by another getUpdates call. Retrying...");
+                        } else {
+                            error!("Failed to poll update: {:?}", err);
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
 
     Ok(())
 }
@@ -460,7 +499,9 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
                 if let Some(total_supply) = supply_ui_amount {
                     let mut breakdown_links = Vec::new();
                     for holder in holders.iter().take(10) {
-                        if let (Some(address), Some(ui_amount)) = (&holder.address, holder.ui_amount) {
+                        if let (Some(address), Some(ui_amount)) =
+                            (&holder.address, holder.ui_amount)
+                        {
                             if ui_amount > 0.0 {
                                 let percent = (ui_amount / total_supply) * 100.0;
                                 breakdown_links.push(format!(
@@ -549,7 +590,6 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
             if let Some(sol_balance) = data.dev_sol_balance {
                 dev_parts.push(format!("💰 <b>SOL Balance:</b> {:.2}", sol_balance));
             }
-
             // Simple dev holdings indicator
             if let Some(dev_holding) = &data.dev_token_holding {
                 if let Some(ui_amount) = dev_holding.ui_amount {
@@ -826,13 +866,22 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
             jup_data.token_program
         ));
         if let Some(icon) = &jup_data.icon {
-            parts.push(format!("🖼️ <b>Icon (jup):</b> <a href=\"{}\">{}</a>", icon, icon));
+            parts.push(format!(
+                "🖼️ <b>Icon (jup):</b> <a href=\"{}\">{}</a>",
+                icon, icon
+            ));
         }
         if let Some(price_block_id) = jup_data.price_block_id {
-            parts.push(format!("📊 <b>Price Block ID (jup):</b> {}", price_block_id));
+            parts.push(format!(
+                "📊 <b>Price Block ID (jup):</b> {}",
+                price_block_id
+            ));
         }
         if let Some(first_pool) = &jup_data.first_pool {
-            parts.push(format!("🏊 <b>First Pool (jup):</b> {} (Created: {})", first_pool.id, first_pool.created_at));
+            parts.push(format!(
+                "🏊 <b>First Pool (jup):</b> {} (Created: {})",
+                first_pool.id, first_pool.created_at
+            ));
         }
         if let Some(launchpad) = &jup_data.launchpad {
             parts.push(format!("🚀 <b>Launchpad (jup):</b> {}", launchpad));
@@ -862,8 +911,13 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
                 parts.push(format!("📋 <b>Order {}:</b>", order_num));
                 parts.push(format!("  🏷️ <b>Type:</b> {}", order.r#type));
                 parts.push(format!("  📊 <b>Status:</b> {}", order.status));
-                if let Some(timestamp) = chrono::DateTime::from_timestamp_millis(order.payment_timestamp) {
-                    parts.push(format!("  💰 <b>Payment:</b> {}", timestamp.format("%Y-%m-%d %H:%M")));
+                if let Some(timestamp) =
+                    chrono::DateTime::from_timestamp_millis(order.payment_timestamp)
+                {
+                    parts.push(format!(
+                        "  💰 <b>Payment:</b> {}",
+                        timestamp.format("%Y-%m-%d %H:%M")
+                    ));
                 }
             }
             parts.push(String::new());
@@ -881,11 +935,7 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
                         .filter_map(|s| {
                             s.handle.as_ref().map(|h| {
                                 let platform_name = detect_social_platform(h);
-                                format!(
-                                    "<a href=\"{}\">{} (dex)</a>",
-                                    h,
-                                    platform_name
-                                )
+                                format!("<a href=\"{}\">{} (dex)</a>", h, platform_name)
                             })
                         })
                         .collect();
@@ -922,11 +972,7 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
                 let empty_string = String::new();
                 let url_str = url.as_ref().unwrap_or(&empty_string);
                 let platform_name = detect_social_platform(url_str);
-                format!(
-                    "<a href=\"{}\">{} (pf)</a>",
-                    url_str,
-                    platform_name
-                )
+                format!("<a href=\"{}\">{} (pf)</a>", url_str, platform_name)
             })
             .collect();
         parts.push(format!(
@@ -938,15 +984,24 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
         let mut jup_social_parts = Vec::new();
         if let Some(twitter) = &jup_data.twitter {
             let platform_name = detect_social_platform(twitter);
-            jup_social_parts.push(format!("<a href=\"{}\">{} (jup)</a>", twitter, platform_name));
+            jup_social_parts.push(format!(
+                "<a href=\"{}\">{} (jup)</a>",
+                twitter, platform_name
+            ));
         }
         if let Some(telegram) = &jup_data.telegram {
             let platform_name = detect_social_platform(telegram);
-            jup_social_parts.push(format!("<a href=\"{}\">{} (jup)</a>", telegram, platform_name));
+            jup_social_parts.push(format!(
+                "<a href=\"{}\">{} (jup)</a>",
+                telegram, platform_name
+            ));
         }
         if let Some(website) = &jup_data.website {
             let platform_name = detect_social_platform(website);
-            jup_social_parts.push(format!("<a href=\"{}\">{} (jup)</a>", website, platform_name));
+            jup_social_parts.push(format!(
+                "<a href=\"{}\">{} (jup)</a>",
+                website, platform_name
+            ));
         }
         if !jup_social_parts.is_empty() {
             parts.push(format!(

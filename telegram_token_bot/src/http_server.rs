@@ -1,7 +1,12 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::Result;
-use axum::{extract::{Path, State}, http::StatusCode, routing::get, Json, Router};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    routing::get,
+    Json, Router,
+};
 use tokio::sync::watch;
 use tracing::{error, info};
 
@@ -49,7 +54,10 @@ async fn get_dex_payload(
         Ok(payload) => Ok(Json(payload)),
         Err(err) => {
             error!("Dex payload error for {}: {:?}", address, err);
-            Err((StatusCode::BAD_GATEWAY, "Failed to fetch Dex data".to_string()))
+            Err((
+                StatusCode::BAD_GATEWAY,
+                "Failed to fetch Dex data".to_string(),
+            ))
         }
     }
 }

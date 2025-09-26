@@ -358,7 +358,6 @@ class PlaceholderService:
             'helius_top10_share': 'N/A',
             'helius_top20_share': 'N/A',
             'helius_remaining_share': 'N/A',
-            'helius_holder_table': 'N/A',
         }
 
         for i in range(1, 6):
@@ -401,8 +400,10 @@ class PlaceholderService:
             placeholders[f'helius_holder_{i}_decimals'] = 'N/A'
             placeholders[f'helius_holder_{i}_percent_of_sample'] = 'N/A'
             placeholders[f'helius_holder_{i}_percent_of_supply'] = 'N/A'
-
-        placeholders['helius_top_holders_breakdown'] = 'N/A'
+            placeholders[f'helius_holder_{i}_user'] = 'N/A'
+            placeholders[f'helius_holder_{i}_balance_short'] = 'N/A'
+            placeholders[f'helius_holder_{i}_percent_short'] = 'N/A'
+            placeholders[f'helius_breakdown_{i}'] = 'N/A'
 
         # Fetch data from Rust service first
         db_token = await self.token_model.get_by_address(self.token_address)
@@ -936,6 +937,24 @@ class PlaceholderService:
                 placeholders[f'helius_holder_{idx}_raw_amount'] = raw_amount
                 placeholders[f'helius_holder_{idx}_decimals'] = decimals if decimals is not None else 'N/A'
 
+                tail = address[-4:] if len(address) >= 4 else address
+                if idx < 10:
+                    user_label = f"{idx}..{tail}"
+                else:
+                    user_label = f"{idx}.{tail}"
+
+                placeholders[f'helius_holder_{idx}_user'] = user_label
+                placeholders[f'helius_holder_{idx}_balance_short'] = format_compact_number(ui_amount_value)
+
+                percent_of_supply = None
+                if supply_value and supply_value > 0:
+                    percent_of_supply = (ui_amount_value / supply_value) * 100.0
+                    placeholders[f'helius_holder_{idx}_percent_short'] = f"{percent_of_supply:.2f}%"
+                    placeholders[f'helius_breakdown_{idx}'] = f"{percent_of_supply:.1f}"
+                else:
+                    placeholders[f'helius_holder_{idx}_percent_short'] = 'N/A'
+                    placeholders[f'helius_breakdown_{idx}'] = 'N/A'
+
                 holder_entries.append({
                     'index': idx,
                     'address': address,
@@ -944,7 +963,7 @@ class PlaceholderService:
                     'ui_amount_string': ui_amount_string,
                     'raw_amount': raw_amount,
                     'short': short_addr,
-                    'address': address,
+                    'percent_supply': percent_of_supply,
                 })
 
             placeholders['helius_holder_total_ui_amount'] = format_number(total_ui, decimals=6)
@@ -972,61 +991,11 @@ class PlaceholderService:
 
             if supply_value and supply_value > 0:
                 for entry in holder_entries:
-                    placeholders[f"helius_holder_{entry['index']}_percent_of_supply"] = format_number(
-                        (entry['ui_amount'] / supply_value) * 100.0,
-                        decimals=2,
-                    )
-
-                # Construct breakdown for holders 2-11 (skip presumed LP at index 1)
-                breakdown_links = []
-                for entry in holder_entries:
-                    address = entry['address']
-                    if (
-                        1 <= entry['index'] <= 10
-                        and entry['ui_amount'] > 0
-                        and address
-                        and address != 'N/A'
-                    ):
-                        percent = (entry['ui_amount'] / supply_value) * 100.0
-                        breakdown_links.append(
-                            f"<a href=\"https://t.me/GMGN_smartmoney_bot?start={address}\">{percent:.1f}%</a>"
-                        )
-
-                if breakdown_links:
-                    placeholders['helius_top_holders_breakdown'] = ' | '.join(breakdown_links)
-
-            top_entries = holder_entries[:10]
-            if top_entries:
-                table_lines = [
-                    'Top 10 Holders',
-                    'User | Holdings | % of Supply',
-                ]
-
-                for entry in top_entries:
-                    address = entry['address']
-                    if not address or address == 'N/A':
-                        continue
-                    tail = address[-4:] if len(address) >= 4 else address
-                    if entry['index'] < 10:
-                        user_label = f"{entry['index']}..{tail}"
-                    else:
-                        user_label = f"{entry['index']}.{tail}"
-
-                    wallet_link = (
-                        f"<a href=\"https://t.me/GMGN_smartmoney_bot?start={address}\">{user_label}</a>"
-                    )
-
-                    holdings_text = format_compact_number(entry['ui_amount'])
-                    if supply_value and supply_value > 0:
-                        percent_val = (entry['ui_amount'] / supply_value) * 100.0
-                        percent_text = f"{percent_val:.2f}%"
-                    else:
-                        percent_text = 'N/A'
-
-                    table_lines.append(f"{wallet_link} | {holdings_text} | {percent_text}")
-
-                if len(table_lines) > 2:
-                    placeholders['helius_holder_table'] = '\n'.join(table_lines)
+                    percent = entry.get('percent_supply')
+                    if percent is not None:
+                        placeholders[
+                            f"helius_holder_{entry['index']}_percent_of_supply"
+                        ] = format_number(percent, decimals=2)
 
         # Fallback and supplement with DB data
         if db_token:

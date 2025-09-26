@@ -1,0 +1,46 @@
+🚨 <a href="https://gmgn.ai/sol/token/{address}">{jup_name} | {jup_symbol}</a> 🚨
+
+<a href="https://solscan.io/token/{address}"><code>{address}</code></a>
+
+MCAP: {jup_mcap} | FDV: {jup_fdv}
+ATH: {pf_ath_market_cap} ({pf_ath_comparison})
+Vol: {volume_h1} | {volume_h6}
+
+Age: {pf_created_timestamp_ago} | Score: {jup_organic_score}
+Dex: #{dex_pair_dex_id}
+└ Dex Paid: {dex_paid}{dex_boosts_active} | CTO: {cto_status} {dex_time}
+
+👥 Holders: {jup_holder_count} (total) | Top10 – {jup_audit_top_holders_pct}
+{helius_breakdown_1}|{helius_breakdown_2}|{helius_breakdown_3}|{helius_breakdown_4}|{helius_breakdown_5}|{helius_breakdown_6}|{helius_breakdown_7}|{helius_breakdown_8}|{helius_breakdown_9}|{helius_breakdown_10}
+
+<blockquote expandable>
+User | Holdings | % Supply
+<a href="https://solscan.io/account/{helius_holder_1_address}">{helius_holder_1_user}</a> | {helius_holder_1_balance_short} | {helius_holder_1_percent_short}
+<a href="https://solscan.io/account/{helius_holder_2_address}">{helius_holder_2_user}</a> | {helius_holder_2_balance_short} | {helius_holder_2_percent_short}
+<a href="https://solscan.io/account/{helius_holder_3_address}">{helius_holder_3_user}</a> | {helius_holder_3_balance_short} | {helius_holder_3_percent_short}
+<a href="https://solscan.io/account/{helius_holder_4_address}">{helius_holder_4_user}</a> | {helius_holder_4_balance_short} | {helius_holder_4_percent_short}
+<a href="https://solscan.io/account/{helius_holder_5_address}">{helius_holder_5_user}</a> | {helius_holder_5_balance_short} | {helius_holder_5_percent_short}
+<a href="https://solscan.io/account/{helius_holder_6_address}">{helius_holder_6_user}</a> | {helius_holder_6_balance_short} | {helius_holder_6_percent_short}
+<a href="https://solscan.io/account/{helius_holder_7_address}">{helius_holder_7_user}</a> | {helius_holder_7_balance_short} | {helius_holder_7_percent_short}
+<a href="https://solscan.io/account/{helius_holder_8_address}">{helius_holder_8_user}</a> | {helius_holder_8_balance_short} | {helius_holder_8_percent_short}
+<a href="https://solscan.io/account/{helius_holder_9_address}">{helius_holder_9_user}</a> | {helius_holder_9_balance_short} | {helius_holder_9_percent_short}
+<a href="https://solscan.io/account/{helius_holder_10_address}">{helius_holder_10_user}</a> | {helius_holder_10_balance_short} | {helius_holder_10_percent_short}
+</blockquote>
+
+🌍 Socials: {jup_socials}
+
+{jup_bonding_progress_bar}
+
+📺 Livestream Status
+├ Live: {pf_is_currently_live}
+├ Replies: {pf_reply_count}
+└ Participants: {pf_num_participants}
+
+👨‍💻 Dev
+├ {dev_holdings_indicator}
+└ SOL Balance: {jup_dev_sol_balance} SOL
+
+⚡️ Fast Buy
+├ <a href="https://t.me/achilles_trojanbot?start=r-summonmrx-{address}">TRO</a> • <a href="http://axiom.trade/t/{address}/@gudbuy">Axiom</a> • <a href="https://photon-sol.tinyastro.io/en/r/@Philo/{address}">PHO</a> • <a href="https://neo.bullx.io/terminal?chainId=1399811149&address={address}">NEO</a>
+├ <a href="https://t.me/bonkbot_bot?start=ref_hofyk_ca_{address}">BONK</a> • <a href="https://t.me/BloomSolana_bot?start=ref_ZU8ADF6L1R_ca_{address}">Bloom</a> • <a href="https://t.me/pepeboost_sol_bot?start=ref_0geshh_{address}">Pepe</a> • <a href="https://trade.padre.gg/trade/solana/{address}?rk=call">Padre</a>
+└ <a href="https://t.me/MaestroSniperBot?start={address}-x369_y24_z1369">Maes</a> • <a href="https://gmgn.ai/sol/token/fyukG1og_{address}">Gmgn</a> • <a href="https://t.me/SolTradingBot?start={address}-2E52sU522">SolTr</a> • <a href="https://t.me/soul_scanner_bot?start={address}">Soul</a>

@@ -205,9 +205,9 @@ Recent implementation enables different userbots for monitoring vs forwarding:
 - **Snapshot**: `helius_data_slot`, `helius_holder_count`, `helius_holder_total_ui_amount`
 - **Aggregates**: `helius_top1_ui_amount/share`, `helius_top5_*`, `helius_top10_*`, `helius_top20_*`
 - **Per-Holder** (1-20): `helius_holder_N_address`, `helius_holder_N_short`, `helius_holder_N_ui_amount`
+- **Formatted** (1-20): `helius_holder_N_user`, `helius_holder_N_balance_short`, `helius_holder_N_percent_short`, `helius_breakdown_N`
 - **Creator Holdings**: `helius_creator_is_holder`, `helius_creator_holding_*` (amounts, percentages)
 - **Enhanced Dev Detection**: `dev_holdings_indicator` (🟢 if sold, 🔴 (X.X%) if holding)
-- **Convenience**: `helius_holder_table` (preformatted multi-line holder list)
 
 ### **General Helpers**:
 - **Basic**: `address`, `token_symbol`, `token_name`, `multiplier`

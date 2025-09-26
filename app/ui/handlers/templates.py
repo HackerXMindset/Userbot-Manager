@@ -263,15 +263,18 @@ class TemplatesHandler:
             data = await state.get_data()
             new_assignments = set(data.get('current_assignments', []))
 
-            # Get all groups to clear old assignments for this template
-            all_groups = await self.group_model.get_groups_with_stats()
-            for group in all_groups:
-                # This is inefficient, a better way would be a single query to unassign all
-                # but for now this is fine.
-                await self.assignment_model.unassign(group['id'])
+            # Fetch current DB assignments for this template
+            existing_assignments = await self.assignment_model.get_assigned_groups(template_id)
+            existing_ids = {group['id'] for group in existing_assignments}
 
-            # Add new assignments
-            for group_id in new_assignments:
+            # Determine groups to remove and add
+            to_remove = existing_ids - new_assignments
+            to_add = new_assignments - existing_ids
+
+            for group_id in to_remove:
+                await self.assignment_model.unassign(group_id)
+
+            for group_id in to_add:
                 await self.assignment_model.assign(group_id, template_id)
 
             await query.answer("✅ Assignments saved!")

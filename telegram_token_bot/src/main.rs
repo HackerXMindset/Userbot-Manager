@@ -36,15 +36,15 @@ async fn main() -> Result<()> {
 
     // HTTP server task
     let http_api = Arc::clone(&api_client);
-    let http_handle = tokio::spawn(async move {
-        http_server::run_http_server(http_api, shutdown_rx).await
-    });
+    let http_handle =
+        tokio::spawn(async move { http_server::run_http_server(http_api, shutdown_rx).await });
 
     // Telegram bot task
     let bot_api = Arc::clone(&api_client);
     let shutdown_for_bot = shutdown_tx.clone();
+    let bot_shutdown_rx = shutdown_for_bot.subscribe();
     let bot_handle = tokio::spawn(async move {
-        let res = bot::start_bot(bot_token, bot_api).await;
+        let res = bot::start_bot(bot_token, bot_api, bot_shutdown_rx).await;
         let _ = shutdown_for_bot.send(true);
         res
     });
