@@ -2,13 +2,14 @@ import asyncio
 import aiohttp
 import logging
 from typing import Dict, Any, Optional, List
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from datetime import datetime
 
 from app.config import settings
 from app.db import db
 from app.models import TokenModel
 from app.userbot.session_manager import SessionManager
+from app.services.rust_bridge import rust_dex_bridge
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +25,9 @@ def get_dex_service():
 
 class DexScreenerService:
     """DexScreener integration for token price monitoring"""
-    
+
     BASE_URL = "https://api.dexscreener.com/tokens/v1/solana"
+    JUPITER_TOLERANCE = Decimal('0.20')  # Acceptable delta between Dex and Jupiter MC readings
     
     def __init__(self):
         self.token_model = TokenModel(db)
@@ -284,7 +286,7 @@ class DexScreenerService:
             
             # Check for gain alerts after market cap update
             await self._check_gain_alerts(token, new_mc)
-            
+
             # Check for drop alerts after market cap update
             await self._check_drop_alerts(token, new_mc)
             
@@ -299,48 +301,84 @@ class DexScreenerService:
             logger.error(f"Error updating token from API data: {e}")
     
     async def _check_gain_alerts(self, token: Dict[str, Any], new_mc: Decimal):
-        """Check for gain alerts using existing working pattern"""
+        """Check for gain alerts using improved Jupiter-verified logic."""
         try:
-            if not token.get('first_seen_mc') or token['first_seen_mc'] <= 0:
+            first_seen_mc = token.get('first_seen_mc')
+            if not first_seen_mc or first_seen_mc <= 0:
                 return
-                
-            current_multiplier = new_mc / token['first_seen_mc']
-            last_hit = token.get('last_hit_multiplier', 1)
-            
-            # Get gain thresholds from settings 
+
+            current_multiplier = new_mc / first_seen_mc
+            last_hit_decimal = self._safe_decimal(token.get('last_hit_multiplier'), default=Decimal('1')) or Decimal('1')
+
+            # Get gain thresholds from settings
             gain_settings = await db.fetchval("SELECT value FROM settings WHERE key = 'gain_multipliers'")
             if not gain_settings:
                 return
-                
+
             import json
-            gain_multipliers = json.loads(gain_settings)
-            
-            # Check each threshold
-            for threshold in sorted(gain_multipliers):
-                threshold_decimal = Decimal(str(threshold))
-                if current_multiplier >= threshold_decimal and Decimal(str(last_hit)) < threshold_decimal:
-                    await self._queue_pnl_command(token, threshold_decimal)
+            try:
+                raw_thresholds = json.loads(gain_settings)
+            except (TypeError, ValueError) as parse_error:
+                logger.error(f"Invalid gain_multipliers setting: {parse_error}")
+                return
+
+            gain_multipliers: List[Decimal] = []
+            for raw_value in raw_thresholds:
+                decimal_value = self._safe_decimal(raw_value)
+                if decimal_value and decimal_value > 0:
+                    gain_multipliers.append(decimal_value)
+
+            if not gain_multipliers:
+                logger.warning("No valid gain thresholds configured; skipping alert checks.")
+                return
+
+            for threshold_decimal in sorted(gain_multipliers):
+                if current_multiplier < threshold_decimal:
+                    break  # thresholds sorted; remaining values won't match yet
+
+                if last_hit_decimal >= threshold_decimal:
+                    continue  # already hit this threshold in the past
+
+                verified = await self._verify_with_jupiter(token['address'], new_mc)
+                if not verified:
+                    logger.warning(
+                        "[PNL_ALERT] Jupiter verification failed for %s at %sx (Dex MC: %s).",
+                        token['address'][:8],
+                        threshold_decimal,
+                        f"{new_mc:,.0f}"
+                    )
+                    break  # retry on next poll; do not advance to higher thresholds yet
+
+                sent = await self._queue_pnl_command(token, threshold_decimal)
+                if sent:
                     await self.token_model.update_hit_multiplier(token['id'], threshold_decimal)
-                    break
-                    
+                else:
+                    logger.warning(
+                        "[PNL_ALERT] Unable to send PNL alert for %s at %sx despite verification.",
+                        token['address'][:8],
+                        threshold_decimal
+                    )
+                break
+
         except Exception as e:
             logger.error(f"Error checking gain alerts: {e}")
     
-    async def _queue_pnl_command(self, token: Dict[str, Any], threshold: Decimal):
-        """Send /pnl command using the managed userbot worker."""
+    async def _queue_pnl_command(self, token: Dict[str, Any], threshold: Decimal) -> bool:
+        """Send /pnl command using the managed userbot worker. Returns True if any delivery succeeds."""
         logger.debug(f"[PNL_ALERT] Attempting to queue PNL command for token {token['address']} at {threshold}x.")
+        success = False
         try:
             source_group_id = token.get('source_group_id')
             if not source_group_id:
                 logger.debug(f"[PNL_ALERT] Aborting: No source_group_id found on token {token['id']}.")
-                return
+                return False
 
             logger.debug(f"[PNL_ALERT] Token {token['id']} is associated with source_group_id {source_group_id}.")
 
             # Check if the userbot manager is available
             if not self.userbot_manager:
                 logger.error("[PNL_ALERT] Aborting: UserbotManager not available in DexScreenerService.")
-                return
+                return False
 
             # Get the userbot assigned to the source group
             logger.debug(f"[PNL_ALERT] Fetching userbot assignment for group {source_group_id}.")
@@ -350,7 +388,7 @@ class DexScreenerService:
 
             if not userbot_assignment or not userbot_assignment['userbot_id']:
                 logger.warning(f"[PNL_ALERT] Aborting: No userbot assigned to group {source_group_id} for PNL alert.")
-                return
+                return False
             
             userbot_id = userbot_assignment['userbot_id']
             logger.debug(f"[PNL_ALERT] Group {source_group_id} is assigned to userbot {userbot_id}.")
@@ -359,12 +397,12 @@ class DexScreenerService:
             worker = self.userbot_manager.get_worker(userbot_id)
             if not worker:
                 logger.error(f"[PNL_ALERT] Aborting: Userbot worker {userbot_id} not found in manager.")
-                return
+                return False
 
             client = worker.session_manager.get_client()
             if not client or not worker.session_manager.is_connected():
                 logger.error(f"[PNL_ALERT] Aborting: Userbot {userbot_id} is not connected.")
-                return
+                return False
             
             logger.debug(f"[PNL_ALERT] Userbot {userbot_id} client is connected.")
 
@@ -373,7 +411,7 @@ class DexScreenerService:
             targets = await db.fetch("SELECT dest_chat_id FROM targets WHERE group_id = $1", source_group_id)
             if not targets:
                 logger.warning(f"[PNL_ALERT] Aborting: No targets found for source group {source_group_id}.")
-                return
+                return False
 
             logger.debug(f"[PNL_ALERT] Found {len(targets)} targets for group {source_group_id}.")
             message = f"/pnl {token['address']}"
@@ -385,6 +423,7 @@ class DexScreenerService:
                 try:
                     sent_message = await client.send_message(target_chat_id, message)
                     logger.info(f"[PNL_ALERT] SUCCESS: Sent /pnl {token['address'][:8]}... to {target_chat_id} ({threshold}x alert, msg_id: {sent_message.id})")
+                    success = True
                 except Exception as send_error:
                     import traceback
                     logger.error(f"[PNL_ALERT] FAILED to send PNL command to {target_chat_id}: {send_error}")
@@ -408,7 +447,7 @@ class DexScreenerService:
             """, token['address'])
 
             if not curated_rules:
-                pass # No curated PNL forwarding for this token
+                return success
 
             logger.info(f"[CuratedAlpha] Found {len(curated_rules)} curated PNL rule(s) for token {token['address'][:8]}...")
 
@@ -432,13 +471,81 @@ class DexScreenerService:
                     continue
                 
                 try:
-                    sent_message = await client.send_message(destination_id, message)
+                    await client.send_message(destination_id, message)
                     logger.info(f"[CuratedAlpha] Sent PNL alert for {token['address'][:8]}... to curated destination {destination_id} via bot {userbot_id}.")
+                    success = True
                 except Exception as send_error:
                     logger.error(f"[CuratedAlpha] Failed to send PNL alert to {destination_id}: {send_error}")
 
         except Exception as e:
             logger.error(f"Error sending Curated Alpha PNL command: {e}")
+
+        return success
+
+    def _safe_decimal(self, value: Any, default: Optional[Decimal] = None) -> Optional[Decimal]:
+        """Coerce any numeric-like value into a Decimal with fallback."""
+        if value is None:
+            return default
+        if isinstance(value, Decimal):
+            return value
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return default
+
+    async def _fetch_jupiter_market_cap(self, token_address: str) -> Optional[Decimal]:
+        """Fetch market cap from Jupiter via the Rust bridge."""
+        try:
+            payload = await rust_dex_bridge.fetch_dex_payload(token_address)
+        except Exception as err:
+            logger.error(f"[JUPITER] Error requesting payload for {token_address[:8]}...: {err}")
+            return None
+
+        if not payload:
+            return None
+
+        jupiter_payload = payload.get('jupiter') or {}
+        if not jupiter_payload:
+            return None
+
+        mcap_value = (
+            jupiter_payload.get('mcap')
+            or jupiter_payload.get('market_cap')
+            or jupiter_payload.get('marketCap')
+        )
+
+        mcap_decimal = self._safe_decimal(mcap_value, default=None)
+        if mcap_decimal is None or mcap_decimal <= 0:
+            return None
+
+        return mcap_decimal
+
+    async def _verify_with_jupiter(self, token_address: str, dex_market_cap: Decimal) -> bool:
+        """Validate Dex reading against Jupiter before firing alerts."""
+        if dex_market_cap is None or dex_market_cap <= 0:
+            return False
+
+        jupiter_mc = await self._fetch_jupiter_market_cap(token_address)
+        if not jupiter_mc or jupiter_mc <= 0:
+            logger.warning(f"[JUPITER] Missing market cap for {token_address[:8]}... during verification.")
+            return False
+
+        max_mc = max(jupiter_mc, dex_market_cap)
+        if max_mc == 0:
+            return False
+
+        diff_ratio = abs(jupiter_mc - dex_market_cap) / max_mc
+        if diff_ratio <= self.JUPITER_TOLERANCE:
+            return True
+
+        logger.warning(
+            "[JUPITER] MC mismatch for %s (Dex: %s, Jup: %s, diff: %.2f%%)",
+            token_address[:8],
+            f"{dex_market_cap:,.0f}",
+            f"{jupiter_mc:,.0f}",
+            float(diff_ratio * 100)
+        )
+        return False
     
     async def _check_drop_alerts(self, token: Dict[str, Any], new_mc: Decimal):
         """Check for drop alerts using existing working pattern"""
@@ -495,7 +602,7 @@ class DexScreenerService:
                     'success': False,
                     'error': 'Could not fetch token data from DexScreener'
                 }
-            
+
             # Extract initial market cap from new API format
             pairs = token_data if isinstance(token_data, list) else token_data.get('pairs', [])
             if not pairs:
@@ -503,18 +610,24 @@ class DexScreenerService:
                     'success': False,
                     'error': 'No trading pairs found for token'
                 }
-            
+
             # Just use first pair since liquidity isn't needed
             best_pair = pairs[0]
             market_cap = best_pair.get('marketCap')
-            
+
             if not market_cap:
                 return {
                     'success': False,
                     'error': 'Could not determine market cap'
                 }
-            
-            initial_mc = Decimal(str(market_cap))
+
+            jupiter_mc = await self._fetch_jupiter_market_cap(token_address)
+            if jupiter_mc:
+                initial_mc = jupiter_mc
+                logger.debug(f"[JUPITER] Using Jupiter MC {initial_mc} for token {token_address[:8]}... as first_seen_mc")
+            else:
+                initial_mc = Decimal(str(market_cap))
+                logger.debug(f"[JUPITER] Fallback to DexScreener MC {initial_mc} for token {token_address[:8]}...")
             ticker = best_pair.get('baseToken', {}).get('symbol')
 
             # Create token record

@@ -116,12 +116,6 @@ async fn handle_message(bot: Bot, msg: Message, api_client: Arc<ApiClient>) -> R
                     bot.send_message(msg.chat.id, error_text).await?;
                 }
             }
-        } else {
-            bot.send_message(
-                msg.chat.id,
-                "🪙 Send me a contract address to analyze token data!",
-            )
-            .await?;
         }
     }
 

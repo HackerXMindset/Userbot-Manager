@@ -514,11 +514,6 @@ class MessageHandler:
                 logger.debug(f"[MessageHandler] Rule {rule['id']} allowed users: {allowed_users}")
                 
                 if not allowed_users or event.sender_id in allowed_users:
-                    # Only the designated userbot should track the command
-                    if self.userbot_id != rule.get('forwarding_userbot_id'):
-                        logger.debug(f"[MessageHandler] Skipping /pnl tracking for rule {rule['id']}: not the designated userbot")
-                        continue
-
                     logger.info(f"[MessageHandler] User {event.sender_id} authorized for rule {rule['id']}, tracking /pnl command")
                     
                     try:
@@ -588,17 +583,17 @@ class MessageHandler:
                     logger.info(f"[MessageHandler] Valid PNL reply detected from user {event.sender_id}, forwarding immediately for rule {rule['id']}")
                     
                     # Forward the message using the designated forwarding userbot
-                    success = await self._forward_pnl_reply(rule, event.message)
+                    success = await self._forward_pnl_reply(rule, event.message, tracked['id'])
                     if success:
                         logger.info(f"[MessageHandler] Successfully forwarded PNL reply {event.message.id} for tracking {tracked['id']}")
                     else:
                         logger.error(f"[MessageHandler] Failed to forward PNL reply {event.message.id} for tracking {tracked['id']}")
-                        
+                    
         except Exception as e:
             logger.error(f"[MessageHandler] Error handling potential PNL reply: {e}")
             logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
 
-    async def _forward_pnl_reply(self, rule: dict, message) -> bool:
+    async def _forward_pnl_reply(self, rule: dict, message, tracked_id: int) -> bool:
         """Forward a PNL reply message to the destination channel."""
         try:
             # Check if this userbot is the designated forwarding userbot
@@ -622,6 +617,20 @@ class MessageHandler:
             )
             
             logger.info(f"[MessageHandler] Successfully forwarded PNL reply to channel {rule['destination_channel_id']}")
+            if tracked_id:
+                await db.execute(
+                    """
+                    UPDATE pnl_tracked_messages
+                    SET status = 'forwarded',
+                        reply_sender_id = $1,
+                        last_reply_message_id = $2,
+                        updated_at = NOW()
+                    WHERE id = $3
+                    """,
+                    message.sender_id,
+                    message.id,
+                    tracked_id
+                )
             return True
             
         except Exception as e:
