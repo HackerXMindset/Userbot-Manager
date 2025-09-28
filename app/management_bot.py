@@ -15,7 +15,7 @@ from app.db import db
 from app.ui.keyboards import Keyboards
 from app.ui.states import ManagementStates
 from app.ui.handlers import (
-    MenuHandler, GroupsHandler, UserbotsHandler, 
+    MenuHandler, GroupsHandler, UserbotsHandler, TargetsHandler,
     SchedulesHandler, SourcesHandler, AlertsHandler, PnlHandler,
     NotificationsHandler, AutoClickHandler, CurateAlphaHandler, TemplatesHandler
 )
@@ -33,6 +33,7 @@ class ManagementBot:
         self.menu_handler = MenuHandler(db, self.keyboards)
         self.groups_handler = GroupsHandler(db, self.keyboards)
         self.userbots_handler = UserbotsHandler(db, self.keyboards, self)
+        self.targets_handler = TargetsHandler(db, self.keyboards)
         self.schedules_handler = SchedulesHandler(db, self.keyboards)
         self.sources_handler = SourcesHandler(db, self.keyboards)
         self.alerts_handler = AlertsHandler(db, self.keyboards)
@@ -69,6 +70,13 @@ class ManagementBot:
         self.dp.callback_query.register(
             self.groups_handler.handle_group_action,
             F.data.startswith(('group:', 'groups_page:')),
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        # Targets
+        self.dp.callback_query.register(
+            self.targets_handler.handle_target_action,
+            F.data.startswith('targets:'),
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
@@ -130,18 +138,6 @@ class ManagementBot:
         self.dp.callback_query.register(
             self.alerts_handler.handle_alerts_action,
             F.data.startswith('alerts:'),
-            F.from_user.id.in_(settings.admin_telegram_ids_list)
-        )
-        
-        self.dp.callback_query.register(
-            self.alerts_handler.handle_gains_preset,
-            F.data.startswith('gains:'),
-            F.from_user.id.in_(settings.admin_telegram_ids_list)
-        )
-        
-        self.dp.callback_query.register(
-            self.alerts_handler.handle_drop_setting,
-            F.data.startswith('drop:'),
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
 
@@ -231,6 +227,24 @@ class ManagementBot:
         self.dp.message.register(
             self.groups_handler.process_group_input,
             ManagementStates.adding_group,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.targets_handler.process_target_input,
+            ManagementStates.adding_target,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.targets_handler.process_sensitivity_input,
+            ManagementStates.target_edit_sensitivity,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.targets_handler.process_thresholds_input,
+            ManagementStates.target_edit_thresholds,
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         

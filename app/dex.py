@@ -7,7 +7,9 @@ from datetime import datetime
 
 from app.config import settings
 from app.db import db
-from app.models import TokenModel
+from app.models import TokenModel, TargetModel
+from app.models.call_queue import CallQueueModel
+from app.models.target_alert_state import TargetAlertStateModel
 from app.userbot.session_manager import SessionManager
 from app.services.rust_bridge import rust_dex_bridge
 
@@ -31,6 +33,9 @@ class DexScreenerService:
     
     def __init__(self):
         self.token_model = TokenModel(db)
+        self.call_queue_model = CallQueueModel(db)
+        self.target_model = TargetModel(db)
+        self.target_alert_state_model = TargetAlertStateModel(db)
         self.session: Optional[aiohttp.ClientSession] = None
         self.running = False
         self._task: Optional[asyncio.Task] = None
@@ -284,12 +289,13 @@ class DexScreenerService:
             # Update token in database
             await self.token_model.update_market_cap(token['id'], new_mc, ticker)
             
-            # Check for gain alerts after market cap update
-            await self._check_gain_alerts(token, new_mc)
+            # Check for per-target gain alerts
+            await self._check_per_target_alerts(token, new_mc)
 
             # Check for drop alerts after market cap update
-            await self._check_drop_alerts(token, new_mc)
-            
+            if await self._check_drop_alerts(token, new_mc):
+                return  # Stop further processing if token monitoring was stopped
+
             # Stop monitoring tokens below $8K market cap
             if new_mc < 8000:
                 await self.token_model.set_status(token['id'], 'stopped')
@@ -299,188 +305,208 @@ class DexScreenerService:
             
         except Exception as e:
             logger.error(f"Error updating token from API data: {e}")
-    
-    async def _check_gain_alerts(self, token: Dict[str, Any], new_mc: Decimal):
-        """Check for gain alerts using improved Jupiter-verified logic."""
-        try:
-            first_seen_mc = token.get('first_seen_mc')
-            if not first_seen_mc or first_seen_mc <= 0:
-                return
 
-            current_multiplier = new_mc / first_seen_mc
-            last_hit_decimal = self._safe_decimal(token.get('last_hit_multiplier'), default=Decimal('1')) or Decimal('1')
+    def _format_dynamic_alert_message(self, token: Dict[str, Any], state: Dict[str, Any], current_multiplier: Decimal, alert_type: str) -> str:
+        """Formats the alert message for sensitivity and threshold alerts."""
+        
+        def select_gain_emoji(multiplier: float) -> str:
+            if multiplier < 3: return "🔥"
+            if multiplier < 5: return "🚀"
+            if multiplier < 10: return "🌙"
+            return "🌕"
 
-            # Get gain thresholds from settings
-            gain_settings = await db.fetchval("SELECT value FROM settings WHERE key = 'gain_multipliers'")
-            if not gain_settings:
-                return
+        def format_time_delta(start_time: datetime) -> str:
+            if not start_time:
+                return ""
+            now = datetime.utcnow()
+            delta = now - start_time.replace(tzinfo=None) # Ensure timezone-naive comparison
+            
+            days = delta.days
+            hours, remainder = divmod(delta.seconds, 3600)
+            minutes, _ = divmod(remainder, 60)
+            
+            if days > 0:
+                return f"{days}d {hours}h ago"
+            elif hours > 0:
+                return f"{hours}h {minutes}m ago"
+            else:
+                return f"{minutes}m ago"
 
-            import json
+        emoji = select_gain_emoji(float(current_multiplier))
+        symbol = token.get('ticker', token['address'][:6])
+        mc_str = f"${state['initial_market_cap']:,.0f}"
+        time_str = format_time_delta(state['first_sent_at'])
+
+        return f"{emoji} {symbol} is at {current_multiplier:.2f}x!\nMC: {mc_str} | {time_str}"
+
+    async def _check_per_target_alerts(self, token: Dict[str, Any], new_mc: Decimal):
+        """
+        Checks for and triggers sensitivity and threshold alerts for each target
+        associated with the token's source group.
+        """
+        import json
+        source_group_id = token.get('source_group_id')
+        if not source_group_id:
+            return
+
+        # 1. Fetch all targets for the group that have alerts enabled
+        targets = await self.target_model.get_targets_for_source_group(source_group_id, alerts_enabled_only=True)
+        if not targets:
+            return
+
+        for target in targets:
             try:
-                raw_thresholds = json.loads(gain_settings)
-            except (TypeError, ValueError) as parse_error:
-                logger.error(f"Invalid gain_multipliers setting: {parse_error}")
-                return
+                # 2. Get the alert state for this specific token-target pair
+                state = await self.target_alert_state_model.get_or_create(
+                    target_id=target['id'],
+                    token_id=token['id'],
+                    initial_market_cap=new_mc
+                )
 
-            gain_multipliers: List[Decimal] = []
-            for raw_value in raw_thresholds:
-                decimal_value = self._safe_decimal(raw_value)
-                if decimal_value and decimal_value > 0:
-                    gain_multipliers.append(decimal_value)
+                if not state or not state['initial_market_cap'] or state['initial_market_cap'] <= 0:
+                    logger.debug(f"Skipping target {target['id']} for token {token['id']}, missing baseline MC.")
+                    continue
 
-            if not gain_multipliers:
-                logger.warning("No valid gain thresholds configured; skipping alert checks.")
-                return
+                # 3. Calculate current multiplier
+                current_multiplier = new_mc / state['initial_market_cap']
+                last_alert_multiplier = state['last_alert_multiplier']
 
-            for threshold_decimal in sorted(gain_multipliers):
-                if current_multiplier < threshold_decimal:
-                    break  # thresholds sorted; remaining values won't match yet
+                # 4. Evaluate alert modes for this target
+                modes = self.target_model.parse_alert_modes(target)
+                next_alert_to_fire = None
+                alert_type = None
 
-                if last_hit_decimal >= threshold_decimal:
-                    continue  # already hit this threshold in the past
+                # Check threshold alerts
+                if modes.get('threshold', False):
+                    thresholds = self.target_model.parse_alert_thresholds(target)
+                    for threshold in sorted(thresholds):
+                        if current_multiplier >= threshold and last_alert_multiplier < threshold:
+                            next_alert_to_fire = Decimal(str(threshold))
+                            alert_type = "Threshold"
+                            break # Fire the lowest-unfired threshold
+                
+                # Check sensitivity alerts
+                if modes.get('sensitivity', False):
+                    sensitivity = self.target_model.get_alert_sensitivity_percent(target)
+                    sensitivity_target = last_alert_multiplier * Decimal(1 + sensitivity)
+                    if current_multiplier >= sensitivity_target:
+                        # Only fire sensitivity if it's higher than a pending threshold alert
+                        if next_alert_to_fire is None or current_multiplier > next_alert_to_fire:
+                            next_alert_to_fire = current_multiplier
+                            alert_type = "Sensitivity"
 
-                verified = await self._verify_with_jupiter(token['address'], new_mc)
-                if not verified:
-                    logger.warning(
-                        "[PNL_ALERT] Jupiter verification failed for %s at %sx (Dex MC: %s).",
-                        token['address'][:8],
-                        threshold_decimal,
-                        f"{new_mc:,.0f}"
+                # 5. If an alert was triggered, queue it
+                if next_alert_to_fire and alert_type:
+                    logger.info(f"TRIGGER: {alert_type} alert for token {token['address']} in target {target['id']} at {next_alert_to_fire:.2f}x")
+
+                    # Get userbot assigned for forwarding
+                    userbot_assignment = await db.fetchrow("SELECT userbot_id FROM userbot_assignments WHERE group_id = $1", source_group_id)
+                    if not userbot_assignment or not userbot_assignment['userbot_id']:
+                        logger.warning(f"No forwarding userbot for group {source_group_id}, cannot send alert.")
+                        continue
+                    forwarding_userbot_id = userbot_assignment['userbot_id']
+
+                    # Format message and queue job
+                    message = self._format_dynamic_alert_message(token, state, next_alert_to_fire, alert_type)
+                    additional_info = json.dumps({"message_override": message})
+                    source_info = json.dumps({"name": f"System {alert_type} Alerter"})
+
+                    await self.call_queue_model.add_job(
+                        token_address=token['address'],
+                        target_group_id=source_group_id,
+                        target_chat_id=target['dest_chat_id'],
+                        forwarding_userbot_id=forwarding_userbot_id,
+                        source_info=source_info,
+                        additional_info=additional_info
                     )
-                    break  # retry on next poll; do not advance to higher thresholds yet
 
-                sent = await self._queue_pnl_command(token, threshold_decimal)
-                if sent:
-                    await self.token_model.update_hit_multiplier(token['id'], threshold_decimal)
-                else:
-                    logger.warning(
-                        "[PNL_ALERT] Unable to send PNL alert for %s at %sx despite verification.",
-                        token['address'][:8],
-                        threshold_decimal
-                    )
-                break
+                    # 6. Update the state with the new multiplier
+                    await self.target_alert_state_model.update_after_alert(target['id'], token['id'], next_alert_to_fire)
+                    logger.info(f"SUCCESS: Queued alert and updated state for token {token['id']} in target {target['id']}.")
 
-        except Exception as e:
-            logger.error(f"Error checking gain alerts: {e}")
+            except Exception as e:
+                logger.error(f"Error processing alerts for target {target['id']} and token {token['id']}: {e}", exc_info=True)
     
     async def _queue_pnl_command(self, token: Dict[str, Any], threshold: Decimal) -> bool:
-        """Send /pnl command using the managed userbot worker. Returns True if any delivery succeeds."""
-        logger.debug(f"[PNL_ALERT] Attempting to queue PNL command for token {token['address']} at {threshold}x.")
-        success = False
+        """Queue a /pnl command job instead of sending directly."""
+        logger.debug(f"[PNL_ALERT] Queuing /pnl command for token {token['address']} at {threshold}x.")
+        import json
+
+        success_count = 0
         try:
             source_group_id = token.get('source_group_id')
             if not source_group_id:
                 logger.debug(f"[PNL_ALERT] Aborting: No source_group_id found on token {token['id']}.")
                 return False
 
-            logger.debug(f"[PNL_ALERT] Token {token['id']} is associated with source_group_id {source_group_id}.")
-
-            # Check if the userbot manager is available
-            if not self.userbot_manager:
-                logger.error("[PNL_ALERT] Aborting: UserbotManager not available in DexScreenerService.")
-                return False
-
-            # Get the userbot assigned to the source group
-            logger.debug(f"[PNL_ALERT] Fetching userbot assignment for group {source_group_id}.")
-            userbot_assignment = await db.fetchrow("""
-                SELECT userbot_id FROM userbot_assignments WHERE group_id = $1
-            """, source_group_id)
-
+            # Get the userbot assigned to the source group for forwarding
+            userbot_assignment = await db.fetchrow(
+                "SELECT userbot_id FROM userbot_assignments WHERE group_id = $1", source_group_id
+            )
             if not userbot_assignment or not userbot_assignment['userbot_id']:
-                logger.warning(f"[PNL_ALERT] Aborting: No userbot assigned to group {source_group_id} for PNL alert.")
+                logger.warning(f"[PNL_ALERT] No forwarding userbot assigned to group {source_group_id}. Cannot queue PNL alert.")
                 return False
-            
-            userbot_id = userbot_assignment['userbot_id']
-            logger.debug(f"[PNL_ALERT] Group {source_group_id} is assigned to userbot {userbot_id}.")
+            forwarding_userbot_id = userbot_assignment['userbot_id']
 
-            # Get the worker instance from the manager
-            worker = self.userbot_manager.get_worker(userbot_id)
-            if not worker:
-                logger.error(f"[PNL_ALERT] Aborting: Userbot worker {userbot_id} not found in manager.")
-                return False
-
-            client = worker.session_manager.get_client()
-            if not client or not worker.session_manager.is_connected():
-                logger.error(f"[PNL_ALERT] Aborting: Userbot {userbot_id} is not connected.")
-                return False
-            
-            logger.debug(f"[PNL_ALERT] Userbot {userbot_id} client is connected.")
-
-            # Get target groups for this source group
-            logger.debug(f"[PNL_ALERT] Fetching targets for group {source_group_id}.")
-            targets = await db.fetch("SELECT dest_chat_id FROM targets WHERE group_id = $1", source_group_id)
+            # Get all targets for this source group
+            targets = await db.fetch("SELECT id, dest_chat_id FROM targets WHERE group_id = $1", source_group_id)
             if not targets:
-                logger.warning(f"[PNL_ALERT] Aborting: No targets found for source group {source_group_id}.")
+                logger.warning(f"[PNL_ALERT] No targets found for source group {source_group_id}.")
                 return False
 
-            logger.debug(f"[PNL_ALERT] Found {len(targets)} targets for group {source_group_id}.")
-            message = f"/pnl {token['address']}"
-            
-            # Send to all target groups
+            # This is a system-generated call, not from a specific user message
+            source_info = json.dumps({"name": "System PNL Alerter"})
+            additional_info = json.dumps({"message_override": f"/pnl {token['address']}"})
+
             for target in targets:
-                target_chat_id = target['dest_chat_id']
-                logger.debug(f"[PNL_ALERT] Processing target chat_id: {target_chat_id}.")
                 try:
-                    sent_message = await client.send_message(target_chat_id, message)
-                    logger.info(f"[PNL_ALERT] SUCCESS: Sent /pnl {token['address'][:8]}... to {target_chat_id} ({threshold}x alert, msg_id: {sent_message.id})")
-                    success = True
-                except Exception as send_error:
-                    import traceback
-                    logger.error(f"[PNL_ALERT] FAILED to send PNL command to {target_chat_id}: {send_error}")
-                    logger.error(f"[PNL_ALERT] Traceback: {traceback.format_exc()}")
+                    await self.call_queue_model.add_job(
+                        token_address=token['address'],
+                        target_group_id=source_group_id,
+                        target_chat_id=target['dest_chat_id'],
+                        forwarding_userbot_id=forwarding_userbot_id,
+                        source_info=source_info,
+                        additional_info=additional_info,
+                        # These fields are not applicable for system PNL alerts
+                        routing_rule_id=None, 
+                        source_message_id=None,
+                        source_chat_id=None,
+                        source_user_id=None,
+                    )
+                    success_count += 1
+                    logger.info(f"[PNL_ALERT] Queued /pnl for {token['address'][:8]}... to target {target['dest_chat_id']}")
+                except Exception as e:
+                    logger.error(f"Failed to queue PNL command for target {target['dest_chat_id']}: {e}")
 
-        except Exception as e:
-            import traceback
-            logger.error(f"[PNL_ALERT] CRITICAL: Error in _queue_pnl_command: {e}")
-            logger.error(f"[PNL_ALERT] Traceback: {traceback.format_exc()}")
-
-        # --- NEW LOGIC for Curated Alpha targets ---
-        try:
-            # Find triggered curated rules for this token that want PNL alerts
+            # Also handle curated alpha rules that want PNL alerts
             curated_rules = await db.fetch("""
-                SELECT r.destination_chat_id, r.forwarding_userbot_id
+                SELECT r.id as rule_id, r.destination_chat_id, r.forwarding_userbot_id
                 FROM curated_alpha_rules r
                 JOIN curated_alpha_token_state s ON r.id = s.rule_id
-                WHERE s.token_address = $1
-                AND s.status = 'triggered'
-                AND r.forward_pnl_alerts = true
+                WHERE s.token_address = $1 AND s.status = 'triggered' AND r.forward_pnl_alerts = true
             """, token['address'])
 
-            if not curated_rules:
-                return success
-
-            logger.info(f"[CuratedAlpha] Found {len(curated_rules)} curated PNL rule(s) for token {token['address'][:8]}...")
-
-            message = f"/pnl {token['address']}"
-
             for rule in curated_rules:
-                userbot_id = rule['forwarding_userbot_id']
-                destination_id = rule['destination_chat_id']
-
-                if not userbot_id or not destination_id:
+                if not rule['forwarding_userbot_id'] or not rule['destination_chat_id']:
                     continue
-
-                worker = self.userbot_manager.get_worker(userbot_id)
-                if not worker:
-                    logger.error(f"[CuratedAlpha] PNL forwarding failed: Userbot worker {userbot_id} not found.")
-                    continue
-
-                client = worker.session_manager.get_client()
-                if not client or not worker.session_manager.is_connected():
-                    logger.error(f"[CuratedAlpha] PNL forwarding failed: Userbot {userbot_id} is not connected.")
-                    continue
-                
                 try:
-                    await client.send_message(destination_id, message)
-                    logger.info(f"[CuratedAlpha] Sent PNL alert for {token['address'][:8]}... to curated destination {destination_id} via bot {userbot_id}.")
-                    success = True
-                except Exception as send_error:
-                    logger.error(f"[CuratedAlpha] Failed to send PNL alert to {destination_id}: {send_error}")
+                    await self.call_queue_model.add_job(
+                        token_address=token['address'],
+                        curated_alpha_rule_id=rule['rule_id'],
+                        target_chat_id=rule['destination_chat_id'],
+                        forwarding_userbot_id=rule['forwarding_userbot_id'],
+                        source_info=source_info,
+                        additional_info=additional_info,
+                    )
+                    success_count += 1
+                    logger.info(f"[CuratedAlpha] Queued PNL alert for {token['address'][:8]}... to curated destination {rule['destination_chat_id']}")
+                except Exception as e:
+                    logger.error(f"Failed to queue Curated Alpha PNL alert for destination {rule['destination_chat_id']}: {e}")
 
         except Exception as e:
-            logger.error(f"Error sending Curated Alpha PNL command: {e}")
+            logger.error(f"CRITICAL: Error in _queue_pnl_command: {e}", exc_info=True)
 
-        return success
+        return success_count > 0
 
     def _safe_decimal(self, value: Any, default: Optional[Decimal] = None) -> Optional[Decimal]:
         """Coerce any numeric-like value into a Decimal with fallback."""
@@ -547,28 +573,29 @@ class DexScreenerService:
         )
         return False
     
-    async def _check_drop_alerts(self, token: Dict[str, Any], new_mc: Decimal):
-        """Check for drop alerts using existing working pattern"""
+    async def _check_drop_alerts(self, token: Dict[str, Any], new_mc: Decimal) -> bool:
+        """
+        Check for drop alerts.
+        Returns True if monitoring was stopped, False otherwise.
+        """
         try:
             peak_mc = token.get('peak_mc')
             # Initialize peak_mc if it's not set
             if not peak_mc or peak_mc <= 0:
                 await self.token_model.update_peak_mc(token['id'], new_mc)
-                # Update the local token dictionary to avoid re-fetching
                 token['peak_mc'] = new_mc
                 peak_mc = new_mc
-
+    
             # Update peak if new high
             if new_mc > peak_mc:
                 await self.token_model.update_peak_mc(token['id'], new_mc)
-                # Update local token for subsequent checks in the same loop
                 token['peak_mc'] = new_mc
-                peak_mc = new_mc # Use the new peak for drop check
+                peak_mc = new_mc
                 
             # Get drop threshold from settings 
             drop_settings = await db.fetchval("SELECT value FROM settings WHERE key = 'drop_percentage'")
             if not drop_settings:
-                return
+                return False
                 
             import json
             drop_threshold = float(json.loads(drop_settings))
@@ -578,11 +605,16 @@ class DexScreenerService:
                 current_from_peak = new_mc / peak_mc
                 if current_from_peak <= drop_threshold:
                     await self.token_model.set_status(token['id'], 'stopped')
-                    logger.info(f"Stopped monitoring {token['address'][:8]}... (dropped {(1-current_from_peak)*100:.1f}% from peak)")
+                    logger.info(
+                        f"Stopped monitoring {token['address'][:8]}... (MC dropped by {(1-current_from_peak)*100:.1f}%, "
+                        f"below threshold of {drop_threshold*100:.0f}% of peak)"
+                    )
+                    return True
                         
         except Exception as e:
             logger.error(f"Error checking drop alerts: {e}")
-    
+        
+        return False    
     async def add_token(self, token_address: str) -> Dict[str, Any]:
         """Add a new token for monitoring"""
         try:

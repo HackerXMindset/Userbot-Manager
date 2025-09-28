@@ -117,17 +117,20 @@ This is an enterprise-grade Telegram userbot management system designed for auto
 - **Architecture**: Async service with 2s polling interval, 10-job batch size
 - **Features**:
   - Template resolution with placeholder substitution
+  - Handles `message_override` from jobs for system-generated alerts (e.g., /pnl)
   - Management bot vs userbot routing logic
+  - **Records alert baselines for all successful calls via a unified pipeline.**
   - Executor caching (5-minute TTL)
   - Stuck job recovery (5-minute timeout)
   - Rich call history logging with market cap tracking
-  - Multi-source call history: logs every contributing source with real Telegram titles and caller attribution
 
 ### Database Models (`app/models/`):
 
 #### **Core Models**:
 - **`BotModel`**: Userbot management (sessions, health, assignments)
 - **`GroupModel`**: Target group configuration (quotas, schedules)
+- **`TargetModel`**: Target channel management with per-target alert configuration (alert modes, thresholds, sensitivity percentages)
+- **`TargetAlertStateModel`**: Sensitivity-based alert state tracking with CRUD operations for target+token pairs
 - **`TokenModel`**: Token tracking (market caps, multipliers, history)
 - **`CallQueueModel`**: Job queue management (pending → processing → completed/failed)
 - **`TemplateModel`**: Custom message templates
@@ -159,7 +162,7 @@ Recent implementation enables different userbots for monitoring vs forwarding:
 - **`groups.py`**: Target group configuration
 - **`sources.py`**: Source monitoring setup with userbot assignment
 - **`pnl.py`**: Profit/loss tracking configuration
-- **`alerts.py`**: Threshold-based alert management
+- **`alerts.py`**: Global alerts dashboard and statistics
 
 #
 # 📊 Complete Placeholder System (300+ Placeholders)
@@ -231,15 +234,16 @@ User/Bot Message → Token Detection → Source Rule Matching → Job Queue → 
    - `token_address`, `source_chat_id`, `target_chat_id`
    - `monitoring_userbot_id`, `forwarding_userbot_id`
    - `additional_info` (caller details, source metadata)
+   - *Note: System-generated alerts (like PNL or sensitivity alerts) also create jobs, unifying the call pipeline.*
 5. **Job Processing**: Call Dispatcher polls queue (2s intervals)
-6. **Template Resolution**: Check for custom template assigned to target group
+6. **Template Resolution**: Check for custom template assigned to target group, or a `message_override` in the job.
 7. **Placeholder Generation**:
    - Call Rust service `/dex/{mint}` endpoint
    - Merge with database context (token history, multipliers)
    - Apply formatting functions and fallback handling
 8. **Template Rendering**: Replace placeholders in template text
 9. **Message Delivery**: Send via management bot or assigned userbot
-10. **History Logging**: Record call with market cap, source info, timestamps
+10. **History Logging & Alert Baseline**: Record call with market cap, source info, timestamps, and save the initial alert state.
 
 #
 # 🗃️ Database Schema & Models
@@ -247,6 +251,8 @@ User/Bot Message → Token Detection → Source Rule Matching → Job Queue → 
 ## **Core Tables:**
 - **`userbots`**: Session management, health status, assignments
 - **`groups`**: Target groups with quotas, schedules, notification preferences
+- **`targets`**: Target channels/chats with per-target alert configuration (alerts_enabled, alerts_modes, alerts_thresholds, alerts_sensitivity_percent)
+- **`target_token_alert_state`**: Sensitivity-based alert state tracking per target+token pair (message threading, initial market cap, last alert multiplier)
 - **`routing_rules`**: Source monitoring configuration with split-responsibility userbot assignments
 - **`call_queue`**: Job queue (pending → processing → completed/failed)
 - **`post_templates`**: Custom message templates with sender configuration
@@ -287,6 +293,48 @@ User/Bot Message → Token Detection → Source Rule Matching → Job Queue → 
 - **Usage Instructions**: Step-by-step template creation guide
 
 #
+# 🚨 Sensitivity-Based Alert System
+
+## **Overview:**
+Advanced per-target alert configuration system enabling dynamic sensitivity triggers alongside traditional threshold alerts.
+
+## **Key Features:**
+- **Per-Target Configuration**: Each target can have independent alert settings.
+- **Multiple Alert Types**:
+  - 🎯 **PNL Alerts**: Traditional `/pnl` command forwarding.
+  - 📊 **Threshold Alerts**: Fixed multiplier alerts (e.g., 2x, 7x, 25x) set per-target.
+  - ⚡ **Sensitivity Alerts**: Percentage-based progression alerts (e.g., fire at 1.5x, then 2.25x, etc.) set per-target.
+
+## **Database Implementation:**
+- **`targets` table extensions**:
+  - `alerts_enabled`: Master on/off switch per target.
+  - `alerts_modes`: JSONB object controlling which alert types are active.
+  - `alerts_thresholds`: JSONB array of custom threshold multipliers.
+  - `alerts_sensitivity_percent`: Decimal percentage for sensitivity progression.
+- **`target_token_alert_state` table**:
+  - Tracks alert history per target+token pair.
+  - Enables message threading via `first_message_id`.
+  - Records `initial_market_cap` baseline and `last_alert_multiplier`.
+
+## **Implementation Status: COMPLETE**
+- **Backend**: The `DexScreenerService` evaluates per-target sensitivity and threshold conditions and queues alerts through the unified `call_queue`.
+- **Frontend**: The management bot provides a full UI to configure alert modes, thresholds, and sensitivity for each target individually. The main alerts dashboard shows global statistics.
+- **Baseline**: The `CallDispatcher` correctly records the baseline for all calls, including rerouted PNL alerts, ensuring the system is robust.
+
+## **Sensitivity Algorithm:**
+```
+target_multiplier = last_alert_multiplier * (1 + sensitivity_percent)
+if current_multiplier >= target_multiplier:
+    → Send alert, update last_alert_multiplier = current_multiplier
+```
+
+**Example (50% sensitivity)**: 1x → 1.5x → 2.25x → 3.375x → 5.06x progression
+
+## **Python Models:**
+- **`TargetModel`**: Alert configuration getters/setters with JSON parsing and global stat helpers.
+- **`TargetAlertStateModel`**: CRUD operations for alert state tracking with `get_or_create()`, `update_after_alert()`, `ensure_state()` methods.
+
+#
 # 🔧 Operational Procedures
 
 ## **Service Management:**
@@ -315,6 +363,12 @@ TIMEZONE=Asia/Kolkata
 DEX_POLL_SECS=5
 DEX_TIMEOUT=10
 DEX_MAX_RETRIES=3
+
+# Alert System Defaults (applied to new targets)
+# alerts_enabled=true
+# alerts_modes={"pnl": true, "dynamic": true, "threshold": true, "sensitivity": true}
+# alerts_thresholds=[2,7,25]
+# alerts_sensitivity_percent=0.50 (50% = alerts at 1.5x, 2.25x, 3.375x progression)
 ```
 
 ## **Health Monitoring:**
@@ -369,34 +423,6 @@ SELECT status, COUNT(*) FROM call_queue GROUP BY status;
 - **Call Dispatcher**: 2s polling, 10-job batches, 5-minute executor cache
 - **Template Resolution**: Cached template lookups, efficient placeholder replacement
 - **Error Handling**: Comprehensive fallback mechanisms, graceful degradation
-
-#
-# 📅 Phase History & Current State
-
-## **Completed Phases:**
-- **Phase 1**: Rust bridge + DexScreener integration + `/dex/{mint}` endpoint
-- **Phase 2**: pump.fun payload/placeholder coverage (80+ placeholders) - **100% COMPLETE**
-- **Phase 3**: Jupiter analytics integration (70+ placeholders) - **100% COMPLETE**
-- **Phase 4**: Removed Telegram parse mode to eliminate Markdown formatting errors
-- **Phase 5**: Enhanced Helius integration with direct dev holdings detection (40+ placeholders) - **100% COMPLETE + ENHANCED**
-  - **Original**: Basic top-20 holder analysis via `getTokenLargestAccounts`
-  - **Enhancement**: Direct dev holdings detection via `getTokenAccountsByOwner` API
-  - **Impact**: Now detects dev holdings regardless of ranking (previously missed devs not in top 20)
-- **Phase 6**: CTO detection, ATH comparisons, social link formatting, error handling improvements
-
-## **Current Branch:** `pumpfun-phase2`
-## **Active Tasks:**
-- **`h-split-responsibility-forwarding`** (in-progress): Job queue architecture for decoupled monitoring/forwarding
-- **`h-investigate-curate-alpha-bugs`** (pending)
-- **`l-fix-bird-ath-only`** (pending)
-- **`m-implement-template-help`** (pending)
-
-## **Recent Commits:**
-```
-5df20c1 jupiter done 100%
-186b744 dex and pumpfun placeholders done 100%
-a1b1ff0 all placeholders created jup, helius, punpfun, dex
-```
 
 #
 # 🚀 Pending Enhancements & Future Development

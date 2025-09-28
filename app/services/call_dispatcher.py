@@ -8,15 +8,17 @@ import time
 import json
 from typing import Dict, Any, Optional, List, Set
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from app.db import db
-from app.models import BotModel
+from app.models import BotModel, TargetModel, TokenModel
 from app.models.call_queue import CallQueueModel
 from app.models.template import TemplateAssignmentModel
 from app.models.token_call_history import TokenCallHistoryModel
 from app.models.source_chat import SourceChatModel
 from app.models.group import GroupModel
 from app.models.curated_alpha import CuratedAlphaTokenStateModel
+from app.models.target_alert_state import TargetAlertStateModel
 from app.userbot.call_executor import CallExecutor
 from app.services.placeholder_service import PlaceholderService
 from app.services.call_history_service import CallHistoryService
@@ -43,6 +45,9 @@ class CallDispatcher:
         self.source_chat_model = SourceChatModel(db)
         self.group_model = GroupModel(db)
         self.curated_alpha_state_model = CuratedAlphaTokenStateModel(db)
+        self.target_model = TargetModel(db)
+        self.target_alert_state_model = TargetAlertStateModel(db)
+        self.token_model = TokenModel(db)
         self._source_cache: Dict[int, Dict[str, Any]] = {}
 
         # Cache for userbot executors
@@ -143,6 +148,17 @@ class CallDispatcher:
             # --- END NEW LOGIC ---
 
             additional_info = self._parse_additional_info(job.get('additional_info'))
+
+            # Handle message override for system-generated calls like PNL alerts
+            message_override = additional_info.get('message_override')
+            if message_override and not template_record:
+                logger.info(f"Using message override for job {job_id}")
+                template_record = {
+                    'name': 'System Message Override',
+                    'template_text': message_override,
+                    'use_management_bot': False
+                }
+
             caller_user_id = job.get('source_user_id')
             caller_name = additional_info.get('caller_name') or self._safe_decode_source_info(job.get('source_info'))
             source_details = await self._collect_source_details(job, additional_info)
@@ -167,16 +183,18 @@ class CallDispatcher:
 
             success = False
             error_msg = "Unknown error"
+            send_result = {}
 
             if use_mgmt_bot:
                 logger.info(f"Sending job {job_id} via Management Bot.")
                 try:
-                    await self.management_bot.bot.send_message(
+                    sent_message = await self.management_bot.bot.send_message(
                         chat_id=target_chat_id,
                         text=message_content,
                         disable_web_page_preview=True
                     )
                     success = True
+                    send_result = {'success': True, 'message_id': sent_message.message_id}
                 except Exception as e:
                     error_msg = f"Mgmt bot send failed: {e}"
                     logger.error(f"[DISPATCHER] ❌ {error_msg}")
@@ -184,23 +202,28 @@ class CallDispatcher:
                 logger.info(f"Sending job {job_id} via Userbot {forwarding_userbot_id}.")
                 executor = await self._get_executor(forwarding_userbot_id)
                 if executor:
-                    result = await executor.send_call_message(
+                    send_result = await executor.send_call_message(
                         target_chat_id=target_chat_id,
                         message=message_content,
                         token_address=token_address
                     )
-                    success = result.get('success', False)
+                    success = send_result.get('success', False)
                     if not success:
-                        error_msg = result.get('error', 'Userbot execution failed')
+                        error_msg = send_result.get('error', 'Userbot execution failed')
                 else:
                     error_msg = f"Userbot {forwarding_userbot_id} not available"
                     logger.error(f"[DISPATCHER] ❌ Job {job_id}: {error_msg}")
 
             # Update job status
             if success:
+                # PHASE 3: Record alert state baseline
+                try:
+                    await self._record_alert_state_baseline(job, send_result, placeholders)
+                except Exception as alert_state_error:
+                    logger.error(f"Failed to record alert state for job {job_id}: {alert_state_error}")
+
                 # Log successful call to history
                 try:
-                    placeholders = locals().get('placeholders', {})
                     market_cap_cents = self._parse_market_cap_to_cents(placeholders.get('market_cap'))
                     await self._log_call_to_history(
                         job,
@@ -225,6 +248,56 @@ class CallDispatcher:
             await self.call_queue_model.mark_failed(job_id, f"Processing error: {str(e)}")
             logger.error(f"Critical error processing job {job_id}: {e}", exc_info=True)
             return False
+
+    async def _record_alert_state_baseline(self, job: Dict[str, Any], send_result: Dict[str, Any], placeholders: Dict[str, Any]):
+        """Records the initial call state for sensitivity-based alerts."""
+        logger.debug(f"Recording alert state baseline for job {job['id']}")
+        
+        # 1. Get Target ID
+        target = await self.target_model.get_by_dest_chat_id(job['target_chat_id'])
+        if not target:
+            logger.warning(f"Could not find target for chat_id {job['target_chat_id']} to record alert state.")
+            return
+        target_id = target['id']
+
+        # 2. Get Token ID
+        token = await self.token_model.get_by_address(job['token_address'])
+        if not token:
+            logger.warning(f"Could not find token {job['token_address']} to record alert state.")
+            return
+        token_id = token['id']
+
+        # 3. Get Market Cap
+        market_cap_str = placeholders.get('market_cap')
+        initial_mc = None
+        if market_cap_str and market_cap_str != 'N/A':
+            try:
+                value = market_cap_str.replace('$', '').replace(',', '').strip()
+                multiplier = 1
+                if value.endswith('K'):
+                    multiplier = 1_000
+                    value = value[:-1]
+                elif value.endswith('M'):
+                    multiplier = 1_000_000
+                    value = value[:-1]
+                elif value.endswith('B'):
+                    multiplier = 1_000_000_000
+                    value = value[:-1]
+                initial_mc = Decimal(value) * multiplier
+            except Exception as e:
+                logger.warning(f"Could not parse market cap string '{market_cap_str}' for alert state: {e}")
+
+        # 4. Get Message ID
+        message_id = send_result.get('message_id')
+
+        # 5. Call ensure_state
+        await self.target_alert_state_model.ensure_state(
+            target_id=target_id,
+            token_id=token_id,
+            message_id=message_id,
+            initial_mc=initial_mc
+        )
+        logger.info(f"Successfully recorded alert state baseline for token {token_id} in target {target_id}.")
 
     async def _log_call_to_history(
         self,

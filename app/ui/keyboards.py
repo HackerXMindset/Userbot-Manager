@@ -374,6 +374,75 @@ class Keyboards:
                 text += "..."
                 
         return text
+
+    @staticmethod
+    def target_alerts_menu(target, back_callback: str = "menu:targets") -> InlineKeyboardMarkup:
+        """Target alerts configuration menu - shows enabled status, modes, sensitivity, thresholds"""
+        from app.models import TargetModel
+
+        # Parse alert configuration from target record
+        target_model = TargetModel(None)  # We'll use static methods
+        modes = target_model.parse_alert_modes(target)
+        thresholds = target_model.parse_alert_thresholds(target)
+        sensitivity = target_model.get_alert_sensitivity_percent(target)
+        enabled = target['alerts_enabled'] if 'alerts_enabled' in target else True
+
+        # Build status text
+        status = "🟢 ON" if enabled else "🔴 OFF"
+        mode_status = " ".join([f"{mode}{'✅' if enabled else '❌'}" for mode, enabled in modes.items()])
+        threshold_text = ",".join([str(x) for x in thresholds])
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    text=f"{'🔴 Disable' if enabled else '🟢 Enable'} Alerts",
+                    callback_data=f"targets:alerts_enable:{target['id']}"
+                )
+            ],
+            [
+                InlineKeyboardButton(text="🎛️ Alert Modes", callback_data=f"targets:alerts_modes:{target['id']}"),
+            ],
+            [
+                InlineKeyboardButton(text="📊 Set Thresholds", callback_data=f"targets:alerts_set_thresholds:{target['id']}"),
+                InlineKeyboardButton(text="⚡ Set Sensitivity", callback_data=f"targets:alerts_set_sensitivity:{target['id']}")
+            ],
+            [InlineKeyboardButton(text="🔙 Back", callback_data=back_callback)]
+        ]
+
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def target_alerts_mode_keyboard(target) -> InlineKeyboardMarkup:
+        """Target alert modes toggle keyboard - toggles for pnl, dynamic, threshold, sensitivity"""
+        from app.models import TargetModel
+
+        # Parse current modes
+        target_model = TargetModel(None)  # We'll use static methods
+        modes = target_model.parse_alert_modes(target)
+
+        keyboard = []
+
+        # Create toggle buttons for each mode
+        for mode_name, is_enabled in modes.items():
+            status_icon = "✅" if is_enabled else "❌"
+            mode_display = {
+                "pnl": "💹 PNL",
+                "dynamic": "🔄 Dynamic",
+                "threshold": "📊 Threshold",
+                "sensitivity": "⚡ Sensitivity"
+            }.get(mode_name, mode_name.title())
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"{status_icon} {mode_display}",
+                    callback_data=f"targets:alerts_toggle:{target['id']}:{mode_name}"
+                )
+            ])
+
+        keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data=f"targets:alerts_menu:{target['id']}")])
+
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
     @staticmethod
     def auto_click_menu(rules: List[Dict]) -> InlineKeyboardMarkup:
         """Auto click management menu"""
