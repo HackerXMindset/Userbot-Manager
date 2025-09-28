@@ -8,6 +8,7 @@ from .targets import TargetsHandler
 from .sources import SourcesHandler
 from .alerts import AlertsHandler
 from .pnl import PnlHandler
+from .command_forwarding import CommandForwardingHandler
 from .notifications import NotificationsHandler
 from .auto_click import AutoClickHandler
 from .curate_alpha import CurateAlphaHandler
@@ -22,6 +23,7 @@ __all__ = [
     "SourcesHandler",
     "AlertsHandler",
     "PnlHandler",
+    "CommandForwardingHandler",
     "NotificationsHandler",
     "AutoClickHandler",
     "CurateAlphaHandler",

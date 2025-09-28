@@ -257,6 +257,7 @@ class Keyboards:
                 )
             ])
         keyboard.append([InlineKeyboardButton(text="➕ Add New Rule", callback_data="pnl:add")])
+        keyboard.append([InlineKeyboardButton(text="🔄 Set Dynamic Forwarding", callback_data="cmd_fwd:list")])
         keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data="menu:main")])
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -373,6 +374,182 @@ class Keyboards:
             if len(reply_users) > 5:
                 text += "..."
                 
+        return text
+
+    # ===== COMMAND FORWARDING KEYBOARDS =====
+
+    @staticmethod
+    def cmd_fwd_rules_list(rules: List[Dict]) -> InlineKeyboardMarkup:
+        """Command forwarding rules list keyboard"""
+        keyboard = []
+        for rule in rules[:10]:
+            status = "✅" if rule['enabled'] else "❌"
+            schedule_status = "⏰" if rule.get('schedule_enabled') else ""
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"{status}{schedule_status} {rule['command_text']} → {rule.get('destination_channel_title', f'ID:{rule['destination_channel_id']}')}",
+                    callback_data=f"cmd_fwd:view:{rule['id']}"
+                )
+            ])
+        keyboard.append([InlineKeyboardButton(text="➕ Add New Command Rule", callback_data="cmd_fwd:add")])
+        keyboard.append([InlineKeyboardButton(text="🔙 Back to PNL", callback_data="pnl:list")])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def cmd_fwd_rule_details_menu(rule: Dict) -> InlineKeyboardMarkup:
+        """Command forwarding rule details menu"""
+        status_btn = InlineKeyboardButton(
+            text="🔴 Disable" if rule['enabled'] else "🟢 Enable",
+            callback_data=f"cmd_fwd:toggle:{rule['id']}"
+        )
+        schedule_btn = InlineKeyboardButton(
+            text="⏰ Disable Schedule" if rule.get('schedule_enabled') else "⏰ Enable Schedule",
+            callback_data=f"cmd_fwd:toggle_schedule:{rule['id']}"
+        )
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [status_btn],
+            [schedule_btn],
+            [
+                InlineKeyboardButton(text="💬 Edit Command", callback_data=f"cmd_fwd:edit_command:{rule['id']}"),
+            ],
+            [
+                InlineKeyboardButton(text="👥 Manage Command Users", callback_data=f"cmd_fwd:manage_command_users:{rule['id']}"),
+            ],
+            [
+                InlineKeyboardButton(text="👥 Manage Reply Users", callback_data=f"cmd_fwd:manage_reply_users:{rule['id']}")
+            ],
+            [InlineKeyboardButton(text="🤖 Set Forwarding Bot", callback_data=f"cmd_fwd:set_fwd_bot:{rule['id']}")],
+            [InlineKeyboardButton(text="⚙️ Schedule Settings", callback_data=f"cmd_fwd:schedule_settings:{rule['id']}")],
+            [InlineKeyboardButton(text="🗑️ Delete Rule", callback_data=f"cmd_fwd:delete:{rule['id']}")],
+            [InlineKeyboardButton(text="🔙 Back to List", callback_data="cmd_fwd:list")]
+        ])
+
+    @staticmethod
+    def cmd_fwd_select_source_group_keyboard(groups: List[Dict]) -> InlineKeyboardMarkup:
+        """Source group selection for command forwarding"""
+        keyboard = []
+        for group in groups:
+            display_name = (group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}")[:20]
+            keyboard.append([
+                InlineKeyboardButton(text=display_name, callback_data=f"cmd_fwd:wizard_source_group:{group['id']}")
+            ])
+        keyboard.append([InlineKeyboardButton(text="❌ Cancel", callback_data="cmd_fwd:list")])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def cmd_fwd_manage_users_keyboard(user_ids: List[int], user_type: str, rule_id: int = None) -> InlineKeyboardMarkup:
+        """User management keyboard for command forwarding"""
+        keyboard = []
+        for user_id in user_ids:
+            keyboard.append([
+                InlineKeyboardButton(text=f"🗑️ Remove {user_id}", callback_data=f"cmd_fwd:wizard_remove_{user_type}:{user_id}")
+            ])
+
+        add_callback = f"cmd_fwd:wizard_add_{user_type}"
+
+        keyboard.append([InlineKeyboardButton(text=f"➕ Add {user_type.replace('_', ' ').title()}", callback_data=add_callback)])
+
+        if rule_id:
+            keyboard.append([InlineKeyboardButton(text="🔙 Back to Rule", callback_data=f"cmd_fwd:view:{rule_id}")])
+        else:
+            if user_type == "monitored":
+                next_callback = f"cmd_fwd:wizard_next_to_fwd_bot"
+            elif user_type == "replying":
+                next_callback = f"cmd_fwd:wizard_next_to_schedule"
+            else:
+                next_callback = f"cmd_fwd:wizard_next_to_destination"
+            keyboard.append([InlineKeyboardButton(text="➡️ Continue", callback_data=next_callback)])
+            keyboard.append([InlineKeyboardButton(text="❌ Cancel", callback_data="cmd_fwd:list")])
+
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def cmd_fwd_select_forwarding_bot_keyboard(userbots: List[Dict]) -> InlineKeyboardMarkup:
+        """Forwarding bot selection for command forwarding"""
+        keyboard = []
+        for bot in userbots:
+            keyboard.append([
+                InlineKeyboardButton(text=(bot.get('display_name') or bot['session_name']), callback_data=f"cmd_fwd:wizard_fwd_bot:{bot['id']}")
+            ])
+        keyboard.append([InlineKeyboardButton(text="❌ Cancel", callback_data="cmd_fwd:list")])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def cmd_fwd_schedule_options_keyboard() -> InlineKeyboardMarkup:
+        """Schedule options keyboard"""
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ No Schedule (Manual only)", callback_data="cmd_fwd:wizard_schedule:none")],
+            [InlineKeyboardButton(text="⏰ Every 1 hour", callback_data="cmd_fwd:wizard_schedule:60")],
+            [InlineKeyboardButton(text="⏰ Every 6 hours", callback_data="cmd_fwd:wizard_schedule:360")],
+            [InlineKeyboardButton(text="⏰ Every 24 hours", callback_data="cmd_fwd:wizard_schedule:1440")],
+            [InlineKeyboardButton(text="⚙️ Custom Interval", callback_data="cmd_fwd:wizard_schedule:custom")],
+            [InlineKeyboardButton(text="❌ Cancel", callback_data="cmd_fwd:list")]
+        ])
+
+    @staticmethod
+    def cmd_fwd_confirm_delete(rule_id: int) -> InlineKeyboardMarkup:
+        """Delete confirmation for command forwarding rule"""
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Yes, Delete", callback_data=f"cmd_fwd:confirm_delete:{rule_id}"),
+                InlineKeyboardButton(text="❌ Cancel", callback_data=f"cmd_fwd:view:{rule_id}")
+            ]
+        ])
+
+    @staticmethod
+    def cmd_fwd_rule_summary_keyboard() -> InlineKeyboardMarkup:
+        """Rule summary keyboard for command forwarding"""
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Save Rule", callback_data="cmd_fwd:wizard_save")],
+            [InlineKeyboardButton(text="❌ Cancel", callback_data="cmd_fwd:list")]
+        ])
+
+    @staticmethod
+    def cmd_fwd_rule_details_text(rule: Dict, source_group: Dict, dest_channel_info: Dict, fwd_bot: Dict) -> str:
+        """Generate details text for command forwarding rule"""
+        status = '✅ Enabled' if rule['enabled'] else '❌ Disabled'
+        schedule_status = '✅ Enabled' if rule.get('schedule_enabled') else '❌ Disabled'
+
+        source_title = source_group['title'] if source_group else 'N/A'
+        dest_title = dest_channel_info['title']
+        bot_name = fwd_bot['display_name'] if fwd_bot else 'Not Set'
+
+        command_users = rule.get('allowed_command_user_ids', []) or []
+        reply_users = rule.get('allowed_reply_user_ids', []) or []
+
+        text = (
+            f"<b>🔄 Command Forwarding Rule Details</b>\n\n"
+            f"<b>Status: {status}</b>\n"
+            f"<b>Schedule: {schedule_status}</b>\n\n"
+            f"<b>Command:</b>\n"
+            f"  └ {rule['command_text']}\n\n"
+            f"<b>Source Group:</b>\n"
+            f"  └ {source_title}\n\n"
+            f"<b>Destination Channel:</b>\n"
+            f"  └ {dest_title}\n\n"
+            f"<b>Forwarding Userbot:</b>\n"
+            f"  └ {bot_name}\n\n"
+            f"<b>Permissions:</b>\n"
+            f"  ├ <b>Command Users:</b> {len(command_users) if command_users else 'Anyone'}\n"
+            f"  └ <b>Reply Users:</b> {len(reply_users) if reply_users else 'Anyone'}"
+        )
+
+        # Add schedule information
+        if rule.get('schedule_enabled') and rule.get('schedule_interval_minutes'):
+            hours = rule['schedule_interval_minutes'] // 60
+            minutes = rule['schedule_interval_minutes'] % 60
+            if hours > 0:
+                if minutes > 0:
+                    interval_text = f"{hours}h {minutes}m"
+                else:
+                    interval_text = f"{hours}h"
+            else:
+                interval_text = f"{minutes}m"
+            text += f"\n\n<b>Schedule:</b>\n  └ Every {interval_text}"
+
+            if rule.get('next_scheduled_at'):
+                text += f"\n  └ Next: {rule['next_scheduled_at'].strftime('%Y-%m-%d %H:%M UTC')}"
+
         return text
 
     @staticmethod

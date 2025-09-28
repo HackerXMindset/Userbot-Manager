@@ -8,6 +8,7 @@ from .target_alert_state import TargetAlertStateModel
 from .token import TokenModel
 from .event import EventModel
 from .pnl_forwarding import PnlForwardingRuleModel
+from .command_forwarding import CommandForwardingRuleModel, CommandTrackedMessageModel
 from .notification import NotificationSettingsModel, NotificationBlacklistModel
 from .auto_button_click import AutoButtonClickRuleModel
 from .curated_alpha import CuratedAlphaRuleModel, CuratedAlphaTokenStateModel
@@ -24,6 +25,8 @@ __all__ = [
     "TokenModel",
     "EventModel",
     "PnlForwardingRuleModel",
+    "CommandForwardingRuleModel",
+    "CommandTrackedMessageModel",
     "NotificationSettingsModel",
     "NotificationBlacklistModel",
     "AutoButtonClickRuleModel",

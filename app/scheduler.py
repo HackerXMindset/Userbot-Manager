@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from app.config import settings
 from app.db import db
-from app.models import GroupModel, ScheduleModel
+from app.models import GroupModel, ScheduleModel, CommandForwardingRuleModel
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +21,14 @@ class ScheduledCall:
 
 class Scheduler:
     """Job scheduling engine for managing calls"""
-    
+
     def __init__(self):
         self.group_model = GroupModel(db)
         self.schedule_model = ScheduleModel(db)
+        self.cmd_fwd_model = CommandForwardingRuleModel(db)
         self.running = False
         self._task: Optional[asyncio.Task] = None
+        self.userbot_manager = None
     
     async def start(self):
         """Start the scheduler"""
@@ -51,7 +53,12 @@ class Scheduler:
                 pass
         
         logger.info("Scheduler stopped")
-    
+
+    def set_userbot_manager(self, userbot_manager):
+        """Set the userbot manager instance"""
+        self.userbot_manager = userbot_manager
+        logger.info("UserbotManager instance set in Scheduler")
+
     async def _scheduler_loop(self):
         """Main scheduler loop"""
         while self.running:
@@ -70,15 +77,18 @@ class Scheduler:
             now = settings.get_local_time()
             current_day = now.weekday() + 1  # Monday = 1
             current_time = now.time()
-            
+
             # Get currently active schedules
             active_schedules = await self.schedule_model.get_active_schedules(
                 current_day, current_time
             )
-            
+
             for schedule in active_schedules:
                 await self._process_schedule(schedule, now)
-                
+
+            # Process command forwarding schedules
+            await self._process_command_schedules()
+
         except Exception as e:
             logger.error(f"Error processing schedules: {e}")
     
@@ -245,4 +255,105 @@ class Scheduler:
         except Exception as e:
             logger.error(f"Error getting scheduler statistics: {e}")
             return {}
-    
+
+    # ===== COMMAND FORWARDING SCHEDULING METHODS =====
+
+    async def _process_command_schedules(self):
+        """Process command forwarding schedules and send commands automatically"""
+        try:
+            logger.debug("[Scheduler] Processing command forwarding schedules")
+
+            # Get rules that are ready for execution
+            ready_rules = await self.cmd_fwd_model.get_rules_ready_for_execution()
+            logger.debug(f"[Scheduler] Found {len(ready_rules)} command rules ready for execution")
+
+            for rule in ready_rules:
+                try:
+                    logger.info(f"[Scheduler] Processing scheduled command '{rule['command_text']}' for rule {rule['id']}")
+                    await self._send_scheduled_command(rule)
+
+                    # Update next scheduled time
+                    await self.cmd_fwd_model.update_next_scheduled_time(rule['id'])
+                    logger.info(f"[Scheduler] Successfully processed scheduled command for rule {rule['id']}")
+
+                except Exception as rule_error:
+                    logger.error(f"[Scheduler] Error processing command rule {rule['id']}: {rule_error}")
+                    import traceback
+                    logger.error(f"[Scheduler] Full traceback: {traceback.format_exc()}")
+
+        except Exception as e:
+            logger.error(f"[Scheduler] Error processing command schedules: {e}")
+            import traceback
+            logger.error(f"[Scheduler] Full traceback: {traceback.format_exc()}")
+
+    async def _send_scheduled_command(self, rule: Dict[str, Any]):
+        """Send a scheduled command to the source group"""
+        try:
+            source_chat_id = rule['source_chat_id']
+            command_text = rule['command_text']
+            forwarding_userbot_id = rule['forwarding_userbot_id']
+
+            logger.info(f"[Scheduler] Sending scheduled command '{command_text}' to chat {source_chat_id} via userbot {forwarding_userbot_id}")
+
+            # Get the userbot manager to send the command
+            if not self.userbot_manager:
+                logger.error(f"[Scheduler] UserbotManager not available for sending command")
+                return False
+
+            worker = self.userbot_manager.get_worker(forwarding_userbot_id)
+            if not worker:
+                logger.error(f"[Scheduler] No worker found for userbot {forwarding_userbot_id}")
+                return False
+
+            client = worker.session_manager.get_client()
+            if not client:
+                logger.error(f"[Scheduler] No client available for userbot {forwarding_userbot_id}")
+                return False
+
+            # Resolve entity for the source chat
+            try:
+                entity = await client.get_entity(source_chat_id)
+            except Exception as entity_error:
+                logger.error(f"[Scheduler] Failed to resolve entity for chat {source_chat_id}: {entity_error}")
+                # Try fallback entity resolution
+                from telethon.tl.types import PeerChannel, PeerChat, PeerUser
+
+                if source_chat_id < 0:
+                    if str(source_chat_id).startswith('-100'):
+                        channel_id = abs(source_chat_id) - 1000000000000
+                        entity = PeerChannel(channel_id)
+                    else:
+                        chat_id = abs(source_chat_id)
+                        entity = PeerChat(chat_id)
+                else:
+                    entity = PeerUser(source_chat_id)
+
+            # Send the command
+            await client.send_message(entity, command_text)
+            logger.info(f"[Scheduler] Successfully sent scheduled command '{command_text}' to chat {source_chat_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[Scheduler] Error sending scheduled command: {e}")
+            import traceback
+            logger.error(f"[Scheduler] Full traceback: {traceback.format_exc()}")
+            return False
+
+    async def get_command_schedule_statistics(self) -> Dict[str, Any]:
+        """Get command scheduling statistics"""
+        try:
+            stats = await db.fetchrow("""
+                SELECT
+                    COUNT(*) as total_rules,
+                    COUNT(*) FILTER (WHERE enabled = true) as enabled_rules,
+                    COUNT(*) FILTER (WHERE schedule_enabled = true AND enabled = true) as scheduled_rules,
+                    COUNT(*) FILTER (WHERE schedule_enabled = true AND enabled = true AND next_scheduled_at <= NOW()) as ready_for_execution
+                FROM command_forwarding_rules
+            """)
+
+            return dict(stats) if stats else {}
+
+        except Exception as e:
+            logger.error(f"Error getting command schedule statistics: {e}")
+            return {}
+

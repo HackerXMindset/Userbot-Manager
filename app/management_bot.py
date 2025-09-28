@@ -17,7 +17,8 @@ from app.ui.states import ManagementStates
 from app.ui.handlers import (
     MenuHandler, GroupsHandler, UserbotsHandler, TargetsHandler,
     SchedulesHandler, SourcesHandler, AlertsHandler, PnlHandler,
-    NotificationsHandler, AutoClickHandler, CurateAlphaHandler, TemplatesHandler
+    CommandForwardingHandler, NotificationsHandler, AutoClickHandler,
+    CurateAlphaHandler, TemplatesHandler
 )
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ class ManagementBot:
         self.sources_handler = SourcesHandler(db, self.keyboards)
         self.alerts_handler = AlertsHandler(db, self.keyboards)
         self.pnl_handler = PnlHandler(db, self.keyboards)
+        self.cmd_fwd_handler = CommandForwardingHandler(db, self.keyboards)
         self.notifications_handler = NotificationsHandler(db, self.keyboards)
         self.auto_click_handler = AutoClickHandler(db, self.keyboards)
         self.curate_alpha_handler = CurateAlphaHandler(db, self.keyboards)
@@ -145,6 +147,13 @@ class ManagementBot:
         self.dp.callback_query.register(
             self.pnl_handler.handle_pnl_action,
             F.data.startswith('pnl:'),
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        # Command Forwarding
+        self.dp.callback_query.register(
+            self.cmd_fwd_handler.handle_cmd_fwd_action,
+            F.data.startswith('cmd_fwd:'),
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
 
@@ -311,6 +320,43 @@ class ManagementBot:
         self.dp.message.register(
             self.pnl_handler.wizard_process_user_id_input,
             ManagementStates.pnl_add_replying_user_id,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        # Command Forwarding message handlers
+        self.dp.message.register(
+            self.cmd_fwd_handler.wizard_process_command_input,
+            ManagementStates.cmd_fwd_add_rule_command,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.cmd_fwd_handler.wizard_process_user_id_input,
+            ManagementStates.cmd_fwd_add_monitored_user_id,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.cmd_fwd_handler.wizard_process_destination_input,
+            ManagementStates.cmd_fwd_add_rule_destination,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.cmd_fwd_handler.wizard_process_user_id_input,
+            ManagementStates.cmd_fwd_add_replying_user_id,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.cmd_fwd_handler.wizard_process_custom_interval_input,
+            ManagementStates.cmd_fwd_add_rule_custom_interval,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.cmd_fwd_handler.process_edit_command_input,
+            ManagementStates.cmd_fwd_edit_command,
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
 

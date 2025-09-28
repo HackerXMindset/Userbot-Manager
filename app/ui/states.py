@@ -47,6 +47,21 @@ class ManagementStates(StatesGroup):
     pnl_add_replying_user_id = State()
     pnl_add_rule_summary = State()
 
+    # Command Forwarding
+    cmd_fwd_add_rule_source_group = State()
+    cmd_fwd_add_rule_command = State()
+    cmd_fwd_add_rule_monitored_users = State()
+    cmd_fwd_add_rule_forwarding_bot = State()
+    cmd_fwd_add_rule_destination = State()
+    cmd_fwd_add_rule_replying_users = State()
+    cmd_fwd_add_rule_schedule = State()
+    cmd_fwd_add_rule_custom_interval = State()
+    cmd_fwd_add_rule_summary = State()
+    cmd_fwd_add_monitored_user_id = State()
+    cmd_fwd_add_replying_user_id = State()
+    cmd_fwd_edit_command = State()
+    cmd_fwd_schedule_settings = State()
+
     # Notifications
     setting_notification_channel = State()
     adding_blacklist_user = State()

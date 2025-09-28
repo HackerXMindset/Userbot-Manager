@@ -70,8 +70,9 @@ class SystemManager:
                 self.components['management_bot']
             )
 
-            # Pass userbot_manager to dex_service
+            # Pass userbot_manager to dex_service and scheduler
             self.components['dex_service'].set_userbot_manager(self.components['userbot_manager'])
+            self.components['scheduler'].set_userbot_manager(self.components['userbot_manager'])
             self.components['event_router'].set_management_bot(self.components['management_bot'])
             self.components['management_bot'].set_system_manager(self)
             
