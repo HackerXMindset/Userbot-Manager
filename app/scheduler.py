@@ -329,8 +329,17 @@ class Scheduler:
                     entity = PeerUser(source_chat_id)
 
             # Send the command
-            await client.send_message(entity, command_text)
+            sent_message = await client.send_message(entity, command_text)
             logger.info(f"[Scheduler] Successfully sent scheduled command '{command_text}' to chat {source_chat_id}")
+
+            # Track the outgoing command
+            if worker.message_handler:
+                await worker.message_handler.track_outgoing_command(
+                    source_chat_id,
+                    sent_message.id,
+                    command_text
+                )
+
             return True
 
         except Exception as e:

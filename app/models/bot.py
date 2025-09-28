@@ -13,6 +13,13 @@ class BotModel(BaseModel):
         """Get bot by session name"""
         query = "SELECT * FROM bots WHERE session_name = $1"
         return await self.db.fetchrow(query, session_name)
+
+    async def get_by_phone(self, phone: str) -> Optional[asyncpg.Record]:
+        """Get bot by phone number"""
+        query = "SELECT * FROM bots WHERE session_name = $1"
+        # The session name is generated from the phone number, so we can use it to check for duplicates
+        session_name = f"userbot_{phone.replace('+', '')[-8:]}"
+        return await self.db.fetchrow(query, session_name)
     
     async def get_active_userbots(self) -> List[asyncpg.Record]:
         """Get all active userbots"""

@@ -62,64 +62,67 @@ class MessageHandler:
             logger.error("Cannot setup handlers - client not available")
             return
 
-        @client.on(events.NewMessage(incoming=True))
-        async def handle_all_incoming(event):
-            await self._process_incoming_event(event)
+        @client.on(events.NewMessage())
+        async def handle_all_messages(event):
+            await self._process_event(event)
 
-        @client.on(events.MessageEdited(incoming=True))
+        @client.on(events.MessageEdited())
         async def handle_all_edited(event):
-            await self._process_incoming_event(event, is_edit=True)
+            await self._process_event(event, is_edit=True)
 
-        logger.info(f"Setup event handlers for all incoming messages and edits")
+        logger.info(f"Setup event handlers for all incoming, outgoing and edited messages")
 
-    async def _process_incoming_event(self, event, is_edit=False):
-        logger.debug(f"[MessageHandler] Processing incoming event - Chat: {event.chat_id}, Userbot: {self.userbot_id}, Edit: {is_edit}, Sender: {event.sender_id}")
+    async def _process_event(self, event, is_edit=False):
+        direction = "outgoing" if event.out else "incoming"
+        logger.debug(f"[MessageHandler] Processing {direction} event - Chat: {event.chat_id}, Userbot: {self.userbot_id}, Edit: {is_edit}, Sender: {event.sender_id}")
 
-        is_dm = event.is_private
-        is_mention = event.mentioned
-        is_reply_to_me = False
-        if event.is_reply:
-            me = await self.session_manager.get_me()
-            if me:
-                reply_to_msg = await event.get_reply_message()
-                if reply_to_msg and reply_to_msg.sender_id == me.id:
-                    is_reply_to_me = True
+        if direction == "incoming":
+            is_dm = event.is_private
+            is_mention = event.mentioned
+            is_reply_to_me = False
+            if event.is_reply:
+                me = await self.session_manager.get_me()
+                if me:
+                    reply_to_msg = await event.get_reply_message()
+                    if reply_to_msg and reply_to_msg.sender_id == me.id:
+                        is_reply_to_me = True
 
-        # Handle notifications (only for new messages)
-        if not is_edit:
-            if is_dm:
-                await self.notification_handler.handle_notification_event(event, "dm")
-            if is_mention:
-                await self.notification_handler.handle_notification_event(event, "mention")
-            if is_reply_to_me:
-                await self.notification_handler.handle_notification_event(event, "reply")
+            # Handle notifications (only for new messages)
+            if not is_edit:
+                if is_dm:
+                    await self.notification_handler.handle_notification_event(event, "dm")
+                if is_mention:
+                    await self.notification_handler.handle_notification_event(event, "mention")
+                if is_reply_to_me:
+                    await self.notification_handler.handle_notification_event(event, "reply")
 
         # Handle PNL forwarding logic
         if not is_edit:
             if event.text and event.text.startswith('/pnl'):
                 await self._handle_pnl_command(event)
-            if event.is_reply:
+            if event.is_reply and direction == "incoming":
                 await self._handle_potential_pnl_reply(event)
 
         # Handle Command forwarding logic
         if not is_edit:
             if event.text:
                 await self._handle_custom_command(event)
-            if event.is_reply:
+            if event.is_reply and direction == "incoming":
                 await self._handle_potential_custom_reply(event)
 
         # Handle source logic
         is_source = await self.source_manager.get_source_by_chat_id(event.chat_id)
-        if is_source:
+        if is_source and direction == "incoming":
             logger.debug(f"[MessageHandler] Source message detected in chat {event.chat_id} by userbot {self.userbot_id}")
             await self._handle_source_message(event, is_edit=is_edit)
+        elif is_source:
+            logger.debug(f"[MessageHandler] Outgoing message in source chat {event.chat_id} by userbot {self.userbot_id}, ignoring for source logic")
         else:
             logger.debug(f"[MessageHandler] Not a source message - chat {event.chat_id} not monitored by userbot {self.userbot_id}")
 
         # Handle auto click
-        if not is_edit:
-            await self._handle_auto_click(event)
-    
+        if not is_edit and direction == "incoming":
+            await self._handle_auto_click(event)    
     def is_fresh(self, key, seconds=600):
         """Check if cache entry is fresh (default 10 minutes)"""
         return key in self.cache_time and time.time() - self.cache_time[key] < seconds
@@ -786,10 +789,14 @@ class MessageHandler:
             # Resolve entity using same pattern as call_executor.py
             entity = await self._resolve_entity_safely(client, rule['destination_channel_id'])
 
-            await client.forward_messages(
-                entity=entity,
-                messages=message
-            )
+            try:
+                await client.forward_messages(
+                    entity=entity,
+                    messages=message
+                )
+            except MessageIdInvalidError:
+                logger.warning(f"[MessageHandler] Could not forward message {message.id}: message ID is invalid or message was deleted.")
+                return False
 
             logger.info(f"[MessageHandler] Successfully forwarded custom command reply to channel {rule['destination_channel_id']}")
             # Don't mark as forwarded - keep tracking status for multiple replies
@@ -800,6 +807,35 @@ class MessageHandler:
             logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
             return False
 
+    async def track_outgoing_command(self, chat_id: int, message_id: int, command_text: str):
+        """Track an outgoing command sent by the scheduler."""
+        try:
+            logger.info(f"[MessageHandler] Tracking outgoing command '{command_text}' in chat {chat_id}")
+            group = await self.group_model.get_by_chat_id(chat_id)
+            if not group:
+                logger.warning(f"[MessageHandler] No group found for chat {chat_id}, cannot track outgoing command")
+                return
+
+            rules = await self._get_cached_command_rules(group['id'])
+            if not rules:
+                logger.warning(f"[MessageHandler] No command rules found for chat {chat_id}, cannot track outgoing command")
+                return
+
+            for rule in rules:
+                if rule['command_text'] == command_text:
+                    me = await self.session_manager.get_me()
+                    if me:
+                        await self.cmd_tracked_model.track_command(
+                            rule['id'], message_id, chat_id,
+                            me.id, command_text
+                        )
+                        logger.info(f"[MessageHandler] Successfully tracked outgoing command '{command_text}' in chat {chat_id}")
+                    else:
+                        logger.error("[MessageHandler] Could not get userbot's own user ID, cannot track outgoing command")
+                    break
+        except Exception as e:
+            logger.error(f"[MessageHandler] Error tracking outgoing command: {e}")
+            logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
     async def _resolve_entity_safely(self, client, target_chat_id: int):
         """Safely resolve entity with fallback strategies"""
         try:

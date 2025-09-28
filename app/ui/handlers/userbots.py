@@ -172,6 +172,13 @@ class UserbotsHandler:
         phone = message.text.strip()
         await message.delete()  # Hide phone number for security
         
+        # Check if userbot with this phone number already exists
+        existing_bot = await self.bot_model.get_by_phone(phone)
+        if existing_bot:
+            await message.answer(f"❌ Userbot with phone number {phone} already exists.")
+            await state.clear()
+            return
+
         # Validate phone format
         if not phone.startswith('+'):
             await message.answer("❌ Please include country code (e.g., +919876543210)")
@@ -336,7 +343,7 @@ class UserbotsHandler:
             await client.disconnect()
             
             # Save userbot to database
-            await self._save_userbot(session_name, final_session, me)
+            await self._save_userbot(session_name, final_session, me, phone)
             
             await message.answer(
                 f"✅ <b>Userbot Added Successfully!</b>\n\n"
@@ -490,7 +497,7 @@ class UserbotsHandler:
             await client.disconnect()
             
             # Save userbot to database
-            await self._save_userbot(session_name, final_session, me)
+            await self._save_userbot(session_name, final_session, me, phone)
             
             await message.answer(
                 f"✅ <b>Userbot Added Successfully!</b>\n\n"
@@ -573,7 +580,7 @@ class UserbotsHandler:
                     pass
                 await state.clear()
     
-    async def _save_userbot(self, session_name: str, session_string: str, me) -> None:
+    async def _save_userbot(self, session_name: str, session_string: str, me, phone: str) -> None:
         """Helper method to save userbot to database"""
         try:
             # Generate display name from user info
@@ -596,7 +603,8 @@ class UserbotsHandler:
                 'username': me.username,
                 'first_name': me.first_name,
                 'last_name': me.last_name,
-                'display_name': display_name
+                'display_name': display_name,
+                'phone': phone
             })
             
             # Clear cache since we created new userbot
@@ -629,10 +637,12 @@ class UserbotsHandler:
             }.get(db_status, '⚪')
             
             display_name = userbot.get('display_name') or userbot['session_name']
+            phone_number = userbot.get('phone', 'Not available')
             text = (
                 f"<b>🤖 Userbot Details</b>\n\n"
                 f"<b>{display_name}</b>\n"
                 f"Status: {status_icon} {db_status.title()}\n"
+                f"Phone: <code>{phone_number}</code>\n"
                 f"Last Seen: {userbot['last_seen'] or 'Never'}\n\n"
                 f"<b>Assignments:</b>\n"
             )

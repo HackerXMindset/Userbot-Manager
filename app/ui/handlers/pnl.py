@@ -232,6 +232,17 @@ class PnlHandler:
         if user_id in current_users:
             current_users.remove(user_id)
         await state.update_data({f'{user_type}_users': current_users})
+
+        # Immediately update the database
+        rule_id = data.get('rule_id')
+        if rule_id:
+            update_data = {}
+            if user_type == 'monitored':
+                update_data['allowed_pnl_command_user_ids'] = current_users
+            else:
+                update_data['allowed_reply_user_ids'] = current_users
+            await self.pnl_model.update(rule_id, update_data)
+
         if user_type == 'monitored':
             await self.wizard_show_monitored_users_menu(query, state)
         else:

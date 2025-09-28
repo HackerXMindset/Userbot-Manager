@@ -99,7 +99,7 @@ class ManagementBot:
         # Userbots
         self.dp.callback_query.register(
             self.userbots_handler.handle_userbot_action,
-            F.data.startswith('userbot:'),
+            F.data.startswith(('userbot:', 'userbots_page:')),
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
@@ -187,7 +187,7 @@ class ManagementBot:
         # Templates
         self.dp.callback_query.register(
             self.templates_handler.handle_templates_action,
-            F.data.startswith('templates:'),
+            F.data.startswith(('templates:', 'templates_page:')),
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
 
