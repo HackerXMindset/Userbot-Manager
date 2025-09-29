@@ -100,15 +100,8 @@ class DexScreenerService:
             if not active_tokens:
                 return
             
-            # Batch process tokens to avoid rate limits
-            batch_size = 10
-            for i in range(0, len(active_tokens), batch_size):
-                batch = active_tokens[i:i + batch_size]
-                await self._process_token_batch(batch)
-                
-                # Small delay between batches
-                if i + batch_size < len(active_tokens):
-                    await asyncio.sleep(1)
+            # Process all tokens with optimal 30-token API batching
+            await self._process_token_batch(active_tokens)
                     
         except Exception as e:
             logger.error(f"Error updating token prices: {e}")
