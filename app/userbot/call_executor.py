@@ -52,7 +52,7 @@ class CallExecutor:
                 # Return original ID as final fallback
                 return target_chat_id
     
-    async def send_call_message(self, target_chat_id: int, message: str, token_address: str) -> Dict[str, Any]:
+    async def send_call_message(self, target_chat_id: int, message: str, token_address: str, reply_to_message_id: Optional[int] = None) -> Dict[str, Any]:
         """Send a call message to a target chat"""
         try:
             client = self.session_manager.get_client()
@@ -68,7 +68,22 @@ class CallExecutor:
             resolved_entity = await self._resolve_entity_safely(client, target_chat_id)
             
             # Send message with resolved entity
-            sent_message = await client.send_message(resolved_entity, message, parse_mode='md', link_preview=False)
+            try:
+                sent_message = await client.send_message(
+                    resolved_entity,
+                    message,
+                    parse_mode='md',
+                    link_preview=False,
+                    reply_to=reply_to_message_id
+                )
+            except Exception as e:
+                # If reply fails (MessageIdInvalidError), retry without reply
+                if reply_to_message_id and "message_id_invalid" in str(e).lower():
+                    logger.warning(f"Reply to message {reply_to_message_id} failed, sending standalone message")
+                    sent_message = await client.send_message(resolved_entity, message, parse_mode='md', link_preview=False)
+                    # TODO: Clear first_message_id in database
+                else:
+                    raise e
             
             # Record the call for rate limiting
             self.rate_limiter.record_call()

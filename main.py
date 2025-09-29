@@ -1772,7 +1772,7 @@ class MessageHandler(BotManager):
                             min_mc = self.db.get_min_market_cap(bot_name)
                             bonded_only = self.db.get_bonded_only(bot_name)
                             if market_cap < min_mc or (bonded_only and not is_bonded):
-                                logger.info(f"Skipping address {address} due to filters: mc={market_cap}, bonded={is_bonded}")
+                                logger.debug(f"Skipping address {address} due to filters: mc={market_cap}, bonded={is_bonded}")
                                 continue
                             tracked_calls = self.db.get_tracked_calls(bot_name)
                             ath_price = 0.0

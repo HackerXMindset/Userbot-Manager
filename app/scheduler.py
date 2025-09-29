@@ -199,7 +199,7 @@ class Scheduler:
                 f"Scheduled call for {token['address'][:8]}..."
             )
             
-            logger.info(f"Scheduled call {call_id} for token {token['address'][:8]}... in group {schedule['group_id']}")
+            logger.debug(f"Scheduled call {call_id} for token {token['address'][:8]}... in group {schedule['group_id']}")
             
         except Exception as e:
             logger.error(f"Error scheduling call: {e}")

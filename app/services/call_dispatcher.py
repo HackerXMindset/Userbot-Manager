@@ -178,6 +178,23 @@ class CallDispatcher:
                 placeholders = await placeholder_service.get_all_placeholders()
                 message_content = placeholder_service.format_template(template_record['template_text'], placeholders)
                 use_mgmt_bot = template_record.get('use_management_bot', False)
+
+            # Get first message ID for reply threading if this is a system alert
+            reply_to_message_id = additional_info.get('reply_to_message_id')
+            if not reply_to_message_id and additional_info.get('message_override') and target_group_id:
+                try:
+                    # Look up first message ID from alert state
+                    token_record = await db.fetchrow("SELECT id FROM tokens_tracked WHERE address = $1", token_address)
+                    if token_record:
+                        targets = await db.fetch("SELECT id FROM targets WHERE group_id = $1", target_group_id)
+                        for target in targets:
+                            alert_state = await self.target_alert_state_model.get_by_target_token(target['id'], token_record['id'])
+                            if alert_state and alert_state['first_message_id']:
+                                reply_to_message_id = alert_state['first_message_id']
+                                logger.debug(f"Found first message ID {reply_to_message_id} for alert threading")
+                                break
+                except Exception as e:
+                    logger.warning(f"Could not retrieve first message ID for threading: {e}")
             
             logger.debug(f"Final message content for job {job_id}:\n{message_content}")
 
@@ -205,7 +222,8 @@ class CallDispatcher:
                     send_result = await executor.send_call_message(
                         target_chat_id=target_chat_id,
                         message=message_content,
-                        token_address=token_address
+                        token_address=token_address,
+                        reply_to_message_id=reply_to_message_id
                     )
                     success = send_result.get('success', False)
                     if not success:
@@ -216,6 +234,24 @@ class CallDispatcher:
 
             # Update job status
             if success:
+                # Store first message ID for future reply threading
+                sent_message_id = send_result.get('message_id')
+                if sent_message_id and token_address and target_group_id:
+                    try:
+                        # Find token_id from address
+                        token_record = await db.fetchrow("SELECT id FROM tokens_tracked WHERE address = $1", token_address)
+                        if token_record:
+                            # Find targets for this group
+                            targets = await db.fetch("SELECT id FROM targets WHERE group_id = $1", target_group_id)
+                            for target in targets:
+                                await self.target_alert_state_model.ensure_state(
+                                    target_id=target['id'],
+                                    token_id=token_record['id'],
+                                    message_id=sent_message_id
+                                )
+                    except Exception as e:
+                        logger.warning(f"Could not store first message ID for threading: {e}")
+
                 # PHASE 3: Record alert state baseline
                 try:
                     await self._record_alert_state_baseline(job, send_result, placeholders)
@@ -239,6 +275,18 @@ class CallDispatcher:
                 await self.call_queue_model.mark_completed(job_id)
                 logger.info(f"[DISPATCHER] ✅ Job {job_id} completed.")
             else:
+                # If reply failed and we have reply_to_message_id, clear it from state
+                if reply_to_message_id and "message_id_invalid" in error_msg.lower():
+                    try:
+                        token_record = await db.fetchrow("SELECT id FROM tokens_tracked WHERE address = $1", token_address)
+                        if token_record and target_group_id:
+                            targets = await db.fetch("SELECT id FROM targets WHERE group_id = $1", target_group_id)
+                            for target in targets:
+                                await self.target_alert_state_model.clear_first_message(target['id'], token_record['id'])
+                                logger.info(f"Cleared invalid first_message_id {reply_to_message_id} for target {target['id']}")
+                    except Exception as e:
+                        logger.warning(f"Could not clear invalid first_message_id: {e}")
+
                 await self.call_queue_model.mark_failed(job_id, error_msg)
                 logger.warning(f"[DISPATCHER] ❌ Job {job_id} failed: {error_msg}")
             

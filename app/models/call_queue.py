@@ -19,9 +19,6 @@ class CallQueueModel(BaseModel):
                      source_info: str = None, additional_info: str = None,
                      priority: int = 0, source_user_id: int = None) -> asyncpg.Record:
         """Add a new call job to the queue, with fallback for older schema."""
-        
-        if not routing_rule_id and not curated_alpha_rule_id:
-            raise ValueError("Either routing_rule_id or curated_alpha_rule_id must be provided.")
 
         try:
             # Build the query dynamically for the LATEST schema

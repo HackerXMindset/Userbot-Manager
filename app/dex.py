@@ -159,7 +159,7 @@ class DexScreenerService:
         
         try:
             url = f"{self.BASE_URL}/{token_address}"
-            logger.info(f"[DEXSCREENER] Requesting: {url}")
+            logger.debug(f"[DEXSCREENER] Requesting: {url}")
             
             async with self.session.get(url) as response:
                 # Get response body first for logging
@@ -174,10 +174,10 @@ class DexScreenerService:
                         # API documentation says it always returns an array
                         if isinstance(data, list):
                             if len(data) == 0:
-                                logger.info(f"[DEXSCREENER] No trading pairs found for token {token_address}")
+                                logger.debug(f"[DEXSCREENER] No trading pairs found for token {token_address}")
                                 return []
                             else:
-                                logger.info(f"[DEXSCREENER] Found {len(data)} trading pairs for token {token_address}")
+                                logger.debug(f"[DEXSCREENER] Found {len(data)} trading pairs for token {token_address}")
                                 # Log first pair details for debugging
                                 first_pair = data[0]
                                 logger.debug(f"[DEXSCREENER] First pair marketCap: {first_pair.get('marketCap', 'N/A')}, dexId: {first_pair.get('dexId', 'N/A')}")
@@ -301,7 +301,7 @@ class DexScreenerService:
                 await self.token_model.set_status(token['id'], 'stopped')
                 logger.info(f"Stopped monitoring {token['address'][:8]}... (MC below $8K: ${new_mc:,.0f})")
             else:
-                logger.info(f"Updated {token['address'][:8]}... MC: ${new_mc:,.0f}")
+                logger.debug(f"Updated {token['address'][:8]}... MC: ${new_mc:,.0f}")
             
         except Exception as e:
             logger.error(f"Error updating token from API data: {e}")
@@ -357,10 +357,12 @@ class DexScreenerService:
         for target in targets:
             try:
                 # 2. Get the alert state for this specific token-target pair
+                # Use token's baseline (first_seen_mc) as initial_market_cap, not current MC
+                baseline_mc = token.get('first_seen_mc') or new_mc
                 state = await self.target_alert_state_model.get_or_create(
                     target_id=target['id'],
                     token_id=token['id'],
-                    initial_market_cap=new_mc
+                    initial_market_cap=baseline_mc
                 )
 
                 if not state or not state['initial_market_cap'] or state['initial_market_cap'] <= 0:
@@ -408,14 +410,29 @@ class DexScreenerService:
 
                     # Format message and queue job
                     message = self._format_dynamic_alert_message(token, state, next_alert_to_fire, alert_type)
-                    additional_info = json.dumps({"message_override": message})
+
+                    # Get first message ID for reply threading
+                    first_message_id = None
+                    try:
+                        alert_state = await self.target_alert_state_model.get_by_target_token(target['id'], token['id'])
+                        if alert_state and alert_state['first_message_id']:
+                            first_message_id = alert_state['first_message_id']
+                    except Exception as e:
+                        logger.debug(f"Could not retrieve first message ID: {e}")
+
+                    additional_info = json.dumps({
+                        "message_override": message,
+                        "reply_to_message_id": first_message_id
+                    })
                     source_info = json.dumps({"name": f"System {alert_type} Alerter"})
 
                     await self.call_queue_model.add_job(
                         token_address=token['address'],
-                        target_group_id=source_group_id,
+                        source_message_id=None,
+                        source_chat_id=None,
                         target_chat_id=target['dest_chat_id'],
                         forwarding_userbot_id=forwarding_userbot_id,
+                        target_group_id=source_group_id,
                         source_info=source_info,
                         additional_info=additional_info
                     )
@@ -456,10 +473,25 @@ class DexScreenerService:
 
             # This is a system-generated call, not from a specific user message
             source_info = json.dumps({"name": "System PNL Alerter"})
-            additional_info = json.dumps({"message_override": f"/pnl {token['address']}"})
 
             for target in targets:
                 try:
+                    # Get first message ID for reply threading
+                    first_message_id = None
+                    try:
+                        token_record = await db.fetchrow("SELECT id FROM tokens_tracked WHERE address = $1", token['address'])
+                        if token_record:
+                            alert_state = await self.target_alert_state_model.get_by_target_token(target['id'], token_record['id'])
+                            if alert_state and alert_state['first_message_id']:
+                                first_message_id = alert_state['first_message_id']
+                    except Exception as e:
+                        logger.debug(f"Could not retrieve first message ID for PNL alert: {e}")
+
+                    additional_info = json.dumps({
+                        "message_override": f"/pnl {token['address']}",
+                        "reply_to_message_id": first_message_id
+                    })
+
                     await self.call_queue_model.add_job(
                         token_address=token['address'],
                         target_group_id=source_group_id,
@@ -468,7 +500,7 @@ class DexScreenerService:
                         source_info=source_info,
                         additional_info=additional_info,
                         # These fields are not applicable for system PNL alerts
-                        routing_rule_id=None, 
+                        routing_rule_id=None,
                         source_message_id=None,
                         source_chat_id=None,
                         source_user_id=None,
@@ -490,13 +522,21 @@ class DexScreenerService:
                 if not rule['forwarding_userbot_id'] or not rule['destination_chat_id']:
                     continue
                 try:
+                    # For curated alpha, we don't have target state tracking, so no reply threading
+                    curated_additional_info = json.dumps({
+                        "message_override": f"/pnl {token['address']}",
+                        "reply_to_message_id": None
+                    })
+
                     await self.call_queue_model.add_job(
                         token_address=token['address'],
-                        curated_alpha_rule_id=rule['rule_id'],
+                        source_message_id=None,
+                        source_chat_id=None,
                         target_chat_id=rule['destination_chat_id'],
                         forwarding_userbot_id=rule['forwarding_userbot_id'],
+                        curated_alpha_rule_id=rule['rule_id'],
                         source_info=source_info,
-                        additional_info=additional_info,
+                        additional_info=curated_additional_info,
                     )
                     success_count += 1
                     logger.info(f"[CuratedAlpha] Queued PNL alert for {token['address'][:8]}... to curated destination {rule['destination_chat_id']}")

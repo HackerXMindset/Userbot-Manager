@@ -21,6 +21,14 @@ class TargetsHandler:
     async def handle_target_action(self, query: types.CallbackQuery, state: FSMContext):
         """Handle target actions"""
         parts = query.data.split(':')  # Allow more parts for group_id context
+
+        # Handle pagination for targets view by group
+        if parts[0] == 'targets_group_page':
+            page = int(parts[2])
+            group_id = int(parts[3])
+            await self.show_targets_for_group(query, group_id, page)
+            return
+
         action = parts[1]
         
         if action == 'add':
@@ -28,6 +36,10 @@ class TargetsHandler:
         elif action == 'select_group':
             group_id = int(parts[2])
             await self.prompt_for_target_chat_id(query, state, group_id)
+        elif action == 'view_group':
+            group_id = int(parts[2])
+            page = int(parts[3]) if len(parts) > 3 else 1
+            await self.show_targets_for_group(query, group_id, page)
         elif action == 'delete':
             if len(parts) > 2:
                 target_id = int(parts[2])
@@ -668,6 +680,73 @@ class TargetsHandler:
 
         finally:
             await state.clear()
+
+    async def show_targets_for_group(self, query: types.CallbackQuery, group_id: int, page: int = 1):
+        """Show targets for a specific group with pagination"""
+        try:
+            # Get targets for the group
+            targets = await self.target_model.get_by_group_id(group_id)
+
+            # Get group info
+            group = await self.db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
+            group_name = group['display_name'] or group['title'] or f"Group {group_id}" if group else f"Group {group_id}"
+
+            # Pagination logic (same as groups.py)
+            page_size = 5
+            total_pages = (len(targets) + page_size - 1) // page_size if targets else 1
+            start_index = (page - 1) * page_size
+            end_index = start_index + page_size
+            paginated_targets = targets[start_index:end_index]
+
+            text = f"<b>🎯 Targets in {group_name} (Page {page}/{total_pages})</b>\n\n"
+
+            if not targets:
+                text += "No targets configured for this group.\nClick 'Add Target' to create one."
+            else:
+                for i, target in enumerate(paginated_targets, start_index + 1):
+                    # Get alert summary
+                    alert_summary = await self.target_model.get_alert_summary(target['id'])
+                    alert_text = alert_summary.get('summary_text', 'Alerts: Unknown')
+
+                    text += f"{i}. 📱 <code>{target['dest_chat_id']}</code>\n"
+                    text += f"   └ {alert_text}\n\n"
+
+            keyboard_rows = []
+
+            # Target action buttons
+            for target in paginated_targets:
+                keyboard_rows.append([
+                    InlineKeyboardButton(
+                        text=f"⚙️ Configure {target['dest_chat_id']}",
+                        callback_data=f"targets:alerts_menu:{target['id']}:{group_id}"
+                    ),
+                    InlineKeyboardButton(
+                        text=f"🗑️ Delete {target['dest_chat_id']}",
+                        callback_data=f"targets:delete:{target['id']}"
+                    )
+                ])
+
+            # Add target and navigation buttons
+            keyboard_rows.append([
+                InlineKeyboardButton(text="➕ Add Target", callback_data=f"targets:select_group:{group_id}"),
+                InlineKeyboardButton(text="🔙 Back to Group", callback_data=f"group:view:{group_id}")
+            ])
+
+            # Pagination buttons (same pattern as groups.py)
+            if total_pages > 1:
+                pagination_buttons = self.keyboards.pagination(f"targets_group_page", page, total_pages)
+                # Add group_id to pagination callback
+                for button in pagination_buttons:
+                    if button.callback_data.endswith(str(page-1)) or button.callback_data.endswith(str(page+1)):
+                        button.callback_data += f":{group_id}"
+                keyboard_rows.append(pagination_buttons)
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+            await query.message.edit_text(text, reply_markup=keyboard)
+
+        except Exception as e:
+            logger.error(f"Error showing targets for group {group_id}: {e}")
+            await query.answer("❌ Error loading targets for group")
 
     def _validate_thresholds_input(self, text: str) -> list[float] | None:
         """Validate and parse thresholds input"""
