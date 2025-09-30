@@ -406,23 +406,73 @@ class Keyboards:
             text="⏰ Disable Schedule" if rule.get('schedule_enabled') else "⏰ Enable Schedule",
             callback_data=f"cmd_fwd:toggle_schedule:{rule['id']}"
         )
-        return InlineKeyboardMarkup(inline_keyboard=[
+        timestamp_btn = InlineKeyboardButton(
+            text="🕒 Disable Timestamp" if rule.get('post_timestamp') else "🕒 Enable Timestamp",
+            callback_data=f"cmd_fwd:toggle_timestamp:{rule['id']}"
+        )
+
+        keyboard = [
             [status_btn],
             [schedule_btn],
+            [timestamp_btn]
+        ]
+
+        # Only show timezone selector if timestamp posting is enabled
+        if rule.get('post_timestamp'):
+            timezone = rule.get('timestamp_timezone', 'IST')
+            timezone_btn = InlineKeyboardButton(
+                text=f"🌍 Timezone: {timezone}",
+                callback_data=f"cmd_fwd:set_timezone:{rule['id']}"
+            )
+            keyboard.append([timezone_btn])
+
+        keyboard.extend([
             [
                 InlineKeyboardButton(text="💬 Edit Command", callback_data=f"cmd_fwd:edit_command:{rule['id']}"),
-            ],
-            [
                 InlineKeyboardButton(text="👥 Manage Command Users", callback_data=f"cmd_fwd:manage_command_users:{rule['id']}"),
             ],
             [
-                InlineKeyboardButton(text="👥 Manage Reply Users", callback_data=f"cmd_fwd:manage_reply_users:{rule['id']}")
+                InlineKeyboardButton(text="👥 Manage Reply Users", callback_data=f"cmd_fwd:manage_reply_users:{rule['id']}"),
+                InlineKeyboardButton(text="🤖 Set Forwarding Bot", callback_data=f"cmd_fwd:set_fwd_bot:{rule['id']}")
             ],
-            [InlineKeyboardButton(text="🤖 Set Forwarding Bot", callback_data=f"cmd_fwd:set_fwd_bot:{rule['id']}")],
-            [InlineKeyboardButton(text="⚙️ Schedule Settings", callback_data=f"cmd_fwd:schedule_settings:{rule['id']}")],
-            [InlineKeyboardButton(text="🗑️ Delete Rule", callback_data=f"cmd_fwd:delete:{rule['id']}")],
+            [
+                InlineKeyboardButton(text="⚙️ Schedule Settings", callback_data=f"cmd_fwd:schedule_settings:{rule['id']}"),
+                InlineKeyboardButton(text="🗑️ Delete Rule", callback_data=f"cmd_fwd:delete:{rule['id']}")
+            ],
             [InlineKeyboardButton(text="🔙 Back to List", callback_data="cmd_fwd:list")]
         ])
+
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def cmd_fwd_timezone_selection_keyboard(rule_id: int, current_tz: str) -> InlineKeyboardMarkup:
+        """Timezone selection keyboard"""
+        timezones = [
+            ('IST', 'Indian Standard Time'),
+            ('UTC', 'Coordinated Universal Time'),
+            ('EST', 'Eastern Standard Time'),
+            ('PST', 'Pacific Standard Time'),
+            ('CST', 'Central Standard Time'),
+            ('JST', 'Japan Standard Time'),
+            ('AEST', 'Australian Eastern Standard Time'),
+            ('CET', 'Central European Time'),
+            ('GMT', 'Greenwich Mean Time')
+        ]
+
+        keyboard = []
+        row = []
+        for i, (tz_code, tz_name) in enumerate(timezones):
+            button_text = f"{'✅ ' if tz_code == current_tz else ''}{tz_code}"
+            row.append(InlineKeyboardButton(
+                text=button_text,
+                callback_data=f"cmd_fwd:select_timezone:{rule_id}:{tz_code}"
+            ))
+            if len(row) == 3 or i == len(timezones) - 1:
+                keyboard.append(row)
+                row = []
+
+        keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data=f"cmd_fwd:view:{rule_id}")])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
     def cmd_fwd_select_source_group_keyboard(groups: List[Dict]) -> InlineKeyboardMarkup:
@@ -550,71 +600,70 @@ class Keyboards:
             if rule.get('next_scheduled_at'):
                 text += f"\n  └ Next: {rule['next_scheduled_at'].strftime('%Y-%m-%d %H:%M UTC')}"
 
+        # Add timestamp posting information
+        timestamp_status = '✅ Enabled' if rule.get('post_timestamp') else '❌ Disabled'
+        text += f"\n\n<b>Timestamp Posting: {timestamp_status}</b>"
+        if rule.get('post_timestamp'):
+            timezone = rule.get('timestamp_timezone', 'IST')
+            text += f"\n  └ Timezone: {timezone}"
+
         return text
 
     @staticmethod
     def target_alerts_menu(target, back_callback: str = "menu:targets") -> InlineKeyboardMarkup:
-        """Target alerts configuration menu - shows enabled status, modes, sensitivity, thresholds"""
-        from app.models import TargetModel
+        """Target alerts configuration menu - context-aware based on enabled status"""
+        enabled = target.get('alerts_enabled', True)
+        target_id = target['id']
 
-        # Parse alert configuration from target record
-        target_model = TargetModel(None)  # We'll use static methods
-        modes = target_model.parse_alert_modes(target)
-        thresholds = target_model.parse_alert_thresholds(target)
-        sensitivity = target_model.get_alert_sensitivity_percent(target)
-        enabled = target['alerts_enabled'] if 'alerts_enabled' in target else True
-
-        # Build status text
-        status = "🟢 ON" if enabled else "🔴 OFF"
-        mode_status = " ".join([f"{mode}{'✅' if enabled else '❌'}" for mode, enabled in modes.items()])
-        threshold_text = ",".join([str(x) for x in thresholds])
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    text=f"{'🔴 Disable' if enabled else '🟢 Enable'} Alerts",
-                    callback_data=f"targets:alerts_enable:{target['id']}"
-                )
-            ],
-            [
-                InlineKeyboardButton(text="🎛️ Alert Modes", callback_data=f"targets:alerts_modes:{target['id']}"),
-            ],
-            [
-                InlineKeyboardButton(text="📊 Set Thresholds", callback_data=f"targets:alerts_set_thresholds:{target['id']}"),
-                InlineKeyboardButton(text="⚡ Set Sensitivity", callback_data=f"targets:alerts_set_sensitivity:{target['id']}")
-            ],
-            [InlineKeyboardButton(text="🔙 Back", callback_data=back_callback)]
-        ]
+        if enabled:
+            # When enabled: show disable + config options
+            keyboard = [
+                [InlineKeyboardButton(text="🔴 Disable All", callback_data=f"targets:alerts_enable:{target_id}")],
+                [InlineKeyboardButton(text="🎛️ Modes", callback_data=f"targets:alerts_modes:{target_id}")],
+                [
+                    InlineKeyboardButton(text="⚡ Sensitivity", callback_data=f"targets:alerts_set_sensitivity:{target_id}"),
+                    InlineKeyboardButton(text="🎚️ Thresholds", callback_data=f"targets:alerts_set_thresholds:{target_id}")
+                ],
+                [InlineKeyboardButton(text="🔙 Back", callback_data=back_callback)]
+            ]
+        else:
+            # When disabled: only show enable button
+            keyboard = [
+                [InlineKeyboardButton(text="🟢 Enable Alerts", callback_data=f"targets:alerts_enable:{target_id}")],
+                [InlineKeyboardButton(text="🔙 Back", callback_data=back_callback)]
+            ]
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
     def target_alerts_mode_keyboard(target) -> InlineKeyboardMarkup:
-        """Target alert modes toggle keyboard - toggles for pnl, dynamic, threshold, sensitivity"""
+        """Target alert modes toggle keyboard - vertical button list"""
         from app.models import TargetModel
 
         # Parse current modes
-        target_model = TargetModel(None)  # We'll use static methods
+        target_model = TargetModel(None)
         modes = target_model.parse_alert_modes(target)
+
+        mode_icons = {"pnl": "📈", "dynamic": "🔄", "threshold": "🎚️", "sensitivity": "⚡"}
+        mode_names = {"pnl": "PNL", "dynamic": "Dynamic", "threshold": "Threshold", "sensitivity": "Sensitivity"}
 
         keyboard = []
 
-        # Create toggle buttons for each mode
-        for mode_name, is_enabled in modes.items():
-            status_icon = "✅" if is_enabled else "❌"
-            mode_display = {
-                "pnl": "💹 PNL",
-                "dynamic": "🔄 Dynamic",
-                "threshold": "📊 Threshold",
-                "sensitivity": "⚡ Sensitivity"
-            }.get(mode_name, mode_name.title())
+        # Only show main modes (skip dynamic - legacy)
+        for mode in ["pnl", "threshold", "sensitivity"]:
+            if mode in modes:
+                icon = mode_icons[mode]
+                name = mode_names[mode]
+                status = "✅" if modes[mode] else "❌"
 
-            keyboard.append([
-                InlineKeyboardButton(
-                    text=f"{status_icon} {mode_display}",
-                    callback_data=f"targets:alerts_toggle:{target['id']}:{mode_name}"
-                )
-            ])
+                # Format: [📈 PNL          ✅]
+                button_text = f"{icon} {name:<12} {status}"
+                keyboard.append([
+                    InlineKeyboardButton(
+                        text=button_text,
+                        callback_data=f"targets:alerts_toggle:{target['id']}:{mode}"
+                    )
+                ])
 
         keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data=f"targets:alerts_menu:{target['id']}")])
 

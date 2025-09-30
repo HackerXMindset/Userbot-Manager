@@ -60,6 +60,16 @@ class CommandForwardingHandler:
             elif action == 'schedule_settings':
                 rule_id = int(query.data.split(':')[2])
                 await self.show_schedule_settings(query, state, rule_id)
+            elif action == 'toggle_timestamp':
+                rule_id = int(query.data.split(':')[2])
+                await self.toggle_timestamp_posting(query, rule_id)
+            elif action == 'set_timezone':
+                rule_id = int(query.data.split(':')[2])
+                await self.show_timezone_selection(query, state, rule_id)
+            elif action == 'select_timezone':
+                rule_id = int(query.data.split(':')[2])
+                timezone = query.data.split(':')[3]
+                await self.update_timezone(query, rule_id, timezone)
 
             # Wizard actions
             elif action == 'wizard_source_group':
@@ -108,7 +118,7 @@ class CommandForwardingHandler:
 
             keyboard = self.keyboards.cmd_fwd_rules_list(rules)
             text = f'<b>🔄 Command Forwarding Rules ({len(rules)})</b>\n\nManage rules for forwarding replies to custom commands and scheduling automatic command sending.'
-            await query.message.edit_text(text, reply_markup=keyboard)
+            await query.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
             await query.answer()
         except Exception as e:
             logger.error(f'Error in show_rules_list: {e}\n{traceback.format_exc()}')
@@ -128,7 +138,7 @@ class CommandForwardingHandler:
             fwd_bot = await self.bot_model.get_by_id(rule['forwarding_userbot_id'])
             text = self.keyboards.cmd_fwd_rule_details_text(rule, source_group, dest_channel_info, fwd_bot)
             keyboard = self.keyboards.cmd_fwd_rule_details_menu(rule)
-            await query.message.edit_text(text, reply_markup=keyboard)
+            await query.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
             await query.answer()
         except Exception as e:
             logger.error(f'Error in show_rule_details: {e}\n{traceback.format_exc()}')
@@ -152,6 +162,36 @@ class CommandForwardingHandler:
             await self.show_rule_details(query, rule_id)
         except Exception as e:
             logger.error(f'Error in toggle_schedule_enabled: {e}\n{traceback.format_exc()}')
+            await query.answer('❌ An error occurred. Please try again.', show_alert=True)
+
+    async def toggle_timestamp_posting(self, query: types.CallbackQuery, rule_id: int):
+        logger.debug(f'Toggling timestamp posting for command forwarding rule {rule_id}')
+        try:
+            new_status = await self.cmd_fwd_model.toggle_timestamp_posting(rule_id)
+            await query.answer(f'✅ Timestamp posting has been {"enabled" if new_status else "disabled"}.')
+            await self.show_rule_details(query, rule_id)
+        except Exception as e:
+            logger.error(f'Error in toggle_timestamp_posting: {e}\n{traceback.format_exc()}')
+            await query.answer('❌ An error occurred. Please try again.', show_alert=True)
+
+    async def show_timezone_selection(self, query: types.CallbackQuery, state: FSMContext, rule_id: int):
+        rule = await self.cmd_fwd_model.get_by_id(rule_id)
+        if not rule:
+            return await query.answer("Rule not found.")
+
+        current_tz = rule.get('timestamp_timezone', 'IST')
+        text = f'<b>🌍 Select Timezone</b>\n\nCurrent: <b>{current_tz}</b>\n\nSelect timezone for timestamp display:'
+        keyboard = self.keyboards.cmd_fwd_timezone_selection_keyboard(rule_id, current_tz)
+        await query.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
+
+    async def update_timezone(self, query: types.CallbackQuery, rule_id: int, timezone: str):
+        logger.debug(f'Updating timezone for rule {rule_id} to {timezone}')
+        try:
+            await self.cmd_fwd_model.update_timezone(rule_id, timezone)
+            await query.answer(f'✅ Timezone updated to {timezone}')
+            await self.show_rule_details(query, rule_id)
+        except Exception as e:
+            logger.error(f'Error updating timezone: {e}\n{traceback.format_exc()}')
             await query.answer('❌ An error occurred. Please try again.', show_alert=True)
 
     async def confirm_delete_rule(self, query: types.CallbackQuery, rule_id: int):
@@ -270,7 +310,19 @@ class CommandForwardingHandler:
             user_type = data.get('user_type')
             current_users = data.get(f'{user_type}_users', [])
             current_users.extend(user_ids)
-            await state.update_data({f'{user_type}_users': list(set(current_users))})
+            updated_users = list(set(current_users))
+            await state.update_data({f'{user_type}_users': updated_users})
+
+            # Immediately update the database if editing existing rule
+            rule_id = data.get('rule_id')
+            if rule_id:
+                update_data = {}
+                if user_type == 'monitored':
+                    update_data['allowed_command_user_ids'] = updated_users
+                else:
+                    update_data['allowed_reply_user_ids'] = updated_users
+                await self.cmd_fwd_model.update(rule_id, update_data)
+
             await message.delete()
             if user_type == 'monitored':
                 await self.wizard_show_monitored_users_menu(message, state)

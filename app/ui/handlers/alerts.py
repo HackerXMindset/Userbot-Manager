@@ -36,17 +36,26 @@ class AlertsHandler:
 
             logger.debug(f"Formatted stats: total={total_targets}, enabled={enabled_targets}, pnl={pnl_mode}, thresh={threshold_mode}, sens={sensitivity_mode}, avg_sens={avg_sensitivity_percent}")
 
+            # Build visual progress bar
+            enabled_bar = "█" * int(enabled_percent / 10) + "░" * (10 - int(enabled_percent / 10))
+
+            # Calculate next alert multiplier
+            next_alert_mult = 1 + (avg_sensitivity if avg_sensitivity else 0.5)
+
             text = (
-                f"<b>🚨 Alerts Dashboard</b>\n\n"
-                f"This dashboard provides a high-level overview of the per-target alert configurations across the system.\n\n"
-                f"<b>📊 Overall Status:</b>\n"
-                f"  └ <b>{enabled_targets} / {total_targets}</b> targets have alerts enabled ({enabled_percent:.0f}%).\n\n"
-                f"<b>⚙️ Active Mode Distribution:</b>\n"
-                f"  ├ PNL Alerts: <b>{pnl_mode}</b> targets\n"
-                f"  ├ Threshold Alerts: <b>{threshold_mode}</b> targets\n"
-                f"  └ Sensitivity Alerts: <b>{sensitivity_mode}</b> targets\n\n"
-                f"<b>⚡️ Average Sensitivity:</b>\n"
-                f"  └ <b>{avg_sensitivity_percent:.1f}%</b> (for enabled targets)"
+                f"🚨 Alert System\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"ACTIVE       <b>{enabled_targets} / {total_targets}</b> targets\n"
+                f"COVERAGE     {enabled_bar}  <b>{enabled_percent:.0f}%</b>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"MODES IN USE\n\n"
+                f"  📈  {pnl_mode}  PNL\n"
+                f"  🎚️  {threshold_mode}  Threshold\n"
+                f"  ⚡  {sensitivity_mode}  Sensitivity\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"AVG SENSITIVITY     <b>{avg_sensitivity_percent:.0f}%</b>\n"
+                f"Next alert at       <b>{next_alert_mult:.2f}x</b>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━"
             )
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -61,7 +70,7 @@ class AlertsHandler:
                 ]
             ])
             
-            await query.message.edit_text(text, reply_markup=keyboard)
+            await query.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
             
         except Exception as e:
             logger.error(f"Error showing alerts dashboard: {e}", exc_info=True)

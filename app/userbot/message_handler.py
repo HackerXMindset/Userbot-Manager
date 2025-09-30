@@ -20,6 +20,7 @@ from .source_manager import SourceManager
 from .utils import UserbotUtils
 from .notification_handler import NotificationHandler
 from telethon.tl.types import PeerChannel, PeerChat, PeerUser
+from telethon.errors import MessageIdInvalidError
 
 logger = logging.getLogger(__name__)
 
@@ -799,6 +800,12 @@ class MessageHandler:
                 return False
 
             logger.info(f"[MessageHandler] Successfully forwarded custom command reply to channel {rule['destination_channel_id']}")
+
+            # Post timestamp if enabled
+            if rule.get('post_timestamp', False):
+                timezone = rule.get('timestamp_timezone', 'IST')
+                await self._post_forward_timestamp(client, entity, rule['destination_channel_id'], timezone)
+
             # Don't mark as forwarded - keep tracking status for multiple replies
             return True
 
@@ -806,6 +813,41 @@ class MessageHandler:
             logger.error(f"[MessageHandler] Error forwarding custom command reply: {e}")
             logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
             return False
+
+    async def _post_forward_timestamp(self, client, entity, destination_channel_id: int, timezone_name: str):
+        """Post timestamp after forwarding a message in specified timezone."""
+        try:
+            from datetime import datetime, timezone, timedelta
+
+            # Timezone offsets mapping
+            timezone_offsets = {
+                'IST': timedelta(hours=5, minutes=30),
+                'UTC': timedelta(hours=0),
+                'GMT': timedelta(hours=0),
+                'EST': timedelta(hours=-5),
+                'PST': timedelta(hours=-8),
+                'CST': timedelta(hours=-6),
+                'JST': timedelta(hours=9),
+                'AEST': timedelta(hours=10),
+                'CET': timedelta(hours=1)
+            }
+
+            offset = timezone_offsets.get(timezone_name, timedelta(hours=5, minutes=30))  # Default to IST
+            tz = timezone(offset)
+            local_time = datetime.now(tz)
+
+            timestamp_text = f"⏰ Forwarded at: {local_time.strftime('%d/%m/%Y %H:%M:%S')} {timezone_name}"
+
+            await client.send_message(
+                entity=entity,
+                message=timestamp_text
+            )
+
+            logger.info(f"[MessageHandler] Posted {timezone_name} timestamp to channel {destination_channel_id}")
+
+        except Exception as e:
+            logger.error(f"[MessageHandler] Error posting timestamp: {e}")
+            logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
 
     async def track_outgoing_command(self, chat_id: int, message_id: int, command_text: str):
         """Track an outgoing command sent by the scheduler."""

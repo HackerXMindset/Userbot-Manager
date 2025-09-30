@@ -24,7 +24,6 @@ class ManagementStates(StatesGroup):
     
     
     # Targets
-    adding_target = State()
     target_edit_alert_mode = State()
     target_edit_sensitivity = State()
     target_edit_thresholds = State()

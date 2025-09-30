@@ -29,23 +29,18 @@ class TargetsHandler:
             await self.show_targets_for_group(query, group_id, page)
             return
 
+        # Handle pagination for targets alerts view
+        if parts[0] == 'targets_alerts_page':
+            page = int(parts[2])
+            await self.show_targets_for_alerts(query, page)
+            return
+
         action = parts[1]
         
-        if action == 'add':
-            await self.start_add_target(query, state)
-        elif action == 'select_group':
-            group_id = int(parts[2])
-            await self.prompt_for_target_chat_id(query, state, group_id)
-        elif action == 'view_group':
+        if action == 'view_group':
             group_id = int(parts[2])
             page = int(parts[3]) if len(parts) > 3 else 1
             await self.show_targets_for_group(query, group_id, page)
-        elif action == 'delete':
-            if len(parts) > 2:
-                target_id = int(parts[2])
-                await self.delete_target(query, target_id)
-            else:
-                await self.show_delete_target_list(query)
         elif action == 'select_for_alerts':
             await self.show_targets_for_alerts(query)
         elif action == 'alerts_menu':
@@ -65,10 +60,28 @@ class TargetsHandler:
             await self.show_alert_modes(query, target_id)
         elif action == 'alerts_set_sensitivity':
             target_id = int(parts[2])
-            await self.prompt_for_sensitivity(query, state, target_id)
+            group_id = int(parts[3]) if len(parts) > 3 else None
+            await self.prompt_for_sensitivity(query, state, target_id, group_id)
         elif action == 'alerts_set_thresholds':
             target_id = int(parts[2])
-            await self.prompt_for_thresholds(query, state, target_id)
+            group_id = int(parts[3]) if len(parts) > 3 else None
+            await self.prompt_for_thresholds(query, state, target_id, group_id)
+        elif action == 'sens_quick':
+            target_id = int(parts[2])
+            percent = int(parts[3])
+            group_id = int(parts[4]) if len(parts) > 4 else None
+            await self.apply_quick_sensitivity(query, target_id, percent, group_id)
+        elif action == 'sens_custom':
+            target_id = int(parts[2])
+            await self.prompt_for_sensitivity_custom(query, state, target_id)
+        elif action == 'thresh_preset':
+            target_id = int(parts[2])
+            preset = parts[3]
+            group_id = int(parts[4]) if len(parts) > 4 else None
+            await self.apply_threshold_preset(query, target_id, preset, group_id)
+        elif action == 'thresh_custom':
+            target_id = int(parts[2])
+            await self.prompt_for_thresholds_custom(query, state, target_id)
         else:
             await self.show_targets_menu(query)
     
@@ -83,37 +96,30 @@ class TargetsHandler:
                 ORDER BY g.display_name, t.dest_chat_id
             """)
             
-            text = "<b>🎯 Targets Overview</b>\n\n"
-            
+            text = f"🎯 <b>Targets</b> ({len(targets)})\n\n"
+
             if not targets:
-                text += "No targets configured.\nTargets are the channels where calls are sent."
+                text += "No targets configured."
             else:
-                text += f"<b>Available Targets ({len(targets)}):</b>\n\n"
                 for i, target in enumerate(targets, 1):
                     group_name = target['group_display_name'] or target['group_title'] or f"Chat {target['group_tg_chat_id']}" if target['group_tg_chat_id'] else "No Group"
 
-                    # Get alert summary
-                    alert_summary = await self.target_model.get_alert_summary(target['id'])
-                    alert_text = alert_summary.get('summary_text', 'Alerts: Unknown')
+                    status = "🟢" if target['alerts_enabled'] else "🔴"
+                    modes = self.target_model.parse_alert_modes(target)
+                    mode_count = sum(1 for v in modes.values() if v)
 
-                    text += f"{i}. <code>{target['dest_chat_id']}</code>\n"
-                    text += f"   └ Group: {group_name}\n"
-                    text += f"   └ {alert_text}\n\n"
+                    prefix = "├" if i < len(targets) else "└"
+
+                    if target['alerts_enabled']:
+                        text += f"{prefix} {group_name}  {status} {mode_count} modes\n"
+                    else:
+                        text += f"{prefix} {group_name}  {status} OFF\n"
             
             keyboard_rows = []
             if targets:
-                keyboard_rows.append([
-                    InlineKeyboardButton(text="➕ Add Target", callback_data="targets:add"),
-                    InlineKeyboardButton(text="🗑️ Delete Target", callback_data="targets:delete")
-                ])
                 # Add alerts config button for individual targets
-                if len(targets) > 0:
-                    keyboard_rows.append([
-                        InlineKeyboardButton(text="⚙️ Configure Alerts", callback_data="targets:select_for_alerts")
-                    ])
-            else:
                 keyboard_rows.append([
-                    InlineKeyboardButton(text="➕ Add Target", callback_data="targets:add")
+                    InlineKeyboardButton(text="⚙️ Configure Alerts", callback_data="targets:select_for_alerts")
                 ])
             
             keyboard_rows.extend([
@@ -124,7 +130,7 @@ class TargetsHandler:
             keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
             
             try:
-                await query.message.edit_text(text, reply_markup=keyboard)
+                await query.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
             except Exception as edit_error:
                 if "message is not modified" in str(edit_error):
                     # Message content is identical, just answer the callback
@@ -136,254 +142,62 @@ class TargetsHandler:
             logger.error(f"Error showing targets menu: {e}")
             await query.answer("❌ Error loading targets")
 
-    async def start_add_target(self, query: types.CallbackQuery, state: FSMContext):
-        """Start adding a target - first select which group"""
-        try:
-            # Get available groups
-            groups = await self.db.fetch("SELECT * FROM groups WHERE enabled = true ORDER BY title")
-            
-            if not groups:
-                await query.answer("❌ No groups available. Create a group first.")
-                return
-            
-            text = (
-                "<b>➕ Add Target</b>\n\n"
-                "First, select which group this target belongs to:"
-            )
-            
-            keyboard_rows = []
-            for group in groups:
-                group_name = group['title'] or f"Chat {group['tg_chat_id']}"
-                keyboard_rows.append([
-                    InlineKeyboardButton(
-                        text=f"👥 {group_name}",
-                        callback_data=f"targets:select_group:{group['id']}"
-                    )
-                ])
 
-            keyboard_rows.append([
-                InlineKeyboardButton(text="🔙 Back", callback_data="targets:menu")
-            ])
-            
-            keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
-            await query.message.edit_text(text, reply_markup=keyboard)
-            
-        except Exception as e:
-            logger.error(f"Error starting add target: {e}")
-            await query.answer("❌ Error starting target setup")
-    
-    async def prompt_for_target_chat_id(self, query: types.CallbackQuery, state: FSMContext, group_id: int):
-        """Prompt for target chat ID after group selection"""
-        try:
-            # Get group details
-            group = await self.db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
-            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
-            
-            text = (
-                f"<b>➕ Add Target for {group_name}</b>\n\n"
-                "Now enter the target chat ID where calls should be sent.\n\n"
-                "<b>Examples:</b>\n"
-                "• Channel: -1001234567890\n"
-                "• Group: -1001234567890\n"
-                "• Your private chat ID\n\n"
-                "Type /cancel to abort."
-            )
-            
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Back", callback_data="targets:add")]
-            ])
-            
-            await query.message.edit_text(text, reply_markup=keyboard)
-            await state.set_state(ManagementStates.adding_target.state)
-            await state.update_data(message_id=query.message.message_id, group_id=group_id)
-            
-        except Exception as e:
-            logger.error(f"Error prompting for target chat ID: {e}")
-            await query.answer("❌ Error setting up target input")
-    
-    async def show_delete_target_list(self, query: types.CallbackQuery):
-        """Show list of targets for deletion"""
-        try:
-            # Get all targets with group information
-            targets = await self.db.fetch("""
-                SELECT t.*, g.display_name as group_display_name, g.title as group_title, g.tg_chat_id as group_tg_chat_id
-                FROM targets t
-                LEFT JOIN groups g ON g.id = t.group_id
-                ORDER BY g.display_name, t.dest_chat_id
-            """)
-            
-            if not targets:
-                await query.answer("❌ No targets to delete")
-                return
-            
-            text = "<b>🗑️ Delete Target</b>\n\n"
-            text += "Select a target to delete:"
-            
-            keyboard_rows = []
-            for target in targets:
-                group_name = target['group_display_name'] or target['group_title'] or f"Chat {target['group_tg_chat_id']}" if target['group_tg_chat_id'] else "No Group"
-                button_text = f"🗑️ {target['dest_chat_id']} ({group_name})"
-                if len(button_text) > 35:
-                    button_text = button_text[:32] + "..."
-                
-                keyboard_rows.append([
-                    InlineKeyboardButton(
-                        text=button_text,
-                        callback_data=f"targets:delete:{target['id']}"
-                    )
-                ])
-
-            keyboard_rows.append([
-                InlineKeyboardButton(text="🔙 Back", callback_data="targets:menu")
-            ])
-            
-            keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
-            
-            await query.message.edit_text(text, reply_markup=keyboard)
-            
-        except Exception as e:
-            logger.error(f"Error showing delete target list: {e}")
-            await query.answer("❌ Error loading targets for deletion")
-    
-    async def delete_target(self, query: types.CallbackQuery, target_id: int):
-        """Delete a specific target"""
-        try:
-            # Get target info before deletion
-            target = await self.db.fetchrow(
-                "SELECT * FROM targets WHERE id = $1", target_id
-            )
-            
-            if not target:
-                await query.answer("❌ Target not found")
-                return
-            
-            # Delete the target
-            result = await self.db.execute(
-                "DELETE FROM targets WHERE id = $1", target_id
-            )
-            
-            text = f"✅ <b>Target Deleted</b>\n\n"
-            text += f"Target Chat ID: <code>{target['dest_chat_id']}</code>\n\n"
-            text += "This target has been removed from the system."
-            
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📋 View Targets", callback_data="menu:targets")],
-                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]
-            ])
-            
-            await query.message.edit_text(text, reply_markup=keyboard)
-            await query.answer("✅ Target deleted successfully")
-            
-        except Exception as e:
-            logger.error(f"Error deleting target: {e}")
-            await query.answer("❌ Error deleting target")
-
-    async def process_target_input(self, message: types.Message, state: FSMContext):
-        """Process target addition input"""
-        if message.text == '/cancel':
-            await state.clear()
-            await message.answer(
-                "Target addition cancelled.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🎯 Targets Menu", callback_data="menu:targets")]
-                ])
-            )
-            return
-        
-        try:
-            # Get state data
-            data = await state.get_data()
-            group_id = data.get('group_id')
-            
-            if not group_id:
-                await message.answer("❌ Error: No group selected. Please try again.")
-                await state.clear()
-                return
-            
-            # Parse input - should be a chat ID
-            text = message.text.strip()
-            
-            # Try to convert to integer (chat ID)
-            try:
-                chat_id = int(text)
-            except ValueError:
-                await message.answer(
-                    "❌ Invalid input. Please enter a valid chat ID (numbers only).\n\n"
-                    "Example: -1001234567890"
-                )
-                return
-            
-            # Check if target already exists for this group
-            existing = await self.db.fetchval(
-                "SELECT id FROM targets WHERE group_id = $1 AND dest_chat_id = $2", 
-                group_id, chat_id
-            )
-            
-            if existing:
-                await message.answer(
-                    f"❌ Target <code>{chat_id}</code> already exists for this group!"
-                )
-                return
-            
-            # Get group info for confirmation
-            group = await self.db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
-            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
-            
-            # Add target to database with proper group association
-            result = await self.db.fetchrow(
-                "INSERT INTO targets (group_id, dest_chat_id, created_at) VALUES ($1, $2, NOW()) RETURNING *",
-                group_id, chat_id
-            )
-            
-            await message.answer(
-                f"✅ <b>Target Added Successfully!</b>\n\n"
-                f"Group: <b>{group_name}</b>\n"
-                f"Target ID: {result['id']}\n"
-                f"Chat ID: <code>{result['dest_chat_id']}</code>\n\n"
-                f"This group can now forward calls to this target.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🎯 View Targets", callback_data="menu:targets")],
-                    [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]
-                ])
-            )
-            
-        except Exception as e:
-            logger.error(f"Error adding target: {e}")
-            await message.answer(f"❌ Error adding target: {e}")
-        
-        finally:
-            await state.clear()
 
     # Alert Configuration Methods
 
-    async def show_targets_for_alerts(self, query: types.CallbackQuery):
+    async def show_targets_for_alerts(self, query: types.CallbackQuery, page: int = 1):
         """Show list of targets to select for alert configuration"""
         try:
             targets = await self.target_model.get_targets_with_group_info()
 
-            text = "<b>⚙️ Configure Target Alerts</b>\n\n"
-            text += "Select a target to configure alerts:"
+            page_size = 6
+            total_pages = (len(targets) + page_size - 1) // page_size
+            start_index = (page - 1) * page_size
+            end_index = start_index + page_size
+            paginated_targets = targets[start_index:end_index]
+
+            text = f"🎯 <b>Targets</b> • Page {page}/{total_pages}\n\n"
+
+            for target in paginated_targets:
+                group_name = target['group_display_name'] or target['group_title'] or f"Chat {target['group_tg_chat_id']}" if target['group_tg_chat_id'] else "No Group"
+                status = "🟢" if target['alerts_enabled'] else "🔴"
+                modes = self.target_model.parse_alert_modes(target)
+                mode_count = sum(1 for v in modes.values() if v)
+
+                group_name_short = group_name[:20] if len(group_name) > 20 else group_name
+
+                if target['alerts_enabled']:
+                    text += f"├ {group_name_short}  {status} {mode_count}\n"
+                else:
+                    text += f"├ {group_name_short}  {status} OFF\n"
 
             keyboard_rows = []
-            for target in targets:
+            row = []
+            for i, target in enumerate(paginated_targets):
                 group_name = target['group_display_name'] or target['group_title'] or f"Chat {target['group_tg_chat_id']}" if target['group_tg_chat_id'] else "No Group"
-                button_text = f"🎯 {target['dest_chat_id']} ({group_name})"
-                if len(button_text) > 35:
-                    button_text = button_text[:32] + "..."
+                group_name_short = group_name[:16]
+                status = "🟢" if target['alerts_enabled'] else "🔴"
+                button_text = f"{status} {group_name_short}"
 
-                keyboard_rows.append([
-                    InlineKeyboardButton(
-                        text=button_text,
-                        callback_data=f"targets:alerts_menu:{target['id']}"
-                    )
-                ])
+                row.append(InlineKeyboardButton(
+                    text=button_text,
+                    callback_data=f"targets:alerts_menu:{target['id']}"
+                ))
+
+                if len(row) == 2 or i == len(paginated_targets) - 1:
+                    keyboard_rows.append(row)
+                    row = []
+
+            if total_pages > 1:
+                keyboard_rows.append(self.keyboards.pagination("targets_alerts_page", page, total_pages))
 
             keyboard_rows.append([
                 InlineKeyboardButton(text="🔙 Back", callback_data="targets:menu")
             ])
 
             keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
-            await query.message.edit_text(text, reply_markup=keyboard)
+            await query.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
 
         except Exception as e:
             logger.error(f"Error showing targets for alerts: {e}")
@@ -403,24 +217,49 @@ class TargetsHandler:
             sensitivity = alert_summary.get('sensitivity_percent', 0.50)
             enabled = alert_summary.get('enabled', True)
 
-            text = f"<b>⚙️ Alert Configuration</b>\n\n"
-            text += f"<b>Target:</b> <code>{target['dest_chat_id']}</code>\n"
-            text += f"<b>Status:</b> {'🟢 ON' if enabled else '🔴 OFF'}\n\n"
+            status_icon = "🟢" if enabled else "🔴"
+            status_text = "ENABLED" if enabled else "DISABLED"
+
+            text = (
+                f"⚙️ Target: <code>{target['dest_chat_id']}</code>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"{status_icon} ALERTS {status_text}\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━"
+            )
 
             if enabled:
-                text += f"<b>Alert Modes:</b>\n"
+                # Show active modes
+                text += f"\n\nACTIVE MODES\n\n"
                 for mode, is_enabled in modes.items():
                     icon = "✅" if is_enabled else "❌"
-                    text += f"  {icon} {mode.title()}\n"
+                    mode_name = mode.upper()
+                    text += f"  {icon}  {mode_name}\n"
 
-                text += f"\n<b>Sensitivity:</b> {sensitivity*100:.0f}%\n"
-                text += f"<b>Thresholds:</b> {', '.join([str(x) for x in thresholds])}\n"
+                # Calculate sensitivity sequence (show first 4 steps)
+                sens = sensitivity * 100
+                seq = [1.0 * (1 + sensitivity)**i for i in range(4)]
+                seq_text = " → ".join([f"{s:.2f}x" for s in seq])
+
+                text += (
+                    f"\n━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"SENSITIVITY      <b>{sens:.0f}%</b>\n"
+                    f"Alert at         {seq_text}...\n"
+                    f"<i>(each +{sens:.0f}% from last)</i>\n\n"
+                    f"THRESHOLDS       <b>{', '.join([f'{x}x' for x in thresholds])}</b>\n"
+                    f"Fixed alerts     {len(thresholds)} milestones\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━"
+                )
+            else:
+                text += (
+                    f"\n\nAll alerts are OFF for this target.\n\n"
+                    f"Tap below to enable."
+                )
 
             # Determine the correct back callback
             back_callback = f"group:alerts:{group_id}" if group_id else "targets:select_for_alerts"
 
             keyboard = self.keyboards.target_alerts_menu(target, back_callback=back_callback)
-            await query.message.edit_text(text, reply_markup=keyboard)
+            await query.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
 
         except Exception as e:
             logger.error(f"Error showing alerts menu: {e}")
@@ -435,17 +274,35 @@ class TargetsHandler:
                 return
 
             modes = self.target_model.parse_alert_modes(target)
+            thresholds = self.target_model.parse_alert_thresholds(target)
 
-            text = f"<b>🎛️ Alert Modes Configuration</b>\n\n"
-            text += f"<b>Target:</b> <code>{target['dest_chat_id']}</code>\n\n"
-            text += f"Toggle alert modes on/off:\n\n"
+            mode_descriptions = {
+                "pnl": "Send /pnl commands",
+                "dynamic": "Legacy mode",
+                "threshold": f"Fire at {', '.join([str(t) + 'x' for t in thresholds])}",
+                "sensitivity": "Progressive tracking"
+            }
+
+            mode_icons = {
+                "pnl": "📈",
+                "dynamic": "🔄",
+                "threshold": "🎚️",
+                "sensitivity": "⚡"
+            }
+
+            text = f"🎛️ Alert Modes\n\n━━━━━━━━━━━━━━━━━━━━\n\n"
 
             for mode, enabled in modes.items():
-                status = "✅ ON" if enabled else "❌ OFF"
-                text += f"<b>{mode.title()}:</b> {status}\n"
+                icon = mode_icons.get(mode, "•")
+                status = "✅" if enabled else "❌"
+                desc = mode_descriptions.get(mode, "")
+                mode_name = mode.upper()
+                text += f"{icon} {mode_name}                 {status}\n   {desc}\n\n"
+
+            text += "━━━━━━━━━━━━━━━━━━━━\n\nTap mode to toggle on/off"
 
             keyboard = self.keyboards.target_alerts_mode_keyboard(target)
-            await query.message.edit_text(text, reply_markup=keyboard)
+            await query.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
 
         except Exception as e:
             logger.error(f"Error showing alert modes: {e}")
@@ -493,7 +350,7 @@ class TargetsHandler:
             logger.error(f"Error toggling alert mode: {e}")
             await query.answer("❌ Error updating alert mode")
 
-    async def prompt_for_sensitivity(self, query: types.CallbackQuery, state: FSMContext, target_id: int):
+    async def prompt_for_sensitivity(self, query: types.CallbackQuery, state: FSMContext, target_id: int, group_id: int = None):
         """Prompt for sensitivity percentage input"""
         try:
             target = await self.target_model.get_by_id(target_id)
@@ -502,31 +359,49 @@ class TargetsHandler:
                 return
 
             current = self.target_model.get_alert_sensitivity_percent(target)
+            current_pct = current * 100
+            seq = [1.0 * (1 + current)**i for i in range(4)]
+            seq_text = " → ".join([f"{s:.2f}x" for s in seq])
 
             text = (
-                f"<b>⚡ Set Sensitivity Percentage</b>\n\n"
-                f"<b>Target:</b> <code>{target['dest_chat_id']}</code>\n"
-                f"<b>Current:</b> {current*100:.0f}%\n\n"
-                f"Enter new sensitivity percentage (5-500%):\n"
-                f"Example: 50 (for 50%)\n\n"
-                f"<i>Sensitivity controls how often alerts fire.\n"
-                f"50% = alerts at 1.5x, 2.25x, 3.375x, etc.</i>\n\n"
-                f"Type /cancel to abort."
+                f"⚡ Sensitivity\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"CURRENT      <b>{current_pct:.0f}%</b>\n\n"
+                f"ALERT MULTIPLIERS\n"
+                f"{seq_text}\n"
+                f"<i>(from baseline MC)</i>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Enter new % (5-500):\n\n"
+                f"  <code>25%</code>  → 1.25x, 1.56x, 1.95x\n"
+                f"  <code>50%</code>  → 1.5x, 2.25x, 3.4x\n"
+                f"  <code>100%</code> → 2x, 4x, 8x\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━"
             )
 
+            # Build callback data with optional group_id
+            group_suffix = f":{group_id}" if group_id else ""
+
+            # Show quick-set buttons instead of FSM
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Back", callback_data=f"targets:alerts_menu:{target_id}")]
+                [
+                    InlineKeyboardButton(text="25%", callback_data=f"targets:sens_quick:{target_id}:25{group_suffix}"),
+                    InlineKeyboardButton(text="50%", callback_data=f"targets:sens_quick:{target_id}:50{group_suffix}"),
+                    InlineKeyboardButton(text="75%", callback_data=f"targets:sens_quick:{target_id}:75{group_suffix}"),
+                    InlineKeyboardButton(text="100%", callback_data=f"targets:sens_quick:{target_id}:100{group_suffix}")
+                ],
+                [
+                    InlineKeyboardButton(text="✏️ Custom", callback_data=f"targets:sens_custom:{target_id}{group_suffix}"),
+                    InlineKeyboardButton(text="🔙 Back", callback_data=f"targets:alerts_menu:{target_id}{group_suffix}")
+                ]
             ])
 
-            await query.message.edit_text(text, reply_markup=keyboard)
-            await state.set_state(ManagementStates.target_edit_sensitivity.state)
-            await state.update_data(target_id=target_id, message_id=query.message.message_id)
+            await query.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
 
         except Exception as e:
             logger.error(f"Error prompting for sensitivity: {e}")
             await query.answer("❌ Error setting up sensitivity input")
 
-    async def prompt_for_thresholds(self, query: types.CallbackQuery, state: FSMContext, target_id: int):
+    async def prompt_for_thresholds(self, query: types.CallbackQuery, state: FSMContext, target_id: int, group_id: int = None):
         """Prompt for thresholds input"""
         try:
             target = await self.target_model.get_by_id(target_id)
@@ -535,25 +410,39 @@ class TargetsHandler:
                 return
 
             current = self.target_model.parse_alert_thresholds(target)
+            current_text = ', '.join([f'{x}x' for x in current])
 
             text = (
-                f"<b>📊 Set Alert Thresholds</b>\n\n"
-                f"<b>Target:</b> <code>{target['dest_chat_id']}</code>\n"
-                f"<b>Current:</b> {', '.join([str(x) for x in current])}\n\n"
-                f"Enter new thresholds as comma-separated numbers:\n"
-                f"Example: 2,5,10,25\n\n"
-                f"<i>Thresholds are multipliers from initial market cap.\n"
-                f"2 = 2x gains, 5 = 5x gains, etc.</i>\n\n"
-                f"Type /cancel to abort."
+                f"🎚️ Thresholds\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"CURRENT      <b>{current_text}</b>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"PRESETS\n\n"
+                f"  <b>Conservative</b>\n"
+                f"  2x, 5x, 10x, 25x\n\n"
+                f"  <b>Balanced</b>\n"
+                f"  2x, 7x, 25x, 100x\n\n"
+                f"  <b>Aggressive</b>\n"
+                f"  3x, 10x, 50x\n\n"
+                f"  <b>Moonshot</b>\n"
+                f"  5x, 25x, 100x, 500x\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━"
             )
 
+            # Build callback data with optional group_id
+            group_suffix = f":{group_id}" if group_id else ""
+
+            # Show preset buttons instead of FSM
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Back", callback_data=f"targets:alerts_menu:{target_id}")]
+                [InlineKeyboardButton(text="Conservative", callback_data=f"targets:thresh_preset:{target_id}:conservative{group_suffix}")],
+                [InlineKeyboardButton(text="Balanced", callback_data=f"targets:thresh_preset:{target_id}:balanced{group_suffix}")],
+                [InlineKeyboardButton(text="Aggressive", callback_data=f"targets:thresh_preset:{target_id}:aggressive{group_suffix}")],
+                [InlineKeyboardButton(text="Moonshot", callback_data=f"targets:thresh_preset:{target_id}:moonshot{group_suffix}")],
+                [InlineKeyboardButton(text="✏️ Custom", callback_data=f"targets:thresh_custom:{target_id}{group_suffix}")],
+                [InlineKeyboardButton(text="🔙 Back", callback_data=f"targets:alerts_menu:{target_id}{group_suffix}")]
             ])
 
-            await query.message.edit_text(text, reply_markup=keyboard)
-            await state.set_state(ManagementStates.target_edit_thresholds.state)
-            await state.update_data(target_id=target_id, message_id=query.message.message_id)
+            await query.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
 
         except Exception as e:
             logger.error(f"Error prompting for thresholds: {e}")
@@ -576,7 +465,12 @@ class TargetsHandler:
             target_id = data.get('target_id')
 
             if not target_id:
-                await message.answer("❌ Error: No target selected. Please try again.")
+                await message.answer(
+                    "❌ Error: No target selected. Please try again.",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="🎯 Targets Menu", callback_data="targets:select_for_alerts")]
+                    ])
+                )
                 await state.clear()
                 return
 
@@ -641,7 +535,12 @@ class TargetsHandler:
             target_id = data.get('target_id')
 
             if not target_id:
-                await message.answer("❌ Error: No target selected. Please try again.")
+                await message.answer(
+                    "❌ Error: No target selected. Please try again.",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="🎯 Targets Menu", callback_data="targets:select_for_alerts")]
+                    ])
+                )
                 await state.clear()
                 return
 
@@ -719,16 +618,11 @@ class TargetsHandler:
                     InlineKeyboardButton(
                         text=f"⚙️ Configure {target['dest_chat_id']}",
                         callback_data=f"targets:alerts_menu:{target['id']}:{group_id}"
-                    ),
-                    InlineKeyboardButton(
-                        text=f"🗑️ Delete {target['dest_chat_id']}",
-                        callback_data=f"targets:delete:{target['id']}"
                     )
                 ])
 
-            # Add target and navigation buttons
+            # Navigation buttons
             keyboard_rows.append([
-                InlineKeyboardButton(text="➕ Add Target", callback_data=f"targets:select_group:{group_id}"),
                 InlineKeyboardButton(text="🔙 Back to Group", callback_data=f"group:view:{group_id}")
             ])
 
@@ -742,7 +636,7 @@ class TargetsHandler:
                 keyboard_rows.append(pagination_buttons)
 
             keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
-            await query.message.edit_text(text, reply_markup=keyboard)
+            await query.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
 
         except Exception as e:
             logger.error(f"Error showing targets for group {group_id}: {e}")
@@ -799,3 +693,98 @@ class TargetsHandler:
             result.update(current_modes)
 
         return result
+
+    async def apply_quick_sensitivity(self, query: types.CallbackQuery, target_id: int, percent: int, group_id: int = None):
+        """Apply quick sensitivity preset"""
+        try:
+            sensitivity_decimal = percent / 100.0
+            await self.target_model.update_alert_sensitivity(target_id, sensitivity_decimal)
+
+            await query.answer(f"✅ Set to {percent}%")
+            await self.show_alerts_menu(query, target_id, group_id)
+        except Exception as e:
+            logger.error(f"Error applying quick sensitivity: {e}")
+            await query.answer("❌ Error updating sensitivity")
+
+    async def prompt_for_sensitivity_custom(self, query: types.CallbackQuery, state: FSMContext, target_id: int):
+        """Prompt for custom sensitivity input"""
+        try:
+            target = await self.target_model.get_by_id(target_id)
+            if not target:
+                await query.answer("❌ Target not found")
+                return
+
+            current = self.target_model.get_alert_sensitivity_percent(target)
+            current_pct = current * 100
+
+            text = (
+                f"⚡ Custom Sensitivity\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"CURRENT      <b>{current_pct:.0f}%</b>\n\n"
+                f"Enter percentage (5-500):\n"
+                f"Example: 75\n\n"
+                f"Type /cancel to abort."
+            )
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Back", callback_data=f"targets:alerts_set_sensitivity:{target_id}")]
+            ])
+
+            await query.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
+            await state.set_state(ManagementStates.target_edit_sensitivity.state)
+            await state.update_data(target_id=target_id, message_id=query.message.message_id)
+
+        except Exception as e:
+            logger.error(f"Error prompting for custom sensitivity: {e}")
+            await query.answer("❌ Error setting up sensitivity input")
+
+    async def apply_threshold_preset(self, query: types.CallbackQuery, target_id: int, preset: str, group_id: int = None):
+        """Apply threshold preset"""
+        try:
+            presets = {
+                "conservative": [2, 5, 10, 25],
+                "balanced": [2, 7, 25, 100],
+                "aggressive": [3, 10, 50],
+                "moonshot": [5, 25, 100, 500]
+            }
+
+            thresholds = presets.get(preset, [2, 7, 25])
+            await self.target_model.update_alert_thresholds(target_id, thresholds)
+
+            await query.answer(f"✅ {preset.title()} preset applied")
+            await self.show_alerts_menu(query, target_id, group_id)
+        except Exception as e:
+            logger.error(f"Error applying preset: {e}")
+            await query.answer("❌ Error updating thresholds")
+
+    async def prompt_for_thresholds_custom(self, query: types.CallbackQuery, state: FSMContext, target_id: int):
+        """Prompt for custom threshold input"""
+        try:
+            target = await self.target_model.get_by_id(target_id)
+            if not target:
+                await query.answer("❌ Target not found")
+                return
+
+            current = self.target_model.parse_alert_thresholds(target)
+            current_text = ', '.join([f'{x}x' for x in current])
+
+            text = (
+                f"🎚️ Custom Thresholds\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"CURRENT      <b>{current_text}</b>\n\n"
+                f"Enter comma-separated:\n"
+                f"Example: 2,5,10,25\n\n"
+                f"Type /cancel to abort."
+            )
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Back", callback_data=f"targets:alerts_set_thresholds:{target_id}")]
+            ])
+
+            await query.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
+            await state.set_state(ManagementStates.target_edit_thresholds.state)
+            await state.update_data(target_id=target_id, message_id=query.message.message_id)
+
+        except Exception as e:
+            logger.error(f"Error prompting for custom thresholds: {e}")
+            await query.answer("❌ Error setting up thresholds input")

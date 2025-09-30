@@ -70,7 +70,8 @@ class CommandForwardingRuleModel(BaseModel):
     async def create_rule(self, source_group_id: int, command_text: str, destination_channel_id: int,
                          allowed_command_user_ids: List[int], allowed_reply_user_ids: List[int],
                          forwarding_userbot_id: int, schedule_enabled: bool = False,
-                         schedule_interval_minutes: Optional[int] = None) -> asyncpg.Record:
+                         schedule_interval_minutes: Optional[int] = None, post_timestamp: bool = False,
+                         timestamp_timezone: str = 'IST') -> asyncpg.Record:
         """Create a new command forwarding rule with debugging"""
         try:
             logger.info(f"Creating command forwarding rule: source_group={source_group_id}, "
@@ -79,7 +80,9 @@ class CommandForwardingRuleModel(BaseModel):
                        f"reply_users={allowed_reply_user_ids}, "
                        f"userbot={forwarding_userbot_id}, "
                        f"schedule_enabled={schedule_enabled}, "
-                       f"schedule_interval={schedule_interval_minutes}")
+                       f"schedule_interval={schedule_interval_minutes}, "
+                       f"post_timestamp={post_timestamp}, "
+                       f"timezone={timestamp_timezone}")
 
             # Calculate next scheduled time if scheduling is enabled
             next_scheduled_at = None
@@ -95,7 +98,9 @@ class CommandForwardingRuleModel(BaseModel):
                 'forwarding_userbot_id': forwarding_userbot_id,
                 'schedule_enabled': schedule_enabled,
                 'schedule_interval_minutes': schedule_interval_minutes,
-                'next_scheduled_at': next_scheduled_at
+                'next_scheduled_at': next_scheduled_at,
+                'post_timestamp': post_timestamp,
+                'timestamp_timezone': timestamp_timezone
             }
 
             logger.debug(f"Rule data: {data}")
@@ -136,6 +141,27 @@ class CommandForwardingRuleModel(BaseModel):
         """
         result = await self.db.fetchval(query, rule_id)
         return result
+
+    async def toggle_timestamp_posting(self, rule_id: int) -> bool:
+        """Toggle timestamp posting for a rule"""
+        query = """
+            UPDATE command_forwarding_rules
+            SET post_timestamp = NOT post_timestamp, updated_at = NOW()
+            WHERE id = $1
+            RETURNING post_timestamp
+        """
+        result = await self.db.fetchval(query, rule_id)
+        return result
+
+    async def update_timezone(self, rule_id: int, timezone: str) -> Optional[asyncpg.Record]:
+        """Update timezone for timestamp posting"""
+        query = """
+            UPDATE command_forwarding_rules
+            SET timestamp_timezone = $1, updated_at = NOW()
+            WHERE id = $2
+            RETURNING *
+        """
+        return await self.db.fetchrow(query, timezone, rule_id)
 
     async def update_schedule(self, rule_id: int, schedule_enabled: bool,
                              schedule_interval_minutes: Optional[int] = None) -> Optional[asyncpg.Record]:
@@ -251,7 +277,7 @@ class CommandTrackedMessageModel(BaseModel):
         """Clean up old tracking records"""
         query = """
             DELETE FROM command_tracked_messages
-            WHERE status = 'tracking' AND created_at < NOW() - INTERVAL '%s hours'
-        """ % hours_old
-        result = await self.db.execute(query)
+            WHERE status = 'tracking' AND created_at < NOW() - INTERVAL '1 hour' * $1
+        """
+        result = await self.db.execute(query, hours_old)
         return int(result.split()[-1]) if result else 0

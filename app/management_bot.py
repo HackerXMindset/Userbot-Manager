@@ -78,7 +78,7 @@ class ManagementBot:
         # Targets
         self.dp.callback_query.register(
             self.targets_handler.handle_target_action,
-            F.data.startswith('targets:'),
+            F.data.startswith('targets:') | F.data.startswith('targets_alerts_page:'),
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
@@ -239,11 +239,6 @@ class ManagementBot:
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
 
-        self.dp.message.register(
-            self.targets_handler.process_target_input,
-            ManagementStates.adding_target,
-            F.from_user.id.in_(settings.admin_telegram_ids_list)
-        )
 
         self.dp.message.register(
             self.targets_handler.process_sensitivity_input,
