@@ -442,7 +442,7 @@ class MenuHandler:
         try:
             # Delete all data
             token_count = await self.db.fetchval("DELETE FROM tokens_tracked")
-            await self.db.execute("DELETE FROM calls")
+            await self.db.execute("DELETE FROM token_call_history")
             
             # Clear cache
             self.clear_cache()

@@ -565,24 +565,24 @@ class ManagementBot:
             
             old_calls = await db.fetchval(
                 """
-                SELECT COUNT(*) FROM calls 
-                WHERE status != 'sent' AND created_at < NOW() - INTERVAL '7 days'
+                SELECT COUNT(*) FROM token_call_history
+                WHERE called_at < NOW() - INTERVAL '7 days'
                 """
             )
-            
-            
+
+
             # Perform cleanup
             await db.execute(
                 """
-                DELETE FROM tokens_tracked 
+                DELETE FROM tokens_tracked
                 WHERE status = 'stopped' AND first_seen_at < NOW() - INTERVAL '1 day'
                 """
             )
-            
+
             await db.execute(
                 """
-                DELETE FROM calls 
-                WHERE status != 'sent' AND created_at < NOW() - INTERVAL '7 days'
+                DELETE FROM token_call_history
+                WHERE called_at < NOW() - INTERVAL '7 days'
                 """
             )
             
@@ -1661,8 +1661,8 @@ class ManagementBot:
         """Show quotas overview"""
         try:
             groups = await db.fetch (
-                """SELECT g.*, 
-                       (SELECT COUNT(*) FROM calls WHERE group_id = g.id AND sent_at > CURRENT_DATE) as calls_today
+                """SELECT g.*,
+                       (SELECT COUNT(*) FROM token_call_history WHERE target_chat_id = g.tg_chat_id AND called_at > CURRENT_DATE) as calls_today
                 FROM groups g
                 WHERE g.enabled = true
                 ORDER BY g.title

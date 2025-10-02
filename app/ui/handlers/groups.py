@@ -632,10 +632,10 @@ class GroupsHandler:
                     
                     # Delete userbot assignments
                     await conn.execute("DELETE FROM userbot_assignments WHERE group_id = $1", group_id)
-                    
-                    # Delete call records
-                    await conn.execute("DELETE FROM calls WHERE group_id = $1", group_id)
-                    
+
+                    # Delete call records (using tg_chat_id since token_call_history uses target_chat_id)
+                    await conn.execute("DELETE FROM token_call_history WHERE target_chat_id = $1", group['tg_chat_id'])
+
                     # Finally delete the group itself
                     await conn.execute("DELETE FROM groups WHERE id = $1", group_id)
             

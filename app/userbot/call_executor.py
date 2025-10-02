@@ -81,7 +81,7 @@ class CallExecutor:
                 if reply_to_message_id and "message_id_invalid" in str(e).lower():
                     logger.warning(f"Reply to message {reply_to_message_id} failed, sending standalone message")
                     sent_message = await client.send_message(resolved_entity, message, parse_mode='md', link_preview=False)
-                    # TODO: Clear first_message_id in database
+                    # Note: first_message_id cleanup handled in call_dispatcher.py:278-288
                 else:
                     raise e
             
