@@ -52,7 +52,12 @@ app/
 │       ├── alerts.py
 │       ├── pnl.py
 │       ├── notifications.py
-│       └── auto_click.py
+│       ├── auto_click.py
+│       ├── command_forwarding.py
+│       ├── curate_alpha.py
+│       ├── schedules.py
+│       ├── targets.py
+│       └── templates.py
 │
 ├── 🤖 userbot/
 │   ├── session_manager.py    # Session handling & authentication
@@ -71,10 +76,11 @@ app/
 │   └── placeholder_service.py  # Manages message templates
 │
 └── 📊 models/
-    ├── bot.py                # Userbot data models
-    ├── group.py              # Group & schedule models
-    ├── token.py              # Token tracking models
-    ├── event.py              # Event & alert models
+    ├── base.py
+    ├── bot.py
+    ├── group.py
+    ├── token.py
+    ├── event.py
     ├── auto_button_click.py
     ├── call_queue.py
     ├── command_forwarding.py
@@ -98,6 +104,26 @@ telegram_token_bot/
 │   ├── http_server.rs  # HTTP server for receiving callbacks
 │   └── types.rs        # Data structures
 └── Cargo.toml          # Rust dependencies
+```
+
+### **Other Files and Directories**
+
+```
+├── migrations/             # Contains 44 database migration files
+├── scripts/                # Helper scripts
+│   ├── add_complete_jupiter_template.py
+│   └── add_example_templates.py
+├── templates/              # Message templates
+│   └── holder_template.txt
+├── tests/                  # Project tests
+├── tools/                  # Diagnostic tools
+│   └── diagnostic_alerts.py
+├── .env.example            # Example environment file
+├── .gitignore              # Git ignore file
+├── helius_placeholders.md  # Placeholder documentation
+├── jupiter_placeholders.md # Placeholder documentation
+├── pumpfun_placeholders.md # Placeholder documentation
+└── requirements.txt        # Python dependencies
 ```
 
 ## 🚀 Quick Start Guide
@@ -149,7 +175,7 @@ TIMEZONE=Asia/Kolkata                     # System timezone
 
 ### 3. **Database Setup**
 
-The application uses a PostgreSQL database. You can use Supabase (recommended) or a local PostgreSQL instance.
+The application uses a PostgreSQL database. The migrations are applied automatically when the application starts.
 
 ### 4. **Start the System**
 
