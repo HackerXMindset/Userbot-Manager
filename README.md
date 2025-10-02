@@ -13,82 +13,21 @@ An enterprise-grade Telegram userbot management system designed for automated So
 *   **Auto Button Click**: Automatically click buttons in messages from specified bots.
 *   **Rust-based Token Bot**: A high-performance Rust component for handling token-related operations.
 
-## 🎛️ Core Features
-
-### **Management Dashboard**
-- **Complete UI Control**: Full bot management via `/menu` command with an intuitive button interface.
-- **Real-time Monitoring**: Live system status, userbot health, and performance metrics.
-- **Multi-Admin Support**: Secure admin-only access.
-
-### **Intelligent Userbot Management**
-- **Auto-Login System**: Phone/SMS/2FA authentication with secure session handling.
-- **Health Monitoring**: Continuous connection status tracking and auto-recovery.
-- **Load Balancing**: Smart assignment of userbots to groups.
-
-### **Source Monitoring Engine**
-- **Multi-Channel Support**: Monitor channels, groups, and direct messages.
-- **Smart Token Detection**: Advanced Solana address parsing.
-- **Message Filtering**: Sophisticated content analysis and spam detection.
-
-### **Profit & Loss Tracking & Forwarding**
-- **Multi-API Integration**: Leverages DexScreener and Helius for real-time token data.
-- **Gain Alerts**: Configurable multiplier thresholds (e.g., 5x, 10x, 20x).
-- **Automated PNL Reply Forwarding**: Forward replies to PNL commands.
-- **Stop-Loss Protection**: Halt tracking on significant drops from a token's peak market cap.
-
-### **Advanced Notification System**
-- **Event Forwarding**: Auto-forward replies, mentions, and DMs.
-- **Smart Routing**: Context-aware message categorization.
-- **Customizable Alerts**: Per-group notification preferences.
-
-### **Auto-Tap Features**
-- **Auto-Click Integration**: Automated interaction with scanner bots.
-- **Smart Button Detection**: Intelligent UI element recognition.
-
 ## 🏗️ System Architecture
 
 The system consists of a Python-based management bot and a Rust-based token bot.
 
 ### **Python Component**
+
 The Python component provides the main management interface and orchestration layer.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    MANAGEMENT DASHBOARD                         │
-│  ┌─────────────┬─────────────┬─────────────┬─────────────┐      │
-│  │   Overview  │   Agents    │ Profit Logs │   Inbox     │      │
-│  └─────────────┴─────────────┴─────────────┴─────────────┘      │
-└─────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      CORE ENGINE                                │
-│  ┌──────────────┬──────────────┬──────────────┬──────────────┐   │
-│  │ Session Mgmt │   Scheduler  │  DexScreener │ Event Router │   │
-│  └──────────────┴──────────────┴──────────────┴──────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    WORKER LAYER                                 │
-│  ┌──────────────┬──────────────┬──────────────┬──────────────┐   │
-│  │   Userbot 1  │   Userbot 2  │   Userbot N  │ Auto-Click   │   │
-│  └──────────────┴──────────────┴──────────────┴──────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                  DATABASE LAYER                                 │
-│  ┌──────────────┬──────────────┬──────────────┬──────────────┐   │
-│  │    Groups    │    Tokens    │   Events     │  Analytics   │   │
-│  └──────────────┴──────────────┴──────────────┴──────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-```
-
 ### **Rust Component**
-The Rust component is a high-performance Telegram bot that handles token-related operations, including fetching metadata from Helius.
+
+The Rust component is a high-performance Telegram bot that handles token-related operations, including fetching metadata from Helius. It is located in the `telegram_token_bot` directory.
 
 ## 📁 Project Structure
+
+### **Python Application (`app/`)**
 
 ```
 app/
@@ -106,24 +45,59 @@ app/
 │   ├── keyboards.py          # Interactive UI components
 │   ├── states.py             # FSM state management
 │   └── handlers/             # UI interaction handlers
-├──
+│       ├── menu.py
+│       ├── groups.py
+│       ├── userbots.py
+│       ├── sources.py
+│       ├── alerts.py
+│       ├── pnl.py
+│       ├── notifications.py
+│       └── auto_click.py
+│
 ├── 🤖 userbot/
 │   ├── session_manager.py    # Session handling & authentication
 │   ├── message_handler.py    # Message processing & filtering
 │   ├── token_monitor.py      # Token detection & validation
 │   ├── pnl_tracker.py        # Profit/loss tracking
-│   └── worker.py             # Userbot worker implementation
-├──
+│   ├── notification_handler.py # Event forwarding
+│   ├── call_executor.py      # Message forwarding logic
+│   ├── source_manager.py     # Source monitoring
+│   ├── worker.py             # Userbot worker implementation
+│   └── utils.py              # Utility functions
+│
 ├── 🛠️ services/
 │   ├── call_dispatcher.py    # Dispatches token calls
 │   ├── call_history_service.py # Manages token call history
 │   └── placeholder_service.py  # Manages message templates
-├──
+│
 └── 📊 models/
     ├── bot.py                # Userbot data models
     ├── group.py              # Group & schedule models
     ├── token.py              # Token tracking models
-    └── ...                   # Other data models
+    ├── event.py              # Event & alert models
+    ├── auto_button_click.py
+    ├── call_queue.py
+    ├── command_forwarding.py
+    ├── curated_alpha.py
+    ├── notification.py
+    ├── pnl_forwarding.py
+    ├── source_chat.py
+    ├── target_alert_state.py
+    ├── target.py
+    └── template.py
+```
+
+### **Rust Bot (`telegram_token_bot/`)**
+
+```
+telegram_token_bot/
+├── src/
+│   ├── main.rs         # Main entry point for the Rust bot
+│   ├── bot.rs          # Core bot logic
+│   ├── api.rs          # Helius API client
+│   ├── http_server.rs  # HTTP server for receiving callbacks
+│   └── types.rs        # Data structures
+└── Cargo.toml          # Rust dependencies
 ```
 
 ## 🚀 Quick Start Guide
@@ -190,11 +164,11 @@ cargo run --release
 
 ### 5. **Initial Setup via Bot**
 
-1. **Start Management Bot**: Send `/menu` to your management bot.
-2. **Add Userbots**: Navigate to "👤 Agents" → "Add Agent".
-3. **Configure Groups**: Go to "👥 Groups" → "Add Group".
-4. **Set Schedules**: Configure active windows and quotas.
-5. **Enable Tracking**: Set up profit/loss monitoring.
+1.  **Start Management Bot**: Send `/menu` to your management bot.
+2.  **Add Userbots**: Navigate to "👤 Agents" → "Add Agent".
+3.  **Configure Groups**: Go to "👥 Groups" → "Add Group".
+4.  **Set Schedules**: Configure active windows and quotas.
+5.  **Enable Tracking**: Set up profit/loss monitoring.
 
 ## 🤝 Contributing
 
