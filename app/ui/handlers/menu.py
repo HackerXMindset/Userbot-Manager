@@ -39,11 +39,11 @@ class MenuHandler:
             return self.cache["dashboard_stats"]
         
         stats = await self.db.fetchrow("""
-            SELECT 
+            SELECT
                 (SELECT COUNT(*) FROM groups WHERE enabled = true) as groups_count,
                 (SELECT COUNT(*) FROM bots WHERE kind = 'userbot' AND status = 'active') as userbots_count,
                 (SELECT COUNT(*) FROM tokens_tracked WHERE status = 'active') as tokens_active,
-                (SELECT COUNT(*) FROM calls WHERE sent_at > CURRENT_DATE AND status = 'sent') as calls_today
+                (SELECT COUNT(*) FROM token_call_history WHERE DATE(called_at) = CURRENT_DATE) as calls_today
         """)
         
         self.cache["dashboard_stats"] = dict(stats) if stats else {}
@@ -100,8 +100,8 @@ class MenuHandler:
             
             # Recent activity
             recent_calls = await self.db.fetchval("""
-                SELECT COUNT(*) FROM calls 
-                WHERE created_at > NOW() - INTERVAL '1 hour'
+                SELECT COUNT(*) FROM token_call_history
+                WHERE called_at > NOW() - INTERVAL '1 hour'
             """)
             
             recent_alerts = 0
@@ -272,57 +272,51 @@ class MenuHandler:
                 WITH time_period AS (
                     SELECT NOW() - INTERVAL '{interval}' AS start_time
                 )
-                SELECT 
-                    -- Token statistics (check both created_at and last_checked_at)
-                    (SELECT COUNT(*) 
-                     FROM tokens_tracked tt 
+                SELECT
+                    -- Token statistics (count only new token detections)
+                    (SELECT COUNT(*)
+                     FROM tokens_tracked tt
                      WHERE tt.created_at >= (SELECT start_time FROM time_period)
-                        OR tt.last_checked_at >= (SELECT start_time FROM time_period)
                     ) as tokens_tracked,
                     
                     -- Average multiplier (handle nulls properly)
-                    (SELECT COALESCE(AVG(CASE 
-                        WHEN first_seen_mc > 0 AND last_mc > 0 
+                    (SELECT COALESCE(AVG(CASE
+                        WHEN first_seen_mc > 0 AND last_mc > 0
                         THEN LEAST(last_mc / first_seen_mc, 1000)
-                        ELSE 1.0 
+                        ELSE 1.0
                      END), 0.0)
-                     FROM tokens_tracked tt 
+                     FROM tokens_tracked tt
                      WHERE tt.created_at >= (SELECT start_time FROM time_period)
-                        OR tt.last_checked_at >= (SELECT start_time FROM time_period)
                     ) as avg_multiplier,
                     
                     -- Top multiplier
-                    (SELECT COALESCE(MAX(CASE 
-                        WHEN first_seen_mc > 0 AND peak_mc > 0 
+                    (SELECT COALESCE(MAX(CASE
+                        WHEN first_seen_mc > 0 AND peak_mc > 0
                         THEN LEAST(peak_mc / first_seen_mc, 1000)
-                        ELSE 1.0 
+                        ELSE 1.0
                      END), 0.0)
-                     FROM tokens_tracked tt 
+                     FROM tokens_tracked tt
                      WHERE tt.created_at >= (SELECT start_time FROM time_period)
-                        OR tt.last_checked_at >= (SELECT start_time FROM time_period)
                     ) as top_multiplier,
                     
                     -- Success rate (active tokens vs total)
-                    (SELECT 
-                        CASE 
-                            WHEN COUNT(*) > 0 
+                    (SELECT
+                        CASE
+                            WHEN COUNT(*) > 0
                             THEN (COUNT(CASE WHEN status = 'active' THEN 1 END)::float / COUNT(*) * 100)
-                            ELSE 0 
+                            ELSE 0
                         END
-                     FROM tokens_tracked tt 
+                     FROM tokens_tracked tt
                      WHERE tt.created_at >= (SELECT start_time FROM time_period)
-                        OR tt.last_checked_at >= (SELECT start_time FROM time_period)
                     ) as success_rate,
                     
                     -- Alert count (disabled)
                     0 as alerts_count,
                     
-                    -- Calls sent (check multiple status values and time fields)
-                    (SELECT COUNT(*) 
-                     FROM calls c 
-                     WHERE (c.sent_at >= (SELECT start_time FROM time_period) 
-                            OR c.created_at >= (SELECT start_time FROM time_period))
-                       AND c.status IN ('sent', 'queued', 'completed')
+                    -- Calls sent (count from token_call_history - new system)
+                    (SELECT COUNT(*)
+                     FROM token_call_history tch
+                     WHERE tch.called_at >= (SELECT start_time FROM time_period)
                     ) as calls_sent
             """), timeout=30.0  # 30 second timeout
                 )

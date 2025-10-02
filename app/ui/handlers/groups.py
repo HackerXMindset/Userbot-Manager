@@ -118,7 +118,8 @@ class GroupsHandler:
             await self.confirm_delete_group(query, group_id)
         elif action == 'assign':
             group_id = int(parts[2])
-            await self.show_userbot_assignment(query, group_id)
+            page = int(parts[3]) if len(parts) > 3 else 0
+            await self.show_userbot_assignment(query, group_id, page)
         elif action == 'schedules':
             group_id = int(parts[2])
             await self.show_group_schedules(query, group_id)
@@ -249,11 +250,11 @@ class GroupsHandler:
         """Show detailed group information"""
         try:
             group = await self.db.fetchrow("""
-                SELECT g.*, 
+                SELECT g.*,
                        COUNT(DISTINCT t.id) as targets_count,
                        COUNT(DISTINCT s.id) as schedules_count,
                        COALESCE(b.display_name, b.session_name) as userbot_name,
-                       (SELECT COUNT(*) FROM calls WHERE group_id = g.id AND sent_at > CURRENT_DATE) as calls_today
+                       (SELECT COUNT(*) FROM token_call_history tch WHERE tch.target_chat_id = g.tg_chat_id AND DATE(tch.called_at) = CURRENT_DATE) as calls_today
                 FROM groups g
                 LEFT JOIN targets t ON t.group_id = g.id
                 LEFT JOIN group_schedules s ON s.group_id = g.id
@@ -333,37 +334,87 @@ class GroupsHandler:
             logger.error(f"Error toggling group: {e}")
             await query.answer("❌ Error updating group")
     
-    async def show_userbot_assignment(self, query: types.CallbackQuery, group_id: int):
-        """Show userbot assignment options"""
+    async def show_userbot_assignment(self, query: types.CallbackQuery, group_id: int, page: int = 0):
+        """Show userbot assignment options with pagination (3x3 grid)"""
         try:
             userbots = await self.bot_model.get_active_userbots()
-            
+
             if not userbots:
                 await query.message.edit_text(
                     "❌ No active userbots available.\nAdd a userbot first.",
                     reply_markup=self.keyboards.back_button(f"group:view:{group_id}")
                 )
                 return
-            
+
+            # Pagination settings
+            items_per_page = 9
+            columns = 3
+            total_bots = len(userbots)
+            total_pages = (total_bots + items_per_page - 1) // items_per_page
+
+            # Ensure page is within bounds
+            page = max(0, min(page, total_pages - 1))
+
+            # Get bots for current page
+            start_idx = page * items_per_page
+            end_idx = start_idx + items_per_page
+            page_bots = userbots[start_idx:end_idx]
+
+            # Build keyboard with 3 columns
             keyboard = []
-            for bot in userbots[:10]:
-                keyboard.append([
-                    InlineKeyboardButton(
-                        text=f"🤖 {bot.get('display_name') or bot['session_name']}",
-                        callback_data=f"assign:userbot:{group_id}:{bot['id']}"
-                    )
-                ])
-            
+            row = []
+            for bot in page_bots:
+                bot_name = bot.get('display_name') or bot['session_name']
+                # Truncate long names to fit 3 columns
+                display_name = bot_name[:12] + "..." if len(bot_name) > 15 else bot_name
+
+                row.append(InlineKeyboardButton(
+                    text=f"🤖 {display_name}",
+                    callback_data=f"assign:userbot:{group_id}:{bot['id']}"
+                ))
+
+                # Add row when we have 3 buttons
+                if len(row) == columns:
+                    keyboard.append(row)
+                    row = []
+
+            # Add remaining buttons if any
+            if row:
+                keyboard.append(row)
+
+            # Navigation buttons
+            nav_buttons = []
+            if total_pages > 1:
+                if page > 0:
+                    nav_buttons.append(InlineKeyboardButton(
+                        text="◀️ Prev",
+                        callback_data=f"group:assign:{group_id}:{page - 1}"
+                    ))
+
+                nav_buttons.append(InlineKeyboardButton(
+                    text=f"📄 {page + 1}/{total_pages}",
+                    callback_data="noop"
+                ))
+
+                if page < total_pages - 1:
+                    nav_buttons.append(InlineKeyboardButton(
+                        text="Next ▶️",
+                        callback_data=f"group:assign:{group_id}:{page + 1}"
+                    ))
+
+                keyboard.append(nav_buttons)
+
+            # Back button
             keyboard.append([
                 InlineKeyboardButton(text="🔙 Back", callback_data=f"group:view:{group_id}")
             ])
-            
+
             await query.message.edit_text(
                 "<b>🤖 Assign Userbot</b>\n\n"
                 "Select a userbot to assign to this group:",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
             )
-            
+
         except Exception as e:
             logger.error(f"Error showing userbot assignment: {e}")
             await query.answer("❌ Error loading userbots")
@@ -443,20 +494,20 @@ class GroupsHandler:
             
             # Get comprehensive stats
             stats = await self.db.fetchrow("""
-                SELECT 
+                SELECT
                     COUNT(DISTINCT s.id) as schedules_count,
                     COUNT(DISTINCT sc.id) as sources_count,
                     COUNT(DISTINCT t.id) as targets_count,
-                    COUNT(CASE WHEN c.sent_at >= CURRENT_DATE THEN 1 END) as calls_today,
-                    COUNT(CASE WHEN c.sent_at >= CURRENT_DATE - INTERVAL '7 days' THEN 1 END) as calls_this_week,
+                    COUNT(CASE WHEN c.called_at >= CURRENT_DATE THEN 1 END) as calls_today,
+                    COUNT(CASE WHEN c.called_at >= CURRENT_DATE - INTERVAL '7 days' THEN 1 END) as calls_this_week,
                     COUNT(c.id) as total_calls,
                     COALESCE(b.display_name, b.session_name) as userbot_name,
-                    MAX(c.sent_at) as last_call_time
+                    MAX(c.called_at) as last_call_time
                 FROM groups g
                 LEFT JOIN group_schedules s ON s.group_id = g.id
                 LEFT JOIN source_chats sc ON sc.group_id = g.id
                 LEFT JOIN targets t ON t.group_id = g.id
-                LEFT JOIN calls c ON c.group_id = g.id
+                LEFT JOIN token_call_history c ON c.target_chat_id = g.tg_chat_id
                 LEFT JOIN userbot_assignments ua ON ua.group_id = g.id
                 LEFT JOIN bots b ON b.id = ua.userbot_id
                 WHERE g.id = $1

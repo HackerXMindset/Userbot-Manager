@@ -4,12 +4,321 @@
 
 This is an enterprise-grade Telegram userbot management system for automated Solana token monitoring and forwarding. The system processes token calls, tracks performance, sends alerts, and manages multi-userbot routing.
 
-**Current Date**: 2025-09-29
-**Last Updated By**: Claude (Session implementing reply threading and bug fixes)
+**Current Date**: 2025-10-02
+**Last Updated By**: Claude (Session fixing analytics bugs and alert diagnostics)
 
 ---
 
-## 🚨 Recent Critical Changes (This Session)
+## 🚨 Critical Bug Fixes & Diagnostics (2025-10-02 Session)
+
+### **1. Fixed Analytics Query Bugs** ✅ **CRITICAL FIX**
+**Problem**: All analytics showing "0 calls" despite system sending alerts successfully
+**Root Cause**: Queries using old `calls` table instead of new `token_call_history` table
+**Impact**: Dashboard, group stats, and tracking analytics all showed incorrect data
+
+**Files Modified:**
+- `app/ui/handlers/menu.py`:
+  - Line 46: Main dashboard `calls_today` query (5-min cache)
+  - Line 103: Recent activity query (1 hour window)
+  - Line 317-320: Tracking analytics `calls_sent` query
+- `app/ui/handlers/groups.py`:
+  - Line 256: Group view `calls_today` query
+  - Line 459: Group stats detailed queries (today/week/all time)
+
+**Query Changes:**
+```sql
+-- BEFORE (wrong - table never updated by alerts)
+SELECT COUNT(*) FROM calls WHERE group_id = g.id AND status = 'sent'
+
+-- AFTER (correct - actual call logging)
+SELECT COUNT(*) FROM token_call_history WHERE target_chat_id = g.tg_chat_id
+```
+
+**Key Technical Detail**: The new system uses different ID types:
+- `calls` table: Uses `group_id` (database FK to groups.id)
+- `token_call_history`: Uses `target_chat_id` (Telegram chat ID)
+- Correct join: `LEFT JOIN token_call_history c ON c.target_chat_id = g.tg_chat_id`
+
+### **2. Added Diagnostic Logging to Alert System** ✅
+**Problem**: Silent failures - no visibility into why alerts weren't firing
+**Solution**: Added comprehensive logging with searchable prefixes
+
+**Files Modified:**
+- `app/dex.py` (_check_per_target_alerts method, lines 335-447):
+
+**New Log Prefixes:**
+- `[ALERT_SKIP]` - Token missing source_group_id or no targets configured
+- `[ALERT_CHECK]` - Starting evaluation for a token (shows MC and target count)
+- `[ALERT_EVAL]` - Current vs last multiplier comparison per target
+- `[ALERT_TRIGGER]` - Alert conditions met, queueing job
+- `[ALERT_FAIL]` - Missing userbot assignment for group
+- `[ALERT_SUCCESS]` - Alert queued and state updated successfully
+- `[ALERT_NO_FIRE]` - Conditions not met (shows current vs threshold)
+- `[ALERT_ERROR]` - Exception during alert processing
+
+**Usage Examples:**
+```bash
+# Find all alert activity for past hour
+grep "\[ALERT_" logs/app.log | tail -100
+
+# Debug specific token
+grep "ALERT.*7xKuy3TTv" logs/app.log
+
+# Find failures
+grep "ALERT_FAIL\|ALERT_ERROR" logs/app.log
+```
+
+### **3. Created Alert System Diagnostic Script** ✅
+**File Created**: `diagnostic_alerts.py` (executable)
+
+**Purpose**: Comprehensive health check identifying configuration issues
+
+**Diagnostic Checks:**
+1. **Token Tracking**: Total tokens, tokens with source_group_id, active status
+2. **High Performers**: Tokens above 2x threshold (should have alerted)
+3. **Target Configuration**: alerts_enabled, modes, thresholds per target
+4. **Alert States**: Total states created, alerts fired, average multipliers
+5. **Call Queue**: Job status breakdown (pending/completed/failed)
+6. **Call Logging**: Comparison of old `calls` vs new `token_call_history` tables
+7. **Userbot Assignments**: Which groups have forwarding bots assigned
+
+**Output Example:**
+```
+🔍 ALERT SYSTEM DIAGNOSTIC
+
+📊 Last 24h Tokens:
+   Total: 642
+   With source_group_id: 458 ⚠️ REQUIRED FOR ALERTS
+   Active: 158
+   With baseline MC: 642
+
+🚀 $BELLA: 27.73x
+   source_group_id: 37 ✅
+   Status: active
+
+📍 Target 28 - Elites Only (group_id: 37)
+   alerts_enabled: True ✅
+   alerts_modes: {"threshold": true, "sensitivity": true}
+   alerts_thresholds: [2.0, 5.0, 10.0]
+
+📊 Calls in 'calls' table: 0 (OLD)
+📊 Calls in 'token_call_history' table: 127 (NEW)
+
+❌ ISSUES FOUND:
+   ⚠️  184 tokens missing source_group_id
+   🐛 BUG: 127 calls in new table but analytics queries old table (shows 0)
+```
+
+**Usage:**
+```bash
+python3 diagnostic_alerts.py
+```
+
+### **4. Added Userbot Assignment Pagination** ✅
+**Problem**: Vertical list limited to 10 userbots, poor UX with many bots
+**Solution**: 3x3 grid pagination showing 9 userbots per page
+
+**Files Modified:**
+- `app/ui/handlers/groups.py`:
+  - Line 119-122: Added page parameter extraction in routing
+  - Line 337-420: Complete redesign of `show_userbot_assignment()` method
+
+**Features:**
+- **3x3 Grid Layout**: 9 userbots per page in 3 columns
+- **Smart Name Truncation**: Names >15 chars truncated to 12 + "..." for layout
+- **Dynamic Navigation**: Prev/Next buttons only when multiple pages exist
+- **Page Indicator**: Shows "📄 2/5" format
+- **Bounds Protection**: Page clamped to [0, total_pages-1]
+
+**UI Layout:**
+```
+🤖 Assign Userbot
+
+Select a userbot to assign to this group:
+
+🤖 Bot1      🤖 Bot2      🤖 Bot3
+🤖 Bot4      🤖 Bot5      🤖 Bot6
+🤖 Bot7      🤖 Bot8      🤖 Bot9
+
+◀️ Prev    📄 1/3    Next ▶️
+          🔙 Back
+```
+
+**Callback Format**: `group:assign:{group_id}:{page}`
+
+---
+
+## 🔍 Alert System Deep Dive (Updated Documentation)
+
+### **Complete Alert Flow**
+```
+1. DexScreenerService._monitoring_loop()
+   └─ Polls every DEX_POLL_SECS (default 5s)
+   └─ Calls _update_token_prices()
+
+2. _update_token_prices()
+   └─ Fetches active tokens
+   └─ Processes in batches of 30 (API limit)
+   └─ For each token: _check_per_target_alerts(token, new_mc)
+
+3. _check_per_target_alerts()
+   └─ Check source_group_id exists → [ALERT_SKIP] if missing
+   └─ Get targets with alerts_enabled=true → [ALERT_SKIP] if none
+   └─ For each target:
+      ├─ Get/create alert state (initial_mc, last_alert_multiplier)
+      ├─ Calculate current_multiplier = new_mc / initial_mc → [ALERT_EVAL]
+      ├─ Check threshold mode: [2x, 5x, 10x...]
+      ├─ Check sensitivity mode: last_mult * 1.20
+      ├─ If triggered:
+      │  ├─ Get userbot assignment → [ALERT_FAIL] if missing
+      │  ├─ Format message with emoji (🔥/🚀/🌙/🌕)
+      │  ├─ Queue job in call_queue → [ALERT_TRIGGER]
+      │  └─ Update last_alert_multiplier → [ALERT_SUCCESS]
+      └─ Else: [ALERT_NO_FIRE]
+
+4. CallDispatcher._process_job()
+   └─ Polls queue every 2s, batches of 10
+   └─ Resolves template or uses message_override
+   └─ Looks up first_message_id for reply threading
+   └─ Calls CallExecutor.send_call_message()
+   └─ Logs to token_call_history (NEW TABLE)
+
+5. Analytics Queries
+   └─ Query token_call_history WHERE target_chat_id = group.tg_chat_id
+   └─ Display counts in dashboard/group views
+```
+
+### **Why Alerts Fail - Debugging Guide**
+
+| Issue | Log Prefix | Cause | Solution |
+|-------|------------|-------|----------|
+| Token skipped | `[ALERT_SKIP]` | No source_group_id | Assign token to group in DB |
+| No targets | `[ALERT_SKIP]` | alerts_enabled=false | Enable alerts on target |
+| Can't forward | `[ALERT_FAIL]` | No userbot_assignment | Assign userbot to group |
+| Not triggered | `[ALERT_NO_FIRE]` | Below threshold | Wait for price increase |
+| Already alerted | `[ALERT_NO_FIRE]` | last_alert_multiplier >= current | Price hasn't moved 20%+ |
+| Exception | `[ALERT_ERROR]` | Code error | Check full traceback |
+
+### **Database Schema Relationships**
+
+```sql
+-- Alert State Tracking (per target-token pair)
+target_token_alert_state
+├─ target_id → targets.id
+├─ token_id → tokens_tracked.id
+├─ initial_market_cap (baseline for multipliers)
+├─ last_alert_multiplier (prevents duplicates)
+├─ first_message_id (for reply threading)
+└─ first_sent_at (for time deltas)
+
+-- Call Logging (actual sends)
+token_call_history
+├─ target_chat_id (Telegram ID, NOT group_id)
+├─ token_address
+├─ called_at
+└─ [source info, caller, etc.]
+
+-- Analytics Join Pattern
+SELECT COUNT(*)
+FROM groups g
+LEFT JOIN token_call_history c ON c.target_chat_id = g.tg_chat_id
+WHERE DATE(c.called_at) = CURRENT_DATE
+```
+
+**Critical**: `token_call_history.target_chat_id` is the Telegram chat ID, not the database `group_id`. Always join on `g.tg_chat_id`.
+
+---
+
+## 🚨 Recent UI/UX Improvements (2025-09-30 Session)
+
+### **1. Removed Add/Delete Target Functionality** ✅
+**Reason**: Targets are now managed exclusively through database/external tools
+**Changes**: Complete removal of UI elements and backend handlers
+
+**Files Modified:**
+- `app/ui/handlers/targets.py`:
+  - Removed buttons: "➕ Add Target" and "🗑️ Delete Target" from main menu
+  - Removed orphaned buttons from per-group targets view
+  - Deleted 5 methods: `start_add_target`, `prompt_for_target_chat_id`, `show_delete_target_list`, `delete_target`, `process_target_input`
+  - Removed action handlers for `targets:add`, `targets:select_group`, `targets:delete`
+- `app/ui/states.py`:
+  - Removed FSM state: `adding_target`
+- `app/management_bot.py`:
+  - Removed message handler registration for target input processing
+
+### **2. Improved Targets Alert Selection UI** ✅
+**Changes**: Enhanced display with group names, pagination, and compact layout
+
+**Files Modified:**
+- `app/ui/handlers/targets.py` (`show_targets_for_alerts` method):
+  - Added pagination: 6 targets per page (2 columns × 3 rows)
+  - Changed button labels from chat IDs to group display names
+  - Shortened names to 16 characters for 2-column layout
+  - Clean text format: Removed separators, added tree structure `├`
+- `app/management_bot.py`:
+  - Fixed callback registration to include `targets_alerts_page:` pattern
+
+**Before:**
+```
+🎯 Targets (Page 1/3)
+━━━━━━━━━━━━━━━━━━━━
+-1002867132084    🟢  4 modes
+-1002730059851    🔴  disabled
+```
+
+**After:**
+```
+🎯 Targets • Page 1/3
+├ (CH) WEB TRACK  🟢 4
+├ [PRIVATE] - CURATED  🔴 OFF
+```
+
+### **3. Streamlined Targets Overview** ✅
+**Changes**: Massive reduction in text length (~1,700 chars saved for 15 targets)
+
+**Files Modified:**
+- `app/ui/handlers/targets.py` (`show_targets_menu` method):
+  - Removed chat IDs from display
+  - Removed detailed alert settings (pnl✅ dynamic✅, S=50%, T=[2.0,7.0,25.0])
+  - Simplified to: Group name + Status + Mode count
+  - Used tree structure with `├` and `└` prefixes
+
+**Before (per target):**
+```
+1. -1002867132084
+   └ Group: (CH) WEB TRACK
+   └ Alerts: ON (pnl✅ dynamic✅ threshold✅ sensitivity✅) S=50% T=[2.0,7.0,25.0]
+```
+
+**After (per target):**
+```
+├ (CH) WEB TRACK  🟢 4 modes
+```
+
+### **4. Fixed Command Forwarding Keyboard Layout** ✅
+**Changes**: Arranged timezone and command rule detail buttons side-by-side
+
+**Files Modified:**
+- `app/ui/keyboards.py`:
+  - Command forwarding rule details: 2 buttons per row (6 buttons total)
+  - Timezone selection: 3 buttons per row (9 timezones), shortened labels to just timezone codes
+
+**Before (vertical):**
+```
+[💬 Edit Command]
+[👥 Manage Command Users]
+[👥 Manage Reply Users]
+```
+
+**After (2 columns):**
+```
+[💬 Edit Command] [👥 Manage Command Users]
+[👥 Manage Reply Users] [🤖 Set Forwarding Bot]
+```
+
+---
+
+## 🚨 Previous Session: Reply Threading & Bug Fixes (2025-09-29)
 
 ### **1. Fixed Log Spam Issues** ✅
 **Problem**: System was flooding logs with market cap checks

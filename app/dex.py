@@ -340,12 +340,16 @@ class DexScreenerService:
         import json
         source_group_id = token.get('source_group_id')
         if not source_group_id:
+            logger.debug(f"[ALERT_SKIP] Token {token['address'][:8]}... has no source_group_id - cannot check alerts")
             return
 
         # 1. Fetch all targets for the group that have alerts enabled
         targets = await self.target_model.get_targets_for_source_group(source_group_id, alerts_enabled_only=True)
         if not targets:
+            logger.debug(f"[ALERT_SKIP] No targets with alerts enabled for group {source_group_id} (token {token['address'][:8]}...)")
             return
+
+        logger.debug(f"[ALERT_CHECK] Token {token['address'][:8]}... MC ${new_mc:,.0f} - checking {len(targets)} target(s)")
 
         for target in targets:
             try:
@@ -359,12 +363,14 @@ class DexScreenerService:
                 )
 
                 if not state or not state['initial_market_cap'] or state['initial_market_cap'] <= 0:
-                    logger.debug(f"Skipping target {target['id']} for token {token['id']}, missing baseline MC.")
+                    logger.debug(f"[ALERT_SKIP] Target {target['id']} for token {token['id']}, missing baseline MC")
                     continue
 
                 # 3. Calculate current multiplier
                 current_multiplier = new_mc / state['initial_market_cap']
                 last_alert_multiplier = state['last_alert_multiplier']
+
+                logger.debug(f"[ALERT_EVAL] Target {target['id']}: {current_multiplier:.2f}x (last alert: {last_alert_multiplier:.2f}x)")
 
                 # 4. Evaluate alert modes for this target
                 modes = self.target_model.parse_alert_modes(target)
@@ -392,12 +398,12 @@ class DexScreenerService:
 
                 # 5. If an alert was triggered, queue it
                 if next_alert_to_fire and alert_type:
-                    logger.info(f"TRIGGER: {alert_type} alert for token {token['address']} in target {target['id']} at {next_alert_to_fire:.2f}x")
+                    logger.info(f"[ALERT_TRIGGER] {alert_type} alert for {token['address'][:8]}... target {target['id']} at {next_alert_to_fire:.2f}x")
 
                     # Get userbot assigned for forwarding
                     userbot_assignment = await db.fetchrow("SELECT userbot_id FROM userbot_assignments WHERE group_id = $1", source_group_id)
                     if not userbot_assignment or not userbot_assignment['userbot_id']:
-                        logger.warning(f"No forwarding userbot for group {source_group_id}, cannot send alert.")
+                        logger.warning(f"[ALERT_FAIL] No forwarding userbot for group {source_group_id}, cannot send alert")
                         continue
                     forwarding_userbot_id = userbot_assignment['userbot_id']
 
@@ -432,10 +438,13 @@ class DexScreenerService:
 
                     # 6. Update the state with the new multiplier
                     await self.target_alert_state_model.update_after_alert(target['id'], token['id'], next_alert_to_fire)
-                    logger.info(f"SUCCESS: Queued alert and updated state for token {token['id']} in target {target['id']}.")
+                    logger.info(f"[ALERT_SUCCESS] Queued alert and updated state for token {token['id']} in target {target['id']}")
+                else:
+                    # Conditions not met - log why
+                    logger.debug(f"[ALERT_NO_FIRE] Target {target['id']}: conditions not met (curr: {current_multiplier:.2f}x, last: {last_alert_multiplier:.2f}x)")
 
             except Exception as e:
-                logger.error(f"Error processing alerts for target {target['id']} and token {token['id']}: {e}", exc_info=True)
+                logger.error(f"[ALERT_ERROR] Error processing alerts for target {target['id']} and token {token['id']}: {e}", exc_info=True)
     
     async def _queue_pnl_command(self, token: Dict[str, Any], threshold: Decimal) -> bool:
         """Queue a /pnl command job instead of sending directly."""

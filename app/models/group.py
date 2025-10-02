@@ -29,12 +29,12 @@ class GroupModel(BaseModel):
     async def get_groups_with_stats(self) -> List[asyncpg.Record]:
         """Get groups with statistics"""
         query = """
-            SELECT g.*, 
+            SELECT g.*,
                    COUNT(DISTINCT t.id) as targets_count,
                    COUNT(DISTINCT s.id) as schedules_count,
                    ua.userbot_id,
                    COALESCE(b.display_name, b.session_name) as userbot_name,
-                   (SELECT COUNT(*) FROM calls WHERE group_id = g.id AND sent_at > CURRENT_DATE) as calls_today
+                   (SELECT COUNT(*) FROM calls WHERE group_id = g.id AND DATE(sent_at) = CURRENT_DATE AND status = 'sent') as calls_today
             FROM groups g
             LEFT JOIN targets t ON t.group_id = g.id
             LEFT JOIN group_schedules s ON s.group_id = g.id
