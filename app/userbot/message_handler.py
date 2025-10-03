@@ -7,6 +7,7 @@ import logging
 import time
 import traceback
 import json
+import asyncio
 from typing import Dict, Any, List, Optional
 from telethon import events
 
@@ -123,7 +124,12 @@ class MessageHandler:
 
         # Handle auto click
         if not is_edit and direction == "incoming":
-            await self._handle_auto_click(event)    
+            await self._handle_auto_click(event)
+
+        # Handle dynamic click
+        if not is_edit and direction == "incoming":
+            await self._handle_dynamic_click(event)
+
     def is_fresh(self, key, seconds=600):
         """Check if cache entry is fresh (default 10 minutes)"""
         return key in self.cache_time and time.time() - self.cache_time[key] < seconds
@@ -455,41 +461,212 @@ class MessageHandler:
             return
 
         # Check if this is a reply to a message we are tracking for auto-click
-        tracked_msg = await db.fetchrow(
+        tracked_msgs = await db.fetch(
             "SELECT * FROM autoclick_tracked_messages WHERE original_message_id = $1 AND chat_id = $2 AND status = 'tracking'",
             reply_to_msg_id, event.chat_id
         )
-        if not tracked_msg:
+        if not tracked_msgs:
             return
 
-        # Get the rule associated with this tracked message
-        rule = await self.rule_model.get_by_id(tracked_msg['rule_id'])
-        if not rule or not rule['enabled']:
+        for tracked_msg in tracked_msgs:
+            # Ensure this userbot is the one that should be clicking
+            if tracked_msg.get('userbot_id') and tracked_msg['userbot_id'] != self.userbot_id:
+                logger.debug(f"Ignoring auto-click for rule {tracked_msg['rule_id']}; userbot {self.userbot_id} is not the designated clicker.")
+                continue
+
+            # Get the rule associated with this tracked message
+            rule = await self.rule_model.get_by_id(tracked_msg['rule_id'])
+            if not rule or not rule['enabled']:
+                continue
+
+            # Check if the reply is from the correct bot
+            if rule['bot_id'] != event.sender_id:
+                continue
+                
+            logger.info(f"Valid auto-click reply detected for rule {rule['id']}. Searching for button...")
+
+            # Get our client to perform the click
+            client = self.session_manager.get_client()
+            if not client:
+                logger.error(f"Client not available for button click on rule {rule['id']}")
+                await db.execute("UPDATE autoclick_tracked_messages SET status = 'failed' WHERE id = $1", tracked_msg['id'])
+                continue
+
+            # Click the button with retry logic
+            max_retries = 3
+            retry_delay = 2  # seconds
+            button_found_and_clicked = False
+
+            if event.buttons:
+                for row in event.buttons:
+                    for button in row:
+                        if hasattr(button, 'text') and rule['button_text'] in button.text:
+                            # Try clicking with retries using our client
+                            click_success = False
+                            for attempt in range(max_retries):
+                                try:
+                                    # Refetch the message using our client to get fresh button reference
+                                    fresh_msg = await client.get_messages(event.chat_id, ids=event.message.id)
+                                    if not fresh_msg or not fresh_msg.buttons:
+                                        logger.error(f"Could not refetch message with buttons for rule {rule['id']}")
+                                        break
+
+                                    # Find the matching button in the fresh message
+                                    fresh_button = None
+                                    for fresh_row in fresh_msg.buttons:
+                                        for fb in fresh_row:
+                                            if hasattr(fb, 'text') and rule['button_text'] in fb.text:
+                                                fresh_button = fb
+                                                break
+                                        if fresh_button:
+                                            break
+
+                                    if not fresh_button:
+                                        logger.error(f"Button not found in refetched message for rule {rule['id']}")
+                                        break
+
+                                    # Click using our client
+                                    await fresh_button.click()
+                                    logger.info(f"✅ Auto-clicked button '{rule['button_text']}' in chat {event.chat_id} for rule {rule['id']} (attempt {attempt + 1})")
+                                    click_success = True
+                                    break  # Success, exit retry loop
+                                except Exception as e:
+                                    logger.error(f"❌ Button click attempt {attempt + 1}/{max_retries} failed for rule {rule['id']}: {e}")
+                                    if attempt < max_retries - 1:
+                                        logger.info(f"Retrying button click in {retry_delay} seconds...")
+                                        await asyncio.sleep(retry_delay)
+                                    else:
+                                        logger.error(f"All {max_retries} button click attempts failed for rule {rule['id']}")
+
+                            # Update status based on result
+                            if click_success:
+                                await db.execute("UPDATE autoclick_tracked_messages SET status = 'processed' WHERE id = $1", tracked_msg['id'])
+                            else:
+                                await db.execute("UPDATE autoclick_tracked_messages SET status = 'failed' WHERE id = $1", tracked_msg['id'])
+                            
+                            button_found_and_clicked = True
+                            break # Found and processed button for this rule, move to next rule
+                    if button_found_and_clicked:
+                        break
+
+            if not button_found_and_clicked:
+                # If we reach here, the button was not found
+                logger.warning(f"Reply from bot {event.sender_id} received, but button '{rule['button_text']}' not found for rule {rule['id']}.")
+
+    async def _handle_dynamic_click(self, event):
+        """Handle dynamic button clicking for monitored users"""
+        # Only process messages with buttons
+        if not event.buttons:
             return
 
-        # Check if the reply is from the correct bot
-        if rule['bot_id'] != event.sender_id:
-            return
-            
-        logger.info(f"Valid auto-click reply detected for rule {rule['id']}. Searching for button...")
+        # Get dynamic rules for this chat and sender
+        rules = await self.rule_model.get_dynamic_rules_for_chat_and_user(
+            event.chat_id,
+            event.sender_id
+        )
 
-        # Click the button
-        if event.buttons:
+        if not rules:
+            return
+
+        # Get our client to perform clicks
+        client = self.session_manager.get_client()
+        if not client:
+            logger.error(f"[DYNAMIC_CLICK] Client not available for button clicks")
+            return
+
+        for rule in rules:
+            # clicking_userbot_ids may be a JSON string or already a list.
+            clicking_userbot_ids_raw = rule.get('clicking_userbot_ids')
+            clicking_userbot_ids = []
+            if isinstance(clicking_userbot_ids_raw, str):
+                try:
+                    clicking_userbot_ids = json.loads(clicking_userbot_ids_raw)
+                except json.JSONDecodeError:
+                    logger.warning(f"[DYNAMIC_CLICK] Could not decode clicking_userbot_ids JSON: {clicking_userbot_ids_raw}")
+            elif isinstance(clicking_userbot_ids_raw, list):
+                clicking_userbot_ids = clicking_userbot_ids_raw
+
+            if not clicking_userbot_ids or self.userbot_id not in clicking_userbot_ids:
+                continue
+
+            # Implement "one-by-one" clicking with a deterministic delay
+            try:
+                sorted_ids = sorted(clicking_userbot_ids)
+                my_turn_index = sorted_ids.index(self.userbot_id)
+                # Stagger clicks by 2 seconds per bot to avoid race conditions
+                delay = my_turn_index * 2
+                if delay > 0:
+                    logger.debug(f"[DYNAMIC_CLICK] Userbot {self.userbot_id} waiting for {delay}s for its turn.")
+                    await asyncio.sleep(delay)
+            except (ValueError, TypeError):
+                # Fallback if data is malformed, just continue without delay
+                logger.warning(f"[DYNAMIC_CLICK] Could not determine turn order for rule {rule['id']}.")
+                pass
+
+            button_texts = rule['button_texts']  # JSONB array
+            if not button_texts:
+                continue
+
+            matched_button_texts = []
+
+            # Find all matching button texts (exact match)
             for row in event.buttons:
                 for button in row:
-                    if hasattr(button, 'text') and rule['button_text'] in button.text:
-                        try:
-                            await button.click()
-                            logger.info(f"Auto-clicked button '{rule['button_text']}' in chat {event.chat_id} for rule {rule['id']}.")
-                            # Mark as processed
-                            await db.execute("UPDATE autoclick_tracked_messages SET status = 'processed' WHERE id = $1", tracked_msg['id'])
-                            return
-                        except Exception as e:
-                            logger.error(f"Error auto-clicking button for rule {rule['id']}: {e}")
-                            await db.execute("UPDATE autoclick_tracked_messages SET status = 'failed' WHERE id = $1", tracked_msg['id'])
-                            
-        # If we reach here, the button was not found
-        logger.warning(f"Reply from bot {event.sender_id} received, but button '{rule['button_text']}' not found for rule {rule['id']}.")
+                    if hasattr(button, 'text') and button.text in button_texts:
+                        matched_button_texts.append(button.text)
+
+            if not matched_button_texts:
+                continue
+
+            # Click all matched buttons with retry logic and 1 sec delay between buttons
+            max_retries = 3
+            retry_delay = 2  # seconds
+            clicked_count = 0
+
+            for button_text in set(matched_button_texts): # Use set to avoid clicking the same button twice
+                click_success = False
+                for attempt in range(max_retries):
+                    try:
+                        # Refetch the message using our client to get fresh button reference
+                        fresh_msg = await client.get_messages(event.chat_id, ids=event.message.id)
+                        if not fresh_msg or not fresh_msg.buttons:
+                            logger.debug(f"[DYNAMIC_CLICK] Button '{button_text}' disappeared for rule {rule['id']}, likely already clicked.")
+                            break
+
+                        # Find the matching button in the fresh message
+                        fresh_button = None
+                        for fresh_row in fresh_msg.buttons:
+                            for fb in fresh_row:
+                                if hasattr(fb, 'text') and fb.text == button_text:
+                                    fresh_button = fb
+                                    break
+                            if fresh_button:
+                                break
+
+                        if not fresh_button:
+                            logger.debug(f"[DYNAMIC_CLICK] Button '{button_text}' not found in refetched message for rule {rule['id']}.")
+                            break
+
+                        # Click using our client
+                        await fresh_button.click()
+                        click_success = True
+                        break  # Success, exit retry loop
+                    except Exception as e:
+                        logger.error(f"[DYNAMIC_CLICK] Button click attempt {attempt + 1}/{max_retries} failed for rule {rule['id']}: {e}")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(retry_delay)
+
+                if click_success:
+                    clicked_count += 1
+                    # Delay before next button (if there are more buttons)
+                    if clicked_count < len(matched_button_texts):
+                        await asyncio.sleep(1)
+                else:
+                    # This is not necessarily an error if another bot clicked first
+                    logger.debug(f"[DYNAMIC_CLICK] Could not click button '{button_text}' for rule {rule['id']}. It might have been clicked by another bot.")
+
+            if clicked_count > 0:
+                logger.info(f"[DYNAMIC_CLICK] Userbot {self.userbot_id} successfully clicked {clicked_count}/{len(set(matched_button_texts))} matched buttons for rule {rule['id']} in chat {event.chat_id}")
 
     async def _get_cached_pnl_rules(self, group_id: int, seconds: int = 60) -> List[Dict[str, Any]]:
         """Get PNL forwarding rules for a group, with caching."""
@@ -786,6 +963,12 @@ class MessageHandler:
                 return False
 
             logger.debug(f"[MessageHandler] Forwarding custom command reply message {message.id} to channel {rule['destination_channel_id']}")
+
+            # Check if message text is excluded (blacklisted)
+            excluded_texts = rule.get('excluded_message_texts', []) or []
+            if message.text and excluded_texts and message.text in excluded_texts:
+                logger.debug(f"[CMD_FWD] Message excluded by blacklist for rule {rule['id']}: \"{message.text[:50]}\"")
+                return False
 
             # Resolve entity using same pattern as call_executor.py
             entity = await self._resolve_entity_safely(client, rule['destination_channel_id'])

@@ -437,8 +437,9 @@ class Keyboards:
             ],
             [
                 InlineKeyboardButton(text="⚙️ Schedule Settings", callback_data=f"cmd_fwd:schedule_settings:{rule['id']}"),
-                InlineKeyboardButton(text="🗑️ Delete Rule", callback_data=f"cmd_fwd:delete:{rule['id']}")
+                InlineKeyboardButton(text="🔇 Ignore Messages", callback_data=f"cmd_fwd:manage_excluded:{rule['id']}")
             ],
+            [InlineKeyboardButton(text="🗑️ Delete Rule", callback_data=f"cmd_fwd:delete:{rule['id']}")],
             [InlineKeyboardButton(text="🔙 Back to List", callback_data="cmd_fwd:list")]
         ])
 
@@ -553,6 +554,30 @@ class Keyboards:
             [InlineKeyboardButton(text="✅ Save Rule", callback_data="cmd_fwd:wizard_save")],
             [InlineKeyboardButton(text="❌ Cancel", callback_data="cmd_fwd:list")]
         ])
+
+    @staticmethod
+    def cmd_fwd_excluded_messages_keyboard(excluded_texts: List[str], rule_id: int) -> InlineKeyboardMarkup:
+        """Keyboard for managing excluded message texts"""
+        keyboard = []
+
+        # Show each excluded text with remove button
+        for i, text in enumerate(excluded_texts):
+            # Truncate long texts for display
+            display_text = text if len(text) <= 40 else text[:37] + "..."
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"🗑️ Remove \"{display_text}\"",
+                    callback_data=f"cmd_fwd:remove_excluded:{rule_id}:{i}"
+                )
+            ])
+
+        # Add new excluded text button
+        keyboard.append([InlineKeyboardButton(text="➕ Add Excluded Text", callback_data=f"cmd_fwd:add_excluded:{rule_id}")])
+
+        # Back button
+        keyboard.append([InlineKeyboardButton(text="🔙 Back to Rule", callback_data=f"cmd_fwd:view:{rule_id}")])
+
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
     def cmd_fwd_rule_details_text(rule: Dict, source_group: Dict, dest_channel_info: Dict, fwd_bot: Dict) -> str:
@@ -675,25 +700,85 @@ class Keyboards:
         keyboard = []
         for rule in rules:
             status = "✅" if rule['enabled'] else "❌"
+            rule_type = rule.get('rule_type', 'static')
+            rule_name = rule.get('name')
+
+            if rule_name:
+                # Show custom name if available
+                type_icon = "🔄" if rule_type == 'dynamic' else "📍"
+                text = f"{status} {type_icon} {rule_name}"
+            else:
+                # Fallback to default display
+                if rule_type == 'dynamic':
+                    type_icon = "🔄"
+                    text = f"{status} {type_icon} Chat: {rule['target_chat_id']}, User: {rule.get('user_id', 'N/A')}"
+                else:
+                    type_icon = "📍"
+                    text = f"{status} {type_icon} Chat: {rule['target_chat_id']}, Bot: {rule.get('bot_id', 'N/A')}"
+
             keyboard.append([
                 InlineKeyboardButton(
-                    text=f"{status} Chat: {rule['target_chat_id']}, Bot: {rule['bot_id']}",
+                    text=text,
                     callback_data=f"auto_click:view:{rule['id']}"
                 )
             ])
-        keyboard.append([InlineKeyboardButton(text="➕ Add New Rule", callback_data="auto_click:add")])
+        keyboard.append([
+            InlineKeyboardButton(text="➕ Post → Reply → Click", callback_data="auto_click:add"),
+            InlineKeyboardButton(text="➕ User Post → Click", callback_data="auto_click:add_dynamic")
+        ])
         keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data="menu:main")])
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
     def auto_click_rule_details(rule: Dict) -> InlineKeyboardMarkup:
         """Auto click rule details menu"""
-        status_btn = InlineKeyboardButton(
-            text="🔴 Disable" if rule['enabled'] else "🟢 Enable",
-            callback_data=f"auto_click:toggle:{rule['id']}"
-        )
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [status_btn],
-            [InlineKeyboardButton(text="🗑️ Delete Rule", callback_data=f"auto_click:delete:{rule['id']}")],
+        rule_id = rule['id']
+        rule_type = rule.get('rule_type', 'static')
+
+        keyboard = [
+            [InlineKeyboardButton(
+                text="🔴 Disable" if rule['enabled'] else "🟢 Enable",
+                callback_data=f"auto_click:toggle:{rule_id}"
+            )],
+            [InlineKeyboardButton(text="✏️ Edit Name", callback_data=f"auto_click:edit_name:{rule_id}")],
+        ]
+
+        if rule_type == 'dynamic':
+            keyboard.extend([
+                [InlineKeyboardButton(text="✏️ Edit Monitored User", callback_data=f"auto_click:edit_user:{rule_id}")],
+                [InlineKeyboardButton(text="✏️ Edit Button Texts", callback_data=f"auto_click:edit_buttons:{rule_id}")],
+                [InlineKeyboardButton(text="✏️ Edit Clicking Bots", callback_data=f"auto_click:edit_userbots:{rule_id}")],
+            ])
+
+        keyboard.extend([
+            [InlineKeyboardButton(text="🗑️ Delete Rule", callback_data=f"auto_click:delete:{rule_id}")],
             [InlineKeyboardButton(text="🔙 Back to List", callback_data="auto_click:list")]
         ])
+
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def dynamic_click_select_userbot_keyboard(userbots: List[Dict], selected_ids: List[int] = []) -> InlineKeyboardMarkup:
+        """Userbot selection for dynamic click rule (multi-select)"""
+        keyboard = []
+        for bot in userbots:
+            display_name = bot.get('display_name') or bot['session_name']
+            is_selected = bot['id'] in selected_ids
+            
+            button_text = f"{'✅' if is_selected else '👤'} {display_name}"
+            
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=button_text,
+                    callback_data=f"auto_click_dynamic_wizard:toggle_userbot:{bot['id']}"
+                )
+            ])
+        
+        # Add Done button only if at least one userbot is selected
+        if selected_ids:
+            keyboard.append([
+                InlineKeyboardButton(text="✅ Done", callback_data="auto_click_dynamic_wizard:userbots_done")
+            ])
+
+        keyboard.append([InlineKeyboardButton(text="❌ Cancel", callback_data="auto_click:list")])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)

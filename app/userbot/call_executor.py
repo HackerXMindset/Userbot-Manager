@@ -124,11 +124,11 @@ class CallExecutor:
             for rule in rules:
                 await db.execute(
                     """
-                    INSERT INTO autoclick_tracked_messages (rule_id, original_message_id, chat_id, status)
-                    VALUES ($1, $2, $3, 'tracking')
+                    INSERT INTO autoclick_tracked_messages (rule_id, original_message_id, chat_id, status, userbot_id)
+                    VALUES ($1, $2, $3, 'tracking', $4)
                     ON CONFLICT (original_message_id, chat_id, rule_id) DO NOTHING
                     """,
-                    rule['id'], message_id, target_chat_id
+                    rule['id'], message_id, target_chat_id, self.userbot_id
                 )
         except Exception as e:
             logger.error(f"Error arming auto-click tracking for message {message_id}: {e}")

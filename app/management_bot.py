@@ -164,16 +164,54 @@ class ManagementBot:
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
 
-        # Auto Click
+        # Dynamic Click Wizard
         self.dp.callback_query.register(
-            self.auto_click_handler.handle_auto_click_action,
-            F.data.startswith('auto_click:'),
+            self.auto_click_handler.wizard_process_dynamic_target,
+            F.data.startswith('auto_click_dynamic_wizard:target:'),
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
-        
+
+        # Toggle userbot selection (for both add and edit wizards)
+        self.dp.callback_query.register(
+            self.auto_click_handler.wizard_toggle_dynamic_userbot,
+            F.data.startswith('auto_click_dynamic_wizard:toggle_userbot:'),
+            ManagementStates.adding_dynamic_click_rule_userbot,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+        self.dp.callback_query.register(
+            self.auto_click_handler.wizard_toggle_dynamic_userbot,
+            F.data.startswith('auto_click_dynamic_wizard:toggle_userbot:'),
+            ManagementStates.editing_dynamic_click_rule_userbots,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        # "Done" button for ADDING a new rule
+        self.dp.callback_query.register(
+            self.auto_click_handler.wizard_save_dynamic_rule,
+            F.data == 'auto_click_dynamic_wizard:userbots_done',
+            ManagementStates.adding_dynamic_click_rule_userbot,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        # "Done" button for EDITING an existing rule
+        self.dp.callback_query.register(
+            self.auto_click_handler.process_edit_dynamic_userbots,
+            F.data == 'auto_click_dynamic_wizard:userbots_done',
+            ManagementStates.editing_dynamic_click_rule_userbots,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        # Static Click Wizard
         self.dp.callback_query.register(
             self.auto_click_handler.wizard_process_target_group,
             F.data.startswith('auto_click_wizard:'),
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        # Auto Click Menu (most generic)
+        self.dp.callback_query.register(
+            self.auto_click_handler.handle_auto_click_action,
+            F.data.startswith('auto_click:'),
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
 
@@ -356,6 +394,12 @@ class ManagementBot:
         )
 
         self.dp.message.register(
+            self.cmd_fwd_handler.process_excluded_text_input,
+            ManagementStates.cmd_fwd_add_excluded_text,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
             self.notifications_handler.process_notification_channel_input,
             ManagementStates.setting_notification_channel,
             F.from_user.id.in_(settings.admin_telegram_ids_list)
@@ -376,6 +420,43 @@ class ManagementBot:
         self.dp.message.register(
             self.auto_click_handler.wizard_process_button_text,
             ManagementStates.adding_auto_click_rule_button_text,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        # Dynamic Click Message Handlers
+        self.dp.message.register(
+            self.auto_click_handler.wizard_process_dynamic_user_id,
+            ManagementStates.adding_dynamic_click_rule_user_id,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.auto_click_handler.wizard_process_dynamic_buttons,
+            ManagementStates.adding_dynamic_click_rule_buttons,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.auto_click_handler.process_edit_dynamic_user,
+            ManagementStates.editing_dynamic_click_rule_user_id,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.auto_click_handler.process_edit_dynamic_buttons,
+            ManagementStates.editing_dynamic_click_rule_buttons,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.auto_click_handler.process_edit_dynamic_buttons,
+            ManagementStates.editing_dynamic_click_rule_buttons,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.auto_click_handler.process_edit_name,
+            ManagementStates.editing_auto_click_rule_name,
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
 
@@ -499,6 +580,7 @@ class ManagementBot:
         elif action == 'notifications':
             await self.notifications_handler.show_notifications_menu(query)
         elif action == 'auto_click':
+            logger.debug(f"[DEBUG] Navigating to auto_click menu from main menu.")
             await self.auto_click_handler.show_auto_click_menu(query)
         elif action == 'curate_alpha':
             await self.curate_alpha_handler.show_curate_alpha_menu(query)
@@ -1944,7 +2026,7 @@ class ManagementBot:
         """Handle bot errors"""
         exception = data.get('exception')
         if exception:
-            logger.error(f"Bot error: {exception}")
+            logger.error(f"Bot error occurred in event {event}", exc_info=True)
         
         # Get update from event
         update = event.update if hasattr(event, 'update') else event

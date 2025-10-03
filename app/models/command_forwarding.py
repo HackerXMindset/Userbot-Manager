@@ -71,7 +71,7 @@ class CommandForwardingRuleModel(BaseModel):
                          allowed_command_user_ids: List[int], allowed_reply_user_ids: List[int],
                          forwarding_userbot_id: int, schedule_enabled: bool = False,
                          schedule_interval_minutes: Optional[int] = None, post_timestamp: bool = False,
-                         timestamp_timezone: str = 'IST') -> asyncpg.Record:
+                         timestamp_timezone: str = 'IST', excluded_message_texts: List[str] = None) -> asyncpg.Record:
         """Create a new command forwarding rule with debugging"""
         try:
             logger.info(f"Creating command forwarding rule: source_group={source_group_id}, "
@@ -82,7 +82,8 @@ class CommandForwardingRuleModel(BaseModel):
                        f"schedule_enabled={schedule_enabled}, "
                        f"schedule_interval={schedule_interval_minutes}, "
                        f"post_timestamp={post_timestamp}, "
-                       f"timezone={timestamp_timezone}")
+                       f"timezone={timestamp_timezone}, "
+                       f"excluded_texts={excluded_message_texts}")
 
             # Calculate next scheduled time if scheduling is enabled
             next_scheduled_at = None
@@ -100,7 +101,8 @@ class CommandForwardingRuleModel(BaseModel):
                 'schedule_interval_minutes': schedule_interval_minutes,
                 'next_scheduled_at': next_scheduled_at,
                 'post_timestamp': post_timestamp,
-                'timestamp_timezone': timestamp_timezone
+                'timestamp_timezone': timestamp_timezone,
+                'excluded_message_texts': excluded_message_texts or []
             }
 
             logger.debug(f"Rule data: {data}")
@@ -222,6 +224,47 @@ class CommandForwardingRuleModel(BaseModel):
             ORDER BY cfr.enabled DESC, cfr.created_at DESC
         """
         return await self.db.fetch(query)
+
+    async def add_excluded_text(self, rule_id: int, text: str) -> Optional[asyncpg.Record]:
+        """Add a text to the excluded messages list (prevents duplicates)"""
+        try:
+            logger.debug(f"Adding excluded text to rule {rule_id}: '{text}'")
+            query = """
+                UPDATE command_forwarding_rules
+                SET excluded_message_texts = CASE
+                    WHEN $1 = ANY(excluded_message_texts) THEN excluded_message_texts
+                    ELSE array_append(excluded_message_texts, $1)
+                END,
+                    updated_at = NOW()
+                WHERE id = $2
+                RETURNING *
+            """
+            result = await self.db.fetchrow(query, text, rule_id)
+            logger.info(f"Successfully added excluded text to rule {rule_id}")
+            return result
+        except Exception as e:
+            logger.error(f"Failed to add excluded text to rule {rule_id}: {str(e)}")
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            raise
+
+    async def remove_excluded_text(self, rule_id: int, text: str) -> Optional[asyncpg.Record]:
+        """Remove a text from the excluded messages list"""
+        try:
+            logger.debug(f"Removing excluded text from rule {rule_id}: '{text}'")
+            query = """
+                UPDATE command_forwarding_rules
+                SET excluded_message_texts = array_remove(excluded_message_texts, $1),
+                    updated_at = NOW()
+                WHERE id = $2
+                RETURNING *
+            """
+            result = await self.db.fetchrow(query, text, rule_id)
+            logger.info(f"Successfully removed excluded text from rule {rule_id}")
+            return result
+        except Exception as e:
+            logger.error(f"Failed to remove excluded text from rule {rule_id}: {str(e)}")
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            raise
 
 
 class CommandTrackedMessageModel(BaseModel):

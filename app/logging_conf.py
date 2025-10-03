@@ -57,7 +57,7 @@ def configure_library_loggers():
     logging.getLogger('asyncpg').setLevel(logging.WARNING)
     
     # Keep our application loggers at INFO
-    logging.getLogger('app').setLevel(logging.INFO)
+    logging.getLogger('app').setLevel(logging.DEBUG)
 
 def get_logger(name: str) -> logging.Logger:
     """Get a logger with the given name"""

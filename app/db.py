@@ -38,27 +38,48 @@ class Database:
         """Acquire connection from pool"""
         if not self.pool:
             await self.connect()
-        async with self.pool.acquire() as conn:
-            yield conn
+
+        try:
+            async with self.pool.acquire() as conn:
+                yield conn
+        except asyncpg.exceptions.InterfaceError as e:
+            if 'pool is closing' in str(e):
+                logger.warning("Database pool is closing, skipping operation")
+                # Return None to signal graceful shutdown in progress
+                yield None
+            else:
+                raise
     
     async def execute(self, query: str, *args) -> str:
         """Execute query without returning results"""
         async with self.acquire() as conn:
+            if conn is None:
+                logger.debug("Skipping execute during shutdown")
+                return "SKIPPED"
             return await conn.execute(query, *args)
-    
+
     async def fetch(self, query: str, *args) -> List[asyncpg.Record]:
         """Fetch multiple rows"""
         async with self.acquire() as conn:
+            if conn is None:
+                logger.debug("Skipping fetch during shutdown")
+                return []
             return await conn.fetch(query, *args)
-    
+
     async def fetchrow(self, query: str, *args) -> Optional[asyncpg.Record]:
         """Fetch single row"""
         async with self.acquire() as conn:
+            if conn is None:
+                logger.debug("Skipping fetchrow during shutdown")
+                return None
             return await conn.fetchrow(query, *args)
-    
+
     async def fetchval(self, query: str, *args) -> Any:
         """Fetch single value"""
         async with self.acquire() as conn:
+            if conn is None:
+                logger.debug("Skipping fetchval during shutdown")
+                return None
             return await conn.fetchval(query, *args)
     
     async def run_migrations(self):

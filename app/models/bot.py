@@ -85,3 +85,10 @@ class BotModel(BaseModel):
             WHERE ua.userbot_id = $1
         """
         return await self.db.fetch(query, userbot_id)
+
+    async def get_bots_by_ids(self, bot_ids: List[int]) -> List[asyncpg.Record]:
+        """Get multiple bot records by their IDs."""
+        if not bot_ids:
+            return []
+        query = "SELECT * FROM bots WHERE id = ANY($1::int[])"
+        return await self.db.fetch(query, bot_ids)

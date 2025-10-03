@@ -60,6 +60,7 @@ class ManagementStates(StatesGroup):
     cmd_fwd_add_replying_user_id = State()
     cmd_fwd_edit_command = State()
     cmd_fwd_schedule_settings = State()
+    cmd_fwd_add_excluded_text = State()
 
     # Notifications
     setting_notification_channel = State()
@@ -69,6 +70,16 @@ class ManagementStates(StatesGroup):
     adding_auto_click_rule_target = State()
     adding_auto_click_rule_bot_id = State()
     adding_auto_click_rule_button_text = State()
+    editing_auto_click_rule_name = State()
+
+    # Dynamic Click
+    adding_dynamic_click_rule_target = State()
+    adding_dynamic_click_rule_user_id = State()
+    adding_dynamic_click_rule_buttons = State()
+    adding_dynamic_click_rule_userbot = State()
+    editing_dynamic_click_rule_user_id = State()
+    editing_dynamic_click_rule_buttons = State()
+    editing_dynamic_click_rule_userbots = State()
 
     # Curate Alpha
     curate_alpha_add_rule_name = State()

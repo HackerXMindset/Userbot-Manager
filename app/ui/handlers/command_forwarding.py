@@ -70,6 +70,16 @@ class CommandForwardingHandler:
                 rule_id = int(query.data.split(':')[2])
                 timezone = query.data.split(':')[3]
                 await self.update_timezone(query, rule_id, timezone)
+            elif action == 'manage_excluded':
+                rule_id = int(query.data.split(':')[2])
+                await self.show_excluded_messages(query, rule_id)
+            elif action == 'add_excluded':
+                rule_id = int(query.data.split(':')[2])
+                await self.prompt_add_excluded_text(query, state, rule_id)
+            elif action == 'remove_excluded':
+                rule_id = int(query.data.split(':')[2])
+                index = int(query.data.split(':')[3])
+                await self.remove_excluded_text(query, rule_id, index)
 
             # Wizard actions
             elif action == 'wizard_source_group':
@@ -193,6 +203,110 @@ class CommandForwardingHandler:
         except Exception as e:
             logger.error(f'Error updating timezone: {e}\n{traceback.format_exc()}')
             await query.answer('❌ An error occurred. Please try again.', show_alert=True)
+
+    async def show_excluded_messages(self, query: types.CallbackQuery, rule_id: int):
+        logger.debug(f'Showing excluded messages for rule {rule_id}')
+        try:
+            rule = await self.cmd_fwd_model.get_by_id(rule_id)
+            if not rule:
+                return await query.answer('Rule not found.')
+
+            excluded_texts = rule.get('excluded_message_texts', []) or []
+
+            text = '<b>🔇 Excluded Messages</b>\n\n'
+            text += 'Messages matching these texts (case-sensitive) will NOT be forwarded:\n\n'
+
+            if excluded_texts:
+                for i, exc_text in enumerate(excluded_texts, 1):
+                    # Show full text in list
+                    display = exc_text if len(exc_text) <= 60 else exc_text[:57] + "..."
+                    text += f'{i}. "{display}"\n'
+            else:
+                text += '<i>No excluded messages configured.</i>'
+
+            keyboard = self.keyboards.cmd_fwd_excluded_messages_keyboard(excluded_texts, rule_id)
+            await query.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
+            await query.answer()
+        except Exception as e:
+            logger.error(f'Error showing excluded messages: {e}\n{traceback.format_exc()}')
+            await query.answer('❌ An error occurred. Please try again.', show_alert=True)
+
+    async def prompt_add_excluded_text(self, query: types.CallbackQuery, state: FSMContext, rule_id: int):
+        logger.debug(f'Prompting to add excluded text for rule {rule_id}')
+        try:
+            await state.set_data({'rule_id': rule_id})
+            await state.set_state(ManagementStates.cmd_fwd_add_excluded_text)
+            await query.message.edit_text('<b>➕ Add Excluded Text</b>\n\nEnter the exact text to exclude (case-sensitive):')
+            await query.answer()
+        except Exception as e:
+            logger.error(f'Error prompting for excluded text: {e}\n{traceback.format_exc()}')
+            await query.answer('❌ An error occurred. Please try again.', show_alert=True)
+
+    async def remove_excluded_text(self, query: types.CallbackQuery, rule_id: int, index: int):
+        logger.debug(f'Removing excluded text at index {index} from rule {rule_id}')
+        try:
+            rule = await self.cmd_fwd_model.get_by_id(rule_id)
+            if not rule:
+                return await query.answer('Rule not found.')
+
+            excluded_texts = rule.get('excluded_message_texts', []) or []
+
+            if index < 0 or index >= len(excluded_texts):
+                return await query.answer('❌ List was modified. Please refresh.', show_alert=True)
+
+            text_to_remove = excluded_texts[index]
+
+            # Re-verify text still exists before removal (race condition protection)
+            rule_check = await self.cmd_fwd_model.get_by_id(rule_id)
+            current_texts = rule_check.get('excluded_message_texts', []) or []
+            if text_to_remove not in current_texts:
+                return await query.answer('❌ Text already removed.', show_alert=True)
+
+            await self.cmd_fwd_model.remove_excluded_text(rule_id, text_to_remove)
+
+            await query.answer(f'✅ Removed excluded text.')
+            await self.show_excluded_messages(query, rule_id)
+        except Exception as e:
+            logger.error(f'Error removing excluded text: {e}\n{traceback.format_exc()}')
+            await query.answer('❌ An error occurred. Please try again.', show_alert=True)
+
+    async def process_excluded_text_input(self, message: types.Message, state: FSMContext):
+        logger.debug('Processing excluded text input')
+        try:
+            text = message.text.strip()
+            if not text:
+                return await message.answer('❌ Text cannot be empty. Please enter text to exclude.')
+
+            if len(text) > 500:
+                return await message.answer('❌ Text too long (max 500 characters).')
+
+            data = await state.get_data()
+            rule_id = data.get('rule_id')
+            if not rule_id:
+                await state.clear()
+                return await message.answer('❌ Rule not found.')
+
+            await self.cmd_fwd_model.add_excluded_text(rule_id, text)
+            await message.delete()
+
+            # Show updated excluded messages list
+            rule = await self.cmd_fwd_model.get_by_id(rule_id)
+            excluded_texts = rule.get('excluded_message_texts', []) or []
+
+            response_text = '<b>🔇 Excluded Messages</b>\n\n'
+            response_text += 'Messages matching these texts (case-sensitive) will NOT be forwarded:\n\n'
+
+            for i, exc_text in enumerate(excluded_texts, 1):
+                display = exc_text if len(exc_text) <= 60 else exc_text[:57] + "..."
+                response_text += f'{i}. "{display}"\n'
+
+            keyboard = self.keyboards.cmd_fwd_excluded_messages_keyboard(excluded_texts, rule_id)
+            await message.answer(response_text, reply_markup=keyboard, parse_mode='HTML')
+            await state.clear()
+        except Exception as e:
+            logger.error(f'Error processing excluded text input: {e}\n{traceback.format_exc()}')
+            await message.answer('❌ An error occurred. Please try again.')
+            await state.clear()
 
     async def confirm_delete_rule(self, query: types.CallbackQuery, rule_id: int):
         logger.debug(f'Confirming deletion for command forwarding rule {rule_id}')
