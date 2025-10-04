@@ -696,25 +696,47 @@ class Keyboards:
 
     @staticmethod
     def auto_click_menu(rules: List[Dict]) -> InlineKeyboardMarkup:
-        """Auto click management menu"""
+        """Auto click main menu (clean - no rule list)"""
+        keyboard = [
+            [InlineKeyboardButton(text="🔍 Scanning Clicker", callback_data="auto_click:scanning_menu")],
+            [InlineKeyboardButton(text="🔫 Raider", callback_data="auto_click:raider_menu")],
+            [InlineKeyboardButton(text="🔙 Back", callback_data="menu:main")]
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def scanning_menu() -> InlineKeyboardMarkup:
+        """Scanning Clicker submenu"""
+        keyboard = [
+            [InlineKeyboardButton(text="➕ Add New Rule", callback_data="auto_click:add")],
+            [InlineKeyboardButton(text="📋 Show All Rules", callback_data="auto_click:scanning_list")],
+            [InlineKeyboardButton(text="🔙 Back to Auto-Tap", callback_data="auto_click:menu")]
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def scanning_rules_list(rules: List[Dict], page: int = 1) -> InlineKeyboardMarkup:
+        """List of scanning rules (static rules only) with pagination"""
         keyboard = []
-        for rule in rules:
+        static_rules = [r for r in rules if r.get('rule_type') == 'static' or not r.get('rule_type')]
+
+        # Pagination
+        items_per_page = 9
+        total_pages = max(1, (len(static_rules) + items_per_page - 1) // items_per_page)
+        page = max(1, min(page, total_pages))
+
+        start_idx = (page - 1) * items_per_page
+        end_idx = start_idx + items_per_page
+        page_rules = static_rules[start_idx:end_idx]
+
+        for rule in page_rules:
             status = "✅" if rule['enabled'] else "❌"
-            rule_type = rule.get('rule_type', 'static')
             rule_name = rule.get('name')
 
             if rule_name:
-                # Show custom name if available
-                type_icon = "🔄" if rule_type == 'dynamic' else "📍"
-                text = f"{status} {type_icon} {rule_name}"
+                text = f"{status} 📍 {rule_name}"
             else:
-                # Fallback to default display
-                if rule_type == 'dynamic':
-                    type_icon = "🔄"
-                    text = f"{status} {type_icon} Chat: {rule['target_chat_id']}, User: {rule.get('user_id', 'N/A')}"
-                else:
-                    type_icon = "📍"
-                    text = f"{status} {type_icon} Chat: {rule['target_chat_id']}, Bot: {rule.get('bot_id', 'N/A')}"
+                text = f"{status} 📍 Chat: {rule['target_chat_id']}, Bot: {rule.get('bot_id', 'N/A')}"
 
             keyboard.append([
                 InlineKeyboardButton(
@@ -722,11 +744,79 @@ class Keyboards:
                     callback_data=f"auto_click:view:{rule['id']}"
                 )
             ])
-        keyboard.append([
-            InlineKeyboardButton(text="➕ Post → Reply → Click", callback_data="auto_click:add"),
-            InlineKeyboardButton(text="➕ User Post → Click", callback_data="auto_click:add_dynamic")
-        ])
-        keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data="menu:main")])
+
+        if not keyboard:
+            keyboard.append([InlineKeyboardButton(text="No scanning rules yet", callback_data="auto_click:scanning_menu")])
+
+        # Pagination buttons
+        if total_pages > 1:
+            nav_buttons = []
+            if page > 1:
+                nav_buttons.append(InlineKeyboardButton(text="« Prev", callback_data=f"auto_click:scanning_list:{page-1}"))
+            nav_buttons.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="noop"))
+            if page < total_pages:
+                nav_buttons.append(InlineKeyboardButton(text="Next »", callback_data=f"auto_click:scanning_list:{page+1}"))
+            keyboard.append(nav_buttons)
+
+        keyboard.append([InlineKeyboardButton(text="🔙 Back to Scanning Menu", callback_data="auto_click:scanning_menu")])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def raider_menu() -> InlineKeyboardMarkup:
+        """Raider submenu"""
+        keyboard = [
+            [InlineKeyboardButton(text="➕ Add New Raider Rule", callback_data="auto_click:add_dynamic")],
+            [InlineKeyboardButton(text="📋 Show All Rules", callback_data="auto_click:raider_list")],
+            [InlineKeyboardButton(text="💬 Manage Replies", callback_data="dynamic_reply:menu")],
+            [InlineKeyboardButton(text="🔙 Back to Auto-Tap", callback_data="auto_click:menu")]
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def raider_rules_list(rules: List[Dict], page: int = 1) -> InlineKeyboardMarkup:
+        """List of raider rules (dynamic rules only) with pagination"""
+        keyboard = []
+        dynamic_rules = [r for r in rules if r.get('rule_type') == 'dynamic']
+
+        # Pagination
+        items_per_page = 9
+        total_pages = max(1, (len(dynamic_rules) + items_per_page - 1) // items_per_page)
+        page = max(1, min(page, total_pages))
+
+        start_idx = (page - 1) * items_per_page
+        end_idx = start_idx + items_per_page
+        page_rules = dynamic_rules[start_idx:end_idx]
+
+        for rule in page_rules:
+            status = "✅" if rule['enabled'] else "❌"
+            rule_name = rule.get('name')
+
+            if rule_name:
+                text = f"{status} 🔄 {rule_name}"
+            else:
+                text = f"{status} 🔄 Chat: {rule['target_chat_id']}, User: {rule.get('user_id', 'N/A')}"
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=f"auto_click:view:{rule['id']}"
+                )
+            ])
+
+        if not keyboard:
+            keyboard.append([InlineKeyboardButton(text="No raider rules yet", callback_data="auto_click:raider_menu")])
+
+        # Pagination buttons
+        if total_pages > 1:
+            nav_buttons = []
+            if page > 1:
+                nav_buttons.append(InlineKeyboardButton(text="« Prev", callback_data=f"auto_click:raider_list:{page-1}"))
+            nav_buttons.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="noop"))
+            if page < total_pages:
+                nav_buttons.append(InlineKeyboardButton(text="Next »", callback_data=f"auto_click:raider_list:{page+1}"))
+            keyboard.append(nav_buttons)
+
+        keyboard.append([InlineKeyboardButton(text="🔙 Back to Raider Menu", callback_data="auto_click:raider_menu")])
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
@@ -744,15 +834,36 @@ class Keyboards:
         ]
 
         if rule_type == 'dynamic':
+            # Auto-reply toggle
+            auto_reply_enabled = rule.get('auto_reply_enabled', False)
+            keyboard.append([InlineKeyboardButton(
+                text=f"💬 Auto-Reply: {'ON' if auto_reply_enabled else 'OFF'}",
+                callback_data=f"auto_click:toggle_reply:{rule_id}"
+            )])
+
+            # Ticker edit button
+            keyboard.append([InlineKeyboardButton(
+                text="🏷 Edit Ticker",
+                callback_data=f"auto_click:edit_ticker:{rule_id}"
+            )])
+
             keyboard.extend([
                 [InlineKeyboardButton(text="✏️ Edit Monitored User", callback_data=f"auto_click:edit_user:{rule_id}")],
                 [InlineKeyboardButton(text="✏️ Edit Button Texts", callback_data=f"auto_click:edit_buttons:{rule_id}")],
                 [InlineKeyboardButton(text="✏️ Edit Clicking Bots", callback_data=f"auto_click:edit_userbots:{rule_id}")],
             ])
 
+        # Back button depends on rule type
+        if rule_type == 'dynamic':
+            back_callback = "auto_click:raider_list"
+            back_text = "🔙 Back to Rules"
+        else:
+            back_callback = "auto_click:scanning_list"
+            back_text = "🔙 Back to Rules"
+
         keyboard.extend([
             [InlineKeyboardButton(text="🗑️ Delete Rule", callback_data=f"auto_click:delete:{rule_id}")],
-            [InlineKeyboardButton(text="🔙 Back to List", callback_data="auto_click:list")]
+            [InlineKeyboardButton(text=back_text, callback_data=back_callback)]
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -781,4 +892,58 @@ class Keyboards:
             ])
 
         keyboard.append([InlineKeyboardButton(text="❌ Cancel", callback_data="auto_click:list")])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def dynamic_reply_menu() -> InlineKeyboardMarkup:
+        """Dynamic Reply management menu"""
+        keyboard = [
+            [InlineKeyboardButton(text="➕ Add Reply", callback_data="dynamic_reply:add")],
+            [InlineKeyboardButton(text="📋 List All Replies", callback_data="dynamic_reply:list")],
+            [InlineKeyboardButton(text="🔙 Back", callback_data="menu:auto_click")]
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def dynamic_reply_list(replies: List[Dict], usage_stats: Dict[int, int] = None, page: int = 1) -> InlineKeyboardMarkup:
+        """
+        Display list of all replies with delete buttons and pagination.
+        usage_stats is optional {reply_id: use_count} for showing usage per rule.
+        """
+        keyboard = []
+
+        # Pagination
+        items_per_page = 9
+        total_pages = max(1, (len(replies) + items_per_page - 1) // items_per_page)
+        page = max(1, min(page, total_pages))
+
+        start_idx = (page - 1) * items_per_page
+        end_idx = start_idx + items_per_page
+        page_replies = replies[start_idx:end_idx]
+
+        for reply in page_replies:
+            reply_id = reply['id']
+            text = reply['message_text']
+            use_count = usage_stats.get(reply_id, 0) if usage_stats else 0
+
+            # Truncate text for display
+            display_text = text[:50] + "..." if len(text) > 50 else text
+            button_text = f"🗑 [{use_count} uses] {display_text}"
+
+            keyboard.append([InlineKeyboardButton(
+                text=button_text,
+                callback_data=f"dynamic_reply:delete:{reply_id}"
+            )])
+
+        # Pagination buttons
+        if total_pages > 1:
+            nav_buttons = []
+            if page > 1:
+                nav_buttons.append(InlineKeyboardButton(text="« Prev", callback_data=f"dynamic_reply:list:{page-1}"))
+            nav_buttons.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="noop"))
+            if page < total_pages:
+                nav_buttons.append(InlineKeyboardButton(text="Next »", callback_data=f"dynamic_reply:list:{page+1}"))
+            keyboard.append(nav_buttons)
+
+        keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data="dynamic_reply:menu")])
         return InlineKeyboardMarkup(inline_keyboard=keyboard)

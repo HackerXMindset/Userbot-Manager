@@ -110,10 +110,14 @@ class SystemManager:
             # Start userbot workers
             logger.info("Starting userbot workers...")
             await self.components['userbot_manager'].start_all_workers()
-            
+
+            # Start background cleanup task for expired pending DM watches
+            logger.info("Starting pending DM cleanup task...")
+            asyncio.create_task(self._cleanup_expired_dm_watches())
+
             self.running = True
             logger.info("All system components started successfully")
-            
+
             # Start management bot (blocking)
             logger.info("Starting management bot...")
             management_bot_task = asyncio.create_task(
@@ -167,7 +171,30 @@ class SystemManager:
         """Signal shutdown from signal handler"""
         logger.info("Shutdown signal received")
         self.shutdown_event.set()
-    
+
+    async def _cleanup_expired_dm_watches(self):
+        """Background task to clean up expired auto-reply sessions."""
+        from app.models.auto_reply_session import AutoReplySessionModel
+
+        session_model = AutoReplySessionModel(db)
+
+        while not self.shutdown_event.is_set():
+            try:
+                removed = await session_model.cleanup_expired()
+                if removed > 0:
+                    logger.info(f"[AUTO_REPLY_CLEANUP] Cleaned up {removed} expired sessions")
+            except Exception as e:
+                logger.error(f"[AUTO_REPLY_CLEANUP] Error during cleanup: {e}")
+
+            # Wait 60 seconds before next cleanup
+            try:
+                await asyncio.wait_for(self.shutdown_event.wait(), timeout=60)
+                break  # Shutdown signaled
+            except asyncio.TimeoutError:
+                pass  # Continue loop
+
+        logger.info("[PENDING_DM_CLEANUP] Cleanup task stopped")
+
     async def get_system_status(self) -> dict:
         """Get overall system status"""
         status = {

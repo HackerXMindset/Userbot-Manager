@@ -11,12 +11,13 @@ from .pnl import PnlHandler
 from .command_forwarding import CommandForwardingHandler
 from .notifications import NotificationsHandler
 from .auto_click import AutoClickHandler
+from .dynamic_reply import DynamicReplyHandler
 from .curate_alpha import CurateAlphaHandler
 from .templates import TemplatesHandler
 
 __all__ = [
     "MenuHandler",
-    "GroupsHandler", 
+    "GroupsHandler",
     "UserbotsHandler",
     "SchedulesHandler",
     "TargetsHandler",
@@ -26,6 +27,7 @@ __all__ = [
     "CommandForwardingHandler",
     "NotificationsHandler",
     "AutoClickHandler",
+    "DynamicReplyHandler",
     "CurateAlphaHandler",
     "TemplatesHandler",
 ]

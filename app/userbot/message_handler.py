@@ -35,6 +35,7 @@ class MessageHandler:
     def __init__(self, userbot_id: int, session_manager):
         self.userbot_id = userbot_id
         self.session_manager = session_manager
+        self.db = db
         self.bot_model = BotModel(db)
         self.group_model = GroupModel(db)
         self.schedule_model = ScheduleModel(db)
@@ -93,6 +94,8 @@ class MessageHandler:
             if not is_edit:
                 if is_dm:
                     await self.notification_handler.handle_notification_event(event, "dm")
+                    # Handle auto-reply to DMs after button clicks
+                    await self._handle_dm_auto_reply(event)
                 if is_mention:
                     await self.notification_handler.handle_notification_event(event, "mention")
                 if is_reply_to_me:
@@ -589,19 +592,54 @@ class MessageHandler:
             if not clicking_userbot_ids or self.userbot_id not in clicking_userbot_ids:
                 continue
 
-            # Implement "one-by-one" clicking with a deterministic delay
+            message_id = event.message.id
+
+            # Calculate position in sequence for time-based delay
+            sorted_ids = sorted(clicking_userbot_ids)
             try:
-                sorted_ids = sorted(clicking_userbot_ids)
-                my_turn_index = sorted_ids.index(self.userbot_id)
-                # Stagger clicks by 2 seconds per bot to avoid race conditions
-                delay = my_turn_index * 2
-                if delay > 0:
-                    logger.debug(f"[DYNAMIC_CLICK] Userbot {self.userbot_id} waiting for {delay}s for its turn.")
-                    await asyncio.sleep(delay)
-            except (ValueError, TypeError):
-                # Fallback if data is malformed, just continue without delay
-                logger.warning(f"[DYNAMIC_CLICK] Could not determine turn order for rule {rule['id']}.")
-                pass
+                my_position = sorted_ids.index(self.userbot_id)
+            except ValueError:
+                my_position = 0
+                logger.warning(f"[DYNAMIC_CLICK] Could not find userbot {self.userbot_id} in clicking list")
+
+            # Create auto-reply session if enabled
+            session_id = None
+            if rule.get('auto_reply_enabled'):
+                from app.models.auto_reply_session import AutoReplySessionModel
+                session_model = AutoReplySessionModel(self.db)
+
+                # Get the bot that created the buttons
+                bot_user_id = None
+                if hasattr(event.message, 'via_bot_id') and event.message.via_bot_id:
+                    bot_user_id = event.message.via_bot_id
+                elif hasattr(event.message, 'via_bot') and event.message.via_bot:
+                    bot_user_id = event.message.via_bot.id
+                else:
+                    bot_user_id = event.sender_id
+
+                if bot_user_id:
+                    ticker_value = rule.get('ticker_value', '')
+                    # Create session in WAITING state
+                    session_id = await session_model.create_session(
+                        rule_id=rule['id'],
+                        message_id=message_id,
+                        userbot_id=self.userbot_id,
+                        bot_user_id=bot_user_id,
+                        ticker_value=ticker_value
+                    )
+                    logger.info(f"[AUTO_REPLY] Created session {session_id} for userbot={self.userbot_id}, position={my_position}")
+                else:
+                    logger.warning(f"[AUTO_REPLY] Could not determine bot ID for rule {rule['id']}")
+
+            # Time-based sequential delay: position * 5 seconds
+            delay = my_position * 5
+            if delay > 0:
+                logger.info(f"[DYNAMIC_CLICK] Userbot {self.userbot_id} waiting {delay}s (position {my_position}) before clicking")
+                await asyncio.sleep(delay)
+
+            # Mark session as ready to click
+            if session_id:
+                await session_model.mark_ready(session_id)
 
             button_texts = rule['button_texts']  # JSONB array
             if not button_texts:
@@ -667,6 +705,64 @@ class MessageHandler:
 
             if clicked_count > 0:
                 logger.info(f"[DYNAMIC_CLICK] Userbot {self.userbot_id} successfully clicked {clicked_count}/{len(set(matched_button_texts))} matched buttons for rule {rule['id']} in chat {event.chat_id}")
+
+                # Mark session as clicked
+                if session_id:
+                    await session_model.mark_clicked(session_id)
+
+    async def _handle_dm_auto_reply(self, event):
+        """Handle incoming DMs and auto-reply if we're expecting a DM from this bot."""
+        try:
+            # Only process if it's a DM (private chat)
+            if not event.is_private:
+                return
+
+            sender_id = event.sender_id
+            logger.info(f"[AUTO_REPLY] Processing DM from sender {sender_id} for userbot {self.userbot_id}")
+
+            # Look up active session for this DM
+            from app.models.auto_reply_session import AutoReplySessionModel
+            from app.models.dynamic_reply import DynamicReplyModel
+
+            session_model = AutoReplySessionModel(self.db)
+            reply_model = DynamicReplyModel(self.db)
+
+            session = await session_model.get_session_for_dm(self.userbot_id, sender_id)
+
+            if not session:
+                logger.debug(f"[AUTO_REPLY] No active session for DM from bot {sender_id} -> userbot {self.userbot_id}")
+                return
+
+            logger.info(f"[AUTO_REPLY] Found session {session['id']} for DM (state={session['state']}, rule={session['rule_id']})")
+
+            # Mark DM as received
+            await session_model.mark_dm_received(session['id'])
+
+            # Wait 5 seconds before replying (human-like behavior)
+            logger.info(f"[AUTO_REPLY] Waiting 5s before replying to session {session['id']}")
+            await asyncio.sleep(5)
+
+            # Get random reply message
+            reply_data = await reply_model.get_random_reply_for_rule(session['rule_id'])
+
+            if not reply_data:
+                logger.warning(f"[AUTO_REPLY] No replies configured for rule {session['rule_id']}")
+                await session_model.mark_failed(session['id'], "No reply messages configured")
+                return
+
+            # Replace {ticker} placeholder
+            ticker_value = session.get('ticker_value', '')
+            reply_text = reply_data['message_text'].replace('{ticker}', ticker_value)
+
+            # Send reply
+            await event.reply(reply_text)
+            logger.info(f"[AUTO_REPLY] Replied to bot {sender_id}: {reply_text[:50]}... (session={session['id']}, rule={session['rule_id']})")
+
+            # Mark session as replied
+            await session_model.mark_replied(session['id'])
+
+        except Exception as e:
+            logger.error(f"[AUTO_REPLY] Error handling DM auto-reply: {e}", exc_info=True)
 
     async def _get_cached_pnl_rules(self, group_id: int, seconds: int = 60) -> List[Dict[str, Any]]:
         """Get PNL forwarding rules for a group, with caching."""

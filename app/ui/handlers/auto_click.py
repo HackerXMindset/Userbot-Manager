@@ -23,19 +23,87 @@ class AutoClickHandler:
         self.bot_model = BotModel(db)
     
     async def show_auto_click_menu(self, query: types.CallbackQuery):
-        """Display auto click management menu"""
+        """Display auto click main menu"""
         try:
             rules = await self.rule_model.get_all_rules()
-            text = f"<b>🖱️ Auto Click Rules ({len(rules)})</b>\n\n"
-            text += "Manage rules for automatically clicking buttons in bot replies."
-            
+            text = "<b>📡 Auto-Tap Menu</b>\n\n"
+            text += "Choose an option:"
+
             await query.message.edit_text(
                 text,
                 reply_markup=self.keyboards.auto_click_menu(rules)
             )
         except Exception as e:
             logger.error(f"Error showing auto click menu: {e}")
-            await query.answer("❌ Error loading auto click rules")
+            await query.answer("❌ Error loading menu")
+
+    async def show_scanning_menu(self, query: types.CallbackQuery):
+        """Display scanning clicker submenu"""
+        try:
+            text = "<b>🔍 Scanning Clicker</b>\n\n"
+            text += "Auto-click buttons when bots reply to your posts."
+
+            await query.message.edit_text(
+                text,
+                reply_markup=self.keyboards.scanning_menu()
+            )
+        except Exception as e:
+            logger.error(f"Error showing scanning menu: {e}")
+            await query.answer("❌ Error loading scanning menu")
+
+    async def show_scanning_rules_list(self, query: types.CallbackQuery, page: int = 1):
+        """Display list of scanning rules with pagination"""
+        try:
+            rules = await self.rule_model.get_all_rules()
+            static_rules = [r for r in rules if r.get('rule_type') == 'static' or not r.get('rule_type')]
+
+            text = f"<b>📋 Scanning Rules ({len(static_rules)})</b>\n\n"
+            if static_rules:
+                text += "Click a rule to view details:"
+            else:
+                text += "No scanning rules configured yet.\nAdd one to get started!"
+
+            await query.message.edit_text(
+                text,
+                reply_markup=self.keyboards.scanning_rules_list(rules, page)
+            )
+        except Exception as e:
+            logger.error(f"Error showing scanning rules list: {e}")
+            await query.answer("❌ Error loading rules")
+
+    async def show_raider_menu(self, query: types.CallbackQuery):
+        """Display raider submenu"""
+        try:
+            text = "<b>🔫 Raider</b>\n\n"
+            text += "Manage auto-click and auto-reply for monitored users."
+
+            await query.message.edit_text(
+                text,
+                reply_markup=self.keyboards.raider_menu()
+            )
+        except Exception as e:
+            logger.error(f"Error showing raider menu: {e}")
+            await query.answer("❌ Error loading raider menu")
+
+    async def show_raider_rules_list(self, query: types.CallbackQuery, page: int = 1):
+        """Display list of raider rules with pagination"""
+        try:
+            rules = await self.rule_model.get_all_rules()
+            dynamic_rules = [r for r in rules if r.get('rule_type') == 'dynamic']
+
+            text = f"<b>📋 Raider Rules ({len(dynamic_rules)})</b>\n\n"
+            if dynamic_rules:
+                text += "Click a rule to view details:"
+            else:
+                text += "No raider rules configured yet.\nAdd one to get started!"
+
+            await query.message.edit_text(
+                text,
+                reply_markup=self.keyboards.raider_rules_list(rules, page)
+            )
+        except Exception as e:
+            logger.error(f"Error showing raider rules list: {e}")
+            await query.answer("❌ Error loading rules")
 
     async def handle_auto_click_action(self, query: types.CallbackQuery, state: FSMContext):
         """Handle auto click related callbacks"""
@@ -45,8 +113,18 @@ class AutoClickHandler:
         rule_id = int(parts[2]) if len(parts) > 2 else None
         logger.debug(f"[DEBUG] Parsed action: {action}, rule_id: {rule_id}")
 
-        if action == 'list':
+        if action == 'list' or action == 'menu':
             await self.show_auto_click_menu(query)
+        elif action == 'scanning_menu':
+            await self.show_scanning_menu(query)
+        elif action == 'scanning_list':
+            page = int(parts[2]) if len(parts) > 2 else 1
+            await self.show_scanning_rules_list(query, page)
+        elif action == 'raider_menu':
+            await self.show_raider_menu(query)
+        elif action == 'raider_list':
+            page = int(parts[2]) if len(parts) > 2 else 1
+            await self.show_raider_rules_list(query, page)
         elif action == 'add':
             await self.start_add_rule(query, state)
         elif action == 'add_dynamic':
@@ -60,6 +138,10 @@ class AutoClickHandler:
             await self.delete_rule(query, rule_id)
         elif action == 'edit_name':
             await self.start_edit_name(query, rule_id, state)
+        elif action == 'toggle_reply':
+            await self.toggle_auto_reply(query, rule_id)
+        elif action == 'edit_ticker':
+            await self.start_edit_ticker(query, rule_id, state)
         elif action == 'edit_user':
             await self.start_edit_dynamic_user(query, rule_id, state)
         elif action == 'edit_buttons':
@@ -222,6 +304,13 @@ class AutoClickHandler:
                         text += f"  • \"{btn_text}\"\n"
                 else:
                     text += f"<b>Button Texts:</b> None\n"
+
+                # Show auto-reply status for dynamic rules
+                auto_reply_enabled = rule.get('auto_reply_enabled', False)
+                ticker_value = rule.get('ticker_value', '')
+                text += f"\n<b>Auto-Reply:</b> {'✅ Enabled' if auto_reply_enabled else '❌ Disabled'}\n"
+                if ticker_value:
+                    text += f"<b>Ticker:</b> {ticker_value}\n"
 
             else:
                 logger.debug(f"[AUTO_CLICK_DEBUG] Processing STATIC rule")
@@ -626,3 +715,53 @@ class AutoClickHandler:
 #         ORDER BY g.title, t.dest_chat_id
 #     """
 #     return await self.db.fetch(query)
+
+    async def toggle_auto_reply(self, query: types.CallbackQuery, rule_id: int):
+        """Toggle auto-reply for a dynamic rule."""
+        logger.debug(f"[AUTO_CLICK_AUTO_REPLY] Toggling auto-reply for rule {rule_id}")
+
+        rule = await self.rule_model.get_by_id(rule_id)
+
+        if rule['rule_type'] != 'dynamic':
+            await query.answer("❌ Auto-reply only works for dynamic rules", show_alert=True)
+            return
+
+        current = rule.get('auto_reply_enabled', False)
+        await self.rule_model.update(rule_id, {'auto_reply_enabled': not current})
+
+        status = "enabled" if not current else "disabled"
+        logger.info(f"[AUTO_CLICK_AUTO_REPLY] Auto-reply {status} for rule {rule_id}")
+        await query.answer(f"✅ Auto-reply {status}", show_alert=False)
+
+        # Refresh detail view
+        await self.show_rule_details(query, rule_id)
+
+    async def start_edit_ticker(self, query: types.CallbackQuery, rule_id: int, state: FSMContext):
+        """Start wizard to edit ticker value."""
+        logger.debug(f"[AUTO_CLICK_AUTO_REPLY] Starting edit ticker for rule {rule_id}")
+
+        await state.set_data({'rule_id': rule_id})
+
+        text = "<b>🏷 Edit Ticker Value</b>\n\n"
+        text += "Enter the ticker symbol to replace <code>{ticker}</code> placeholder in auto-replies.\n\n"
+        text += "<i>Example: PEPE, SHIB, DOGE</i>"
+
+        await query.message.edit_text(
+            text,
+            reply_markup=self.keyboards.cancel_button(f"auto_click:view:{rule_id}"),
+            parse_mode="HTML"
+        )
+        await state.set_state(ManagementStates.editing_dynamic_rule_ticker)
+        await query.answer()
+
+    async def process_edit_ticker(self, message: types.Message, state: FSMContext):
+        """Save ticker value for rule."""
+        ticker = message.text.strip().upper()
+        data = await state.get_data()
+        rule_id = data['rule_id']
+
+        logger.info(f"[AUTO_CLICK_AUTO_REPLY] Setting ticker for rule {rule_id}: {ticker}")
+
+        await self.rule_model.update(rule_id, {'ticker_value': ticker})
+        await message.reply(f"✅ Ticker set to: {ticker}")
+        await state.clear()

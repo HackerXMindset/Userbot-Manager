@@ -80,6 +80,10 @@ class ManagementStates(StatesGroup):
     editing_dynamic_click_rule_user_id = State()
     editing_dynamic_click_rule_buttons = State()
     editing_dynamic_click_rule_userbots = State()
+    editing_dynamic_rule_ticker = State()
+
+    # Dynamic Reply
+    adding_dynamic_reply_message = State()
 
     # Curate Alpha
     curate_alpha_add_rule_name = State()

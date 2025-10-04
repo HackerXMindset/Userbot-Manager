@@ -18,7 +18,7 @@ from app.ui.handlers import (
     MenuHandler, GroupsHandler, UserbotsHandler, TargetsHandler,
     SchedulesHandler, SourcesHandler, AlertsHandler, PnlHandler,
     CommandForwardingHandler, NotificationsHandler, AutoClickHandler,
-    CurateAlphaHandler, TemplatesHandler
+    DynamicReplyHandler, CurateAlphaHandler, TemplatesHandler
 )
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,12 @@ class ManagementBot:
         self.cmd_fwd_handler = CommandForwardingHandler(db, self.keyboards)
         self.notifications_handler = NotificationsHandler(db, self.keyboards)
         self.auto_click_handler = AutoClickHandler(db, self.keyboards)
+
+        # Initialize dynamic reply models and handler
+        from app.models.dynamic_reply import DynamicReplyModel
+        dynamic_reply_model = DynamicReplyModel(db)
+        self.dynamic_reply_handler = DynamicReplyHandler(dynamic_reply_model, self.keyboards)
+
         self.curate_alpha_handler = CurateAlphaHandler(db, self.keyboards)
         self.templates_handler = TemplatesHandler(db, self.keyboards)
         
@@ -212,6 +218,40 @@ class ManagementBot:
         self.dp.callback_query.register(
             self.auto_click_handler.handle_auto_click_action,
             F.data.startswith('auto_click:'),
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        # Dynamic Reply handlers
+        self.dp.callback_query.register(
+            self.dynamic_reply_handler.show_menu,
+            F.data == 'dynamic_reply:menu',
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.callback_query.register(
+            self.dynamic_reply_handler.start_add_reply,
+            F.data == 'dynamic_reply:add',
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        async def show_reply_list_callback(query: types.CallbackQuery):
+            parts = query.data.split(':')
+            page = int(parts[2]) if len(parts) > 2 else 1
+            await self.dynamic_reply_handler.show_reply_list(query, page)
+
+        self.dp.callback_query.register(
+            show_reply_list_callback,
+            F.data.startswith('dynamic_reply:list'),
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        async def delete_reply_callback(query: types.CallbackQuery):
+            reply_id = int(query.data.split(':')[-1])
+            await self.dynamic_reply_handler.delete_reply(query, reply_id)
+
+        self.dp.callback_query.register(
+            delete_reply_callback,
+            F.data.startswith('dynamic_reply:delete:'),
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
 
@@ -457,6 +497,19 @@ class ManagementBot:
         self.dp.message.register(
             self.auto_click_handler.process_edit_name,
             ManagementStates.editing_auto_click_rule_name,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        self.dp.message.register(
+            self.auto_click_handler.process_edit_ticker,
+            ManagementStates.editing_dynamic_rule_ticker,
+            F.from_user.id.in_(settings.admin_telegram_ids_list)
+        )
+
+        # Dynamic Reply handlers
+        self.dp.message.register(
+            self.dynamic_reply_handler.process_add_reply,
+            ManagementStates.adding_dynamic_reply_message,
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
 
