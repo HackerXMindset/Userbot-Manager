@@ -19,23 +19,37 @@ class TokenMonitor:
         self.userbot_id = userbot_id
         self.utils = UserbotUtils()
     
-    async def process_source_message(self, event, source_chat_id: int, target_groups: List[Dict[str, Any]] = None) -> List[str]:
-        """Process a message from a source chat and extract tokens"""
+    async def process_source_message(self, event, source_chat_id: int, target_groups: List[Dict[str, Any]] = None) -> List[tuple]:
+        """Process a message from a source chat and extract tokens
+
+        Returns:
+            List of tuples: [(address, blockchain), ...]
+        """
         try:
             message = event.message
             text = self.utils.get_message_text(message)
-            
-            # Extract Solana addresses
-            addresses = self.utils.extract_solana_addresses(text)
-            
-            if addresses:
-                logger.info(f"Found {len(addresses)} token(s) in source {source_chat_id}: {[addr[:8] + '...' for addr in addresses]}")
-                
+
+            # Debug logging for message content
+            logger.debug(f"[TOKEN_EXTRACT] Source {source_chat_id} - Message text: {text[:200] if text else 'EMPTY'}")
+            logger.debug(f"[TOKEN_EXTRACT] Message type: {type(message).__name__}, has text attr: {hasattr(message, 'text')}, text value: {message.text if hasattr(message, 'text') else 'N/A'}")
+
+            # Extract all token addresses with blockchain tags
+            tagged_addresses = self.utils.extract_token_addresses(text)
+
+            # Count by blockchain for logging
+            sol_count = sum(1 for _, chain in tagged_addresses if chain == "SOL")
+            bnb_count = sum(1 for _, chain in tagged_addresses if chain == "BNB")
+
+            logger.debug(f"[TOKEN_EXTRACT] Extracted {len(tagged_addresses)} addresses from source {source_chat_id}: {sol_count} SOL, {bnb_count} BNB")
+
+            if tagged_addresses:
+                logger.info(f"Found {len(tagged_addresses)} token(s) in source {source_chat_id}: {[(addr[:8] + '...', chain) for addr, chain in tagged_addresses]}")
+
                 # Process each token
-                for address in addresses:
+                for address, blockchain in tagged_addresses:
                     await self._process_token_address(address, event, target_groups or [])
-            
-            return addresses
+
+            return tagged_addresses
             
         except Exception as e:
             logger.error(f"Error processing source message: {e}")

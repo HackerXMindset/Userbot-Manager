@@ -14,18 +14,50 @@ logger = logging.getLogger(__name__)
 
 class UserbotUtils:
     """Utility functions for userbot operations"""
-    
+
     def __init__(self):
         # Solana address pattern
         self.solana_pattern = re.compile(settings.solana_pattern)
-    
+        # BNB/BSC address pattern
+        self.bnb_pattern = re.compile(settings.bnb_pattern)
+
     def extract_solana_addresses(self, text: str) -> List[str]:
         """Extract Solana addresses from text"""
         if not text:
             return []
-        
+
         matches = self.solana_pattern.findall(text)
         return list(set(matches))  # Remove duplicates
+
+    def extract_bnb_addresses(self, text: str) -> List[str]:
+        """Extract BNB/BSC addresses from text"""
+        if not text:
+            return []
+
+        matches = self.bnb_pattern.findall(text)
+        return list(set(matches))  # Remove duplicates
+
+    def extract_token_addresses(self, text: str) -> List[Tuple[str, str]]:
+        """Extract all token addresses with blockchain tags from text
+
+        Returns:
+            List of tuples: [(address, blockchain), ...]
+            Example: [("7xK...", "SOL"), ("0x123...", "BNB")]
+        """
+        if not text:
+            return []
+
+        sol_addresses = self.extract_solana_addresses(text)
+        bnb_addresses = self.extract_bnb_addresses(text)
+
+        # Tag each address with its blockchain
+        tagged_addresses = []
+        for addr in sol_addresses:
+            tagged_addresses.append((addr, "SOL"))
+        for addr in bnb_addresses:
+            tagged_addresses.append((addr, "BNB"))
+
+        return tagged_addresses
     
     def get_message_text(self, message) -> str:
         """Safely get message text as string"""

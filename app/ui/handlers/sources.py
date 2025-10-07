@@ -3,7 +3,8 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 import logging
 import time
-from typing import Optional
+import json
+from typing import Optional, List
 
 from app.ui.keyboards import Keyboards
 from app.ui.states import ManagementStates
@@ -115,7 +116,59 @@ class SourcesHandler:
         """Handle sources actions"""
         logger.debug(f"handle_sources_action received callback: {query.data}")
         parts = query.data.split(':')
-        
+
+        # Handle routing blockchain editing
+        if parts[0] == 'routing':
+            logger.info(f"[BLOCKCHAIN_DEBUG] Routing callback received: {query.data}")
+            logger.info(f"[BLOCKCHAIN_DEBUG] Parts split: {parts}")
+            try:
+                action = parts[1]
+                logger.info(f"[BLOCKCHAIN_DEBUG] Action: {action}")
+
+                if action == 'edit_chains':
+                    rule_id = int(parts[2])
+                    logger.info(f"[BLOCKCHAIN_DEBUG] edit_chains - rule_id={rule_id}")
+                    await self.show_blockchain_selector(query, rule_id, state=state)
+
+                elif action == 'blockchain':
+                    logger.info(f"[BLOCKCHAIN_DEBUG] blockchain action - parts[2]={parts[2]}")
+                    if parts[2].startswith('toggle_'):
+                        chain = parts[2].split('_')[1].upper()  # toggle_sol -> SOL
+                        rule_id = int(parts[3]) if parts[3] != 'new' else None
+                        logger.info(f"[BLOCKCHAIN_DEBUG] toggle - chain={chain}, rule_id={rule_id}")
+                        if rule_id:
+                            await self.toggle_blockchain(query, rule_id, chain, state=state)
+                        else:
+                            logger.warning(f"[BLOCKCHAIN_DEBUG] rule_id is None, cannot toggle")
+                    else:
+                        logger.warning(f"[BLOCKCHAIN_DEBUG] parts[2] does not start with 'toggle_': {parts[2]}")
+
+                elif action == 'blockchain_confirm':
+                    rule_id = int(parts[2]) if parts[2] != 'new' else None
+                    logger.info(f"[BLOCKCHAIN_DEBUG] blockchain_confirm - rule_id={rule_id}")
+                    if rule_id:
+                        await self.confirm_blockchain_selection(query, rule_id, state=state)
+                    else:
+                        logger.warning(f"[BLOCKCHAIN_DEBUG] rule_id is None, cannot confirm")
+
+                elif action == 'view':
+                    # Back button from blockchain selector
+                    rule_id = int(parts[2])
+                    logger.info(f"[BLOCKCHAIN_DEBUG] view - redirecting to source details for rule {rule_id}")
+                    rule = await self.db.fetchrow("SELECT source_chat_id FROM routing_rules WHERE id = $1", rule_id)
+                    if rule:
+                        await self.show_source_details(query, rule['source_chat_id'])
+                    else:
+                        await query.answer("❌ Rule not found")
+
+                else:
+                    logger.warning(f"[BLOCKCHAIN_DEBUG] Unknown routing action: {action}")
+
+            except Exception as e:
+                logger.error(f"[BLOCKCHAIN_DEBUG] ❌ ERROR in routing handler: {e}", exc_info=True)
+                await query.answer(f"❌ Error: {str(e)}", show_alert=True)
+            return
+
         # Handle pagination for manage_global
         if parts[0] == 'sources_manage_page':
             if parts[1] == 'page':
@@ -150,7 +203,12 @@ class SourcesHandler:
         elif action == 'manage_global':
             await self.show_manage_global_sources(query, page=1)
         elif action == 'routing':
-            page = int(parts[2]) if len(parts) > 2 else 1
+            # Handle pagination format: sources:routing:page:2
+            if len(parts) > 2 and parts[2] == 'page':
+                page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
+            else:
+                # Handle direct format: sources:routing:2 (backward compat)
+                page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
             await self.show_routing_menu(query, page=page)
         elif action == 'source_details':
             source_id = int(parts[2])
@@ -397,14 +455,20 @@ class SourcesHandler:
                 for route in routes:
                     route_status = "✅" if route['enabled'] else "❌"
                     group_name = route['group_title'] or f"Chat {route['tg_chat_id']}"
+
+                    # Format blockchain filter
+                    allowed_chains = route.get('allowed_chains', ['SOL'])
+                    chain_emojis = self.keyboards.format_blockchain_emojis(allowed_chains)
+
                     text += f"{route_status} → <b>{group_name}</b>\n"
+                    text += f"     {chain_emojis}\n"
 
                     # Add userbot assignments if present
                     userbot_info = []
                     if route['monitoring_userbot_name']:
-                        userbot_info.append(f"👁️ Monitor: {route['monitoring_userbot_name']}")
+                        userbot_info.append(f"👁️ {route['monitoring_userbot_name']}")
                     if route['forwarding_userbot_name']:
-                        userbot_info.append(f"📤 Forward: {route['forwarding_userbot_name']}")
+                        userbot_info.append(f"📤 {route['forwarding_userbot_name']}")
 
                     if userbot_info:
                         text += f"     {' | '.join(userbot_info)}\n"
@@ -446,8 +510,12 @@ class SourcesHandler:
                 group_name = (route['group_title'] or f"Chat {route['tg_chat_id']}")[:20]
                 keyboard_rows.append([
                     InlineKeyboardButton(
-                        text=f"🤖 Edit Bots → {group_name}",
+                        text=f"🤖 Bots → {group_name}",
                         callback_data=f"sources:create_route:{source_id}:{route['target_group_id']}"
+                    ),
+                    InlineKeyboardButton(
+                        text=f"⛓️ Chains",
+                        callback_data=f"routing:edit_chains:{route['id']}"
                     ),
                     InlineKeyboardButton(
                         text="🗑️",
@@ -1501,3 +1569,153 @@ class SourcesHandler:
         except Exception as e:
             logger.error(f"Error clearing source bots: {e}")
             await query.answer("❌ Error clearing bots")
+
+    async def show_blockchain_selector(self, query: types.CallbackQuery, rule_id: int, current_chains: List[str] = None, state: FSMContext = None):
+        """Show blockchain selector for routing rule"""
+        logger.info(f"[BLOCKCHAIN_DEBUG] show_blockchain_selector called: rule_id={rule_id}, current_chains={current_chains}")
+        try:
+            # Get routing rule if current_chains not provided
+            if current_chains is None:
+                logger.info(f"[BLOCKCHAIN_DEBUG] Fetching rule from DB for rule_id={rule_id}")
+                rule = await self.db.fetchrow("SELECT * FROM routing_rules WHERE id = $1", rule_id)
+                logger.info(f"[BLOCKCHAIN_DEBUG] DB returned rule: {dict(rule) if rule else None}")
+                if not rule:
+                    logger.error(f"[BLOCKCHAIN_DEBUG] Rule {rule_id} not found in database")
+                    await query.answer("❌ Rule not found")
+                    return
+                # Parse JSON if it's a string, otherwise use as-is
+                allowed_chains_raw = rule.get('allowed_chains', ['SOL'])
+                if isinstance(allowed_chains_raw, str):
+                    current_chains = json.loads(allowed_chains_raw)
+                else:
+                    current_chains = allowed_chains_raw
+                logger.info(f"[BLOCKCHAIN_DEBUG] Loaded current_chains from DB: {current_chains}")
+
+            # Store in state for toggle handling
+            if state:
+                await state.update_data(blockchain_edit_rule_id=rule_id, blockchain_edit_chains=current_chains)
+                logger.info(f"[BLOCKCHAIN_DEBUG] Updated FSM state with rule_id={rule_id}, chains={current_chains}")
+            else:
+                logger.warning(f"[BLOCKCHAIN_DEBUG] No FSM state provided, skipping state update")
+
+            text = "<b>⛓️ Select Blockchains</b>\n\n"
+            text += "Choose which blockchains this routing rule will forward:\n\n"
+            text += "🟣 <b>Solana (SOL)</b> - Solana tokens\n"
+            text += "🟡 <b>BNB Smart Chain</b> - BSC tokens\n\n"
+            text += "⚠️ <b>At least one blockchain must be selected</b>"
+
+            logger.info(f"[BLOCKCHAIN_DEBUG] Creating keyboard with chains={current_chains}, rule_id={rule_id}")
+            keyboard = self.keyboards.blockchain_selector(current_chains, rule_id, context="routing")
+            logger.info(f"[BLOCKCHAIN_DEBUG] Keyboard created, editing message")
+            await query.message.edit_text(text, reply_markup=keyboard)
+            logger.info(f"[BLOCKCHAIN_DEBUG] Message edited successfully")
+
+        except Exception as e:
+            logger.error(f"[BLOCKCHAIN_DEBUG] ❌ ERROR in show_blockchain_selector: {e}", exc_info=True)
+            await query.answer(f"❌ Error: {str(e)}", show_alert=True)
+
+    async def toggle_blockchain(self, query: types.CallbackQuery, rule_id: int, chain: str, state: FSMContext = None):
+        """Toggle blockchain selection"""
+        logger.info(f"[BLOCKCHAIN_DEBUG] toggle_blockchain called: rule_id={rule_id}, chain={chain}")
+        try:
+            # Try to get current chains from FSM state first (preserves previous toggles)
+            current_chains = None
+            if state:
+                data = await state.get_data()
+                current_chains = data.get('blockchain_edit_chains')
+                if current_chains:
+                    logger.info(f"[BLOCKCHAIN_DEBUG] Using chains from FSM state: {current_chains}")
+
+            # Only fetch from DB if not in FSM state
+            if current_chains is None:
+                logger.info(f"[BLOCKCHAIN_DEBUG] No FSM state, fetching from DB for rule_id={rule_id}")
+                rule = await self.db.fetchrow("SELECT allowed_chains FROM routing_rules WHERE id = $1", rule_id)
+                logger.info(f"[BLOCKCHAIN_DEBUG] DB returned: {dict(rule) if rule else None}")
+                if not rule:
+                    logger.error(f"[BLOCKCHAIN_DEBUG] Rule {rule_id} not found")
+                    await query.answer("❌ Rule not found", show_alert=True)
+                    return
+
+                # Parse JSON if it's a string, otherwise use as-is
+                allowed_chains_raw = rule['allowed_chains']
+                if isinstance(allowed_chains_raw, str):
+                    current_chains = json.loads(allowed_chains_raw)
+                else:
+                    current_chains = list(allowed_chains_raw)
+                logger.info(f"[BLOCKCHAIN_DEBUG] Loaded from DB: {current_chains}")
+
+            logger.info(f"[BLOCKCHAIN_DEBUG] Current chains before toggle: {current_chains}")
+
+            # Toggle chain
+            if chain in current_chains:
+                current_chains.remove(chain)
+                logger.info(f"[BLOCKCHAIN_DEBUG] Removed {chain} from chains: {current_chains}")
+            else:
+                current_chains.append(chain)
+                logger.info(f"[BLOCKCHAIN_DEBUG] Added {chain} to chains: {current_chains}")
+
+            # Update state with fresh data
+            if state:
+                await state.update_data(blockchain_edit_rule_id=rule_id, blockchain_edit_chains=current_chains)
+                logger.info(f"[BLOCKCHAIN_DEBUG] Updated FSM state")
+            else:
+                logger.warning(f"[BLOCKCHAIN_DEBUG] No FSM state provided, skipping state update")
+
+            # Refresh display
+            logger.info(f"[BLOCKCHAIN_DEBUG] Refreshing blockchain selector display")
+            await self.show_blockchain_selector(query, rule_id, current_chains, state=state)
+            await query.answer()
+            logger.info(f"[BLOCKCHAIN_DEBUG] Toggle completed successfully")
+
+        except Exception as e:
+            logger.error(f"[BLOCKCHAIN_DEBUG] ❌ ERROR in toggle_blockchain: {e}", exc_info=True)
+            await query.answer(f"❌ Error: {str(e)}", show_alert=True)
+
+    async def confirm_blockchain_selection(self, query: types.CallbackQuery, rule_id: int, state: FSMContext = None):
+        """Confirm and save blockchain selection"""
+        logger.info(f"[BLOCKCHAIN_DEBUG] confirm_blockchain_selection called: rule_id={rule_id}")
+        try:
+            # Get selected chains from state
+            if state:
+                data = await state.get_data()
+                selected_chains = data.get('blockchain_edit_chains', ['SOL'])
+                logger.info(f"[BLOCKCHAIN_DEBUG] Selected chains from FSM state: {selected_chains}")
+            else:
+                logger.warning(f"[BLOCKCHAIN_DEBUG] No FSM state provided, fetching from DB")
+                rule = await self.db.fetchrow("SELECT allowed_chains FROM routing_rules WHERE id = $1", rule_id)
+                if rule:
+                    # Parse JSON if it's a string, otherwise use as-is
+                    allowed_chains_raw = rule['allowed_chains']
+                    if isinstance(allowed_chains_raw, str):
+                        selected_chains = json.loads(allowed_chains_raw)
+                    else:
+                        selected_chains = list(allowed_chains_raw)
+                else:
+                    selected_chains = ['SOL']
+                logger.info(f"[BLOCKCHAIN_DEBUG] Selected chains from DB: {selected_chains}")
+
+            # Validate: at least one chain must be selected
+            if not selected_chains:
+                logger.warning(f"[BLOCKCHAIN_DEBUG] No chains selected, showing validation error")
+                await query.answer("⚠️ Select at least one blockchain", show_alert=True)
+                return
+
+            # Update routing rule
+            logger.info(f"[BLOCKCHAIN_DEBUG] Updating rule {rule_id} with chains: {selected_chains}")
+            await self.source_model.update_routing_rule_chains(rule_id, selected_chains)
+            logger.info(f"[BLOCKCHAIN_DEBUG] Rule updated successfully")
+
+            # Get source_id for redirect
+            rule = await self.db.fetchrow("SELECT source_chat_id FROM routing_rules WHERE id = $1", rule_id)
+            logger.info(f"[BLOCKCHAIN_DEBUG] Fetched source_chat_id: {rule['source_chat_id'] if rule else None}")
+            if rule:
+                await query.answer("✅ Blockchain filter updated!")
+                logger.info(f"[BLOCKCHAIN_DEBUG] Redirecting to source details for source_id={rule['source_chat_id']}")
+                await self.show_source_details(query, rule['source_chat_id'])
+            else:
+                logger.error(f"[BLOCKCHAIN_DEBUG] Rule {rule_id} not found after update")
+                await query.answer("❌ Rule not found")
+
+        except Exception as e:
+            logger.error(f"[BLOCKCHAIN_DEBUG] ❌ ERROR in confirm_blockchain_selection: {e}", exc_info=True)
+            await query.answer(f"❌ Error: {str(e)}", show_alert=True)

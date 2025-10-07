@@ -1,6 +1,21 @@
+"""
+DexScreener Token Monitoring Service - Completely Rewritten
+
+Architecture:
+- DexScreener API: Fast batch polling for price updates (every 30s)
+- Jupiter API: Authoritative source for initialization and alert verification
+- Two-phase alert system: Quick check → Jupiter verification → Fire
+
+Data Flow:
+1. Token detected → Jupiter API (first_seen_mc baseline)
+2. Polling loop → DexScreener API (fast last_mc updates)
+3. Alert candidate → Jupiter API verification → Queue if confirmed
+"""
+
 import asyncio
 import aiohttp
 import logging
+import json
 from typing import Dict, Any, Optional, List
 from decimal import Decimal, InvalidOperation
 from datetime import datetime
@@ -11,12 +26,13 @@ from app.models import TokenModel, TargetModel
 from app.models.call_queue import CallQueueModel
 from app.models.target_alert_state import TargetAlertStateModel
 from app.userbot.session_manager import SessionManager
-from app.services.rust_bridge import rust_dex_bridge
+from app.services.jupiter_api import get_jupiter_service
 
 logger = logging.getLogger(__name__)
 
 # Singleton instance for global access
 _dex_service_instance = None
+
 
 def get_dex_service():
     """Get the singleton DexScreener service instance"""
@@ -25,62 +41,83 @@ def get_dex_service():
         _dex_service_instance = DexScreenerService()
     return _dex_service_instance
 
+
 class DexScreenerService:
-    """DexScreener integration for token price monitoring"""
+    """
+    DexScreener integration for token price monitoring
+
+    Responsibilities:
+    - Token initialization (Jupiter API only)
+    - Batch price polling (DexScreener API)
+    - Alert verification (Jupiter API)
+    - Drop monitoring and auto-stop
+    """
 
     BASE_URL = "https://api.dexscreener.com/tokens/v1/solana"
-    JUPITER_TOLERANCE = Decimal('0.20')  # Acceptable delta between Dex and Jupiter MC readings
-    
+    MIN_MC_THRESHOLD = Decimal('8000')  # Stop monitoring below $8K
+
     def __init__(self):
         self.token_model = TokenModel(db)
         self.call_queue_model = CallQueueModel(db)
         self.target_model = TargetModel(db)
         self.target_alert_state_model = TargetAlertStateModel(db)
+        self.jupiter_service = get_jupiter_service()
+
         self.session: Optional[aiohttp.ClientSession] = None
         self.running = False
         self._task: Optional[asyncio.Task] = None
         self.userbot_manager = None
 
     def set_userbot_manager(self, manager):
-        """Set the UserbotManager instance."""
+        """Set the UserbotManager instance"""
         self.userbot_manager = manager
         logger.info("UserbotManager instance set in DexScreenerService")
-    
+
     async def start(self):
-        """Start the DexScreener monitoring service"""
+        """Start the monitoring service"""
         if self.running:
             return
-        
+
+        # Start Jupiter service
+        await self.jupiter_service.start()
+
+        # Start DexScreener session
         self.session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=settings.dex_timeout)
         )
-        
+
         self.running = True
         self._task = asyncio.create_task(self._monitoring_loop())
         logger.info("DexScreener service started")
-    
+
     async def stop(self):
-        """Stop the DexScreener monitoring service"""
+        """Stop the monitoring service"""
         if not self.running:
             return
-        
+
         self.running = False
-        
+
         if self._task:
             self._task.cancel()
             try:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        
+
         if self.session:
             await self.session.close()
             self.session = None
-        
+
+        await self.jupiter_service.stop()
+
         logger.info("DexScreener service stopped")
-    
+
+    # ==================== MONITORING LOOP ====================
+
     async def _monitoring_loop(self):
-        """Main monitoring loop"""
+        """Main monitoring loop - polls DexScreener every 30s"""
+        logger.info(f"Monitoring loop started (polling every {settings.dex_poll_secs}s)")
+
         while self.running:
             try:
                 await self._update_token_prices()
@@ -88,274 +125,221 @@ class DexScreenerService:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"DexScreener monitoring error: {e}")
+                logger.error(f"Monitoring loop error: {e}", exc_info=True)
                 await asyncio.sleep(30)
-    
+
     async def _update_token_prices(self):
-        """Update prices for all active tokens"""
+        """Update prices for all active tokens using DexScreener"""
         try:
             active_tokens_records = await self.token_model.get_active_tokens()
             active_tokens = [dict(t) for t in active_tokens_records]
-            
+
             if not active_tokens:
                 return
-            
-            # Process all tokens with optimal 30-token API batching
+
+            logger.debug(f"Updating {len(active_tokens)} active tokens")
+
+            # Process in batches of 30 (DexScreener API limit)
             await self._process_token_batch(active_tokens)
-                    
+
         except Exception as e:
-            logger.error(f"Error updating token prices: {e}")
-    
+            logger.error(f"Error updating token prices: {e}", exc_info=True)
+
     async def _process_token_batch(self, tokens: List[Dict[str, Any]]):
-        """Process a batch of tokens using batch API calls"""
-        # Group tokens into chunks of 30 for batch API calls
+        """Process tokens in batches using DexScreener batch API"""
         batch_size = 30
+
         for i in range(0, len(tokens), batch_size):
             batch = tokens[i:i + batch_size]
             try:
-                # Get addresses for this batch
                 addresses = [token['address'] for token in batch]
-                
-                # Fetch data for all tokens in this batch with single API call
+
+                # Single batch API call for up to 30 tokens
                 batch_data = await self._fetch_batch_token_data(addresses)
-                
+
                 if batch_data:
-                    # Process each token with its corresponding data
+                    # Process each token with its data
                     for token in batch:
                         token_address = token['address']
-                        # Find the data for this specific token in the batch response
-                        token_pairs = [pair for pair in batch_data 
-                                     if pair.get('baseToken', {}).get('address') == token_address]
+                        token_pairs = [
+                            pair for pair in batch_data
+                            if pair.get('baseToken', {}).get('address') == token_address
+                        ]
                         if token_pairs:
                             await self._update_token_from_data(token, token_pairs)
-                        
-                # Rate limiting: 0.2s delay between batches (5 req/sec = 300 req/min)
+
+                # Rate limiting: 0.2s delay between batches (5 req/sec max)
                 if i + batch_size < len(tokens):
                     await asyncio.sleep(0.2)
-                    
+
             except Exception as e:
-                logger.error(f"Error processing batch of {len(batch)} tokens: {e}")
-                # Fallback to individual processing for this batch
+                logger.error(f"Error processing batch: {e}")
+                # Fallback: process individually
                 for token in batch:
                     try:
                         token_data = await self._fetch_token_data(token['address'])
                         if token_data:
                             await self._update_token_from_data(token, token_data)
-                    except Exception as e:
-                        logger.error(f"Error processing token {token['address'][:8]}...: {e}")
-    
+                    except Exception as token_error:
+                        logger.error(f"Error processing {token['address'][:8]}...: {token_error}")
+
+    # ==================== DEXSCREENER API CALLS ====================
+
     async def _fetch_token_data(self, token_address: str, retries: int = 0) -> Optional[List[Dict[str, Any]]]:
-        """Fetch token data from DexScreener API"""
+        """Fetch token data from DexScreener API (single token)"""
         if not self.session:
-            logger.error(f"[DEXSCREENER] HTTP session not initialized for token {token_address}")
+            logger.error(f"[DEXSCREENER] Session not initialized for {token_address[:8]}...")
             return None
-        
+
         try:
             url = f"{self.BASE_URL}/{token_address}"
-            logger.debug(f"[DEXSCREENER] Requesting: {url}")
-            
+
             async with self.session.get(url) as response:
-                # Get response body first for logging
-                response_text = await response.text()
-                logger.debug(f"[DEXSCREENER] Response status: {response.status}, Content-Length: {len(response_text)}")
-                
                 if response.status == 200:
-                    try:
-                        data = await response.json(content_type=None)  # Allow any content type
-                        logger.debug(f"[DEXSCREENER] Raw response type: {type(data)}")
-                        
-                        # API documentation says it always returns an array
-                        if isinstance(data, list):
-                            if len(data) == 0:
-                                logger.debug(f"[DEXSCREENER] No trading pairs found for token {token_address}")
-                                return []
-                            else:
-                                logger.debug(f"[DEXSCREENER] Found {len(data)} trading pairs for token {token_address}")
-                                # Log first pair details for debugging
-                                first_pair = data[0]
-                                logger.debug(f"[DEXSCREENER] First pair marketCap: {first_pair.get('marketCap', 'N/A')}, dexId: {first_pair.get('dexId', 'N/A')}")
-                                return data
-                        else:
-                            logger.error(f"[DEXSCREENER] Unexpected response format for {token_address}. Expected list, got {type(data)}")
-                            logger.error(f"[DEXSCREENER] Response content: {response_text[:1000]}...")
-                            return None
-                            
-                    except Exception as json_error:
-                        logger.error(f"[DEXSCREENER] JSON parsing failed for {token_address}: {json_error}")
-                        logger.error(f"[DEXSCREENER] Raw response: {response_text[:1000]}...")
+                    data = await response.json(content_type=None)
+
+                    if isinstance(data, list):
+                        if len(data) == 0:
+                            logger.debug(f"[DEXSCREENER] No pairs for {token_address[:8]}...")
+                            return []
+                        return data
+                    else:
+                        logger.error(f"[DEXSCREENER] Unexpected format for {token_address[:8]}...")
                         return None
-                        
+
                 elif response.status == 404:
-                    logger.info(f"[DEXSCREENER] Token {token_address} not found (404) - likely new or unlisted token")
+                    logger.debug(f"[DEXSCREENER] Token {token_address[:8]}... not found")
                     return None
-                    
+
                 elif response.status == 429:  # Rate limited
-                    logger.warning(f"[DEXSCREENER] Rate limited (429) for {token_address}, retry {retries + 1}/{settings.dex_max_retries}")
                     if retries < settings.dex_max_retries:
                         wait_time = 2 ** retries
-                        logger.info(f"[DEXSCREENER] Waiting {wait_time}s before retry...")
+                        logger.warning(f"[DEXSCREENER] Rate limited, waiting {wait_time}s...")
                         await asyncio.sleep(wait_time)
                         return await self._fetch_token_data(token_address, retries + 1)
                     else:
-                        logger.error(f"[DEXSCREENER] Max retries ({settings.dex_max_retries}) exceeded for {token_address}")
+                        logger.error(f"[DEXSCREENER] Max retries exceeded for {token_address[:8]}...")
                         return None
-                        
-                elif response.status == 400:
-                    logger.error(f"[DEXSCREENER] Bad request (400) for token {token_address} - invalid token address?")
-                    logger.error(f"[DEXSCREENER] Response: {response_text[:500]}...")
-                    return None
-                    
-                elif response.status >= 500:
-                    logger.error(f"[DEXSCREENER] Server error ({response.status}) for token {token_address}")
-                    logger.error(f"[DEXSCREENER] Response: {response_text[:500]}...")
-                    return None
-                    
+
                 else:
-                    logger.error(f"[DEXSCREENER] Unexpected status {response.status} for token {token_address}")
-                    logger.error(f"[DEXSCREENER] Response: {response_text[:500]}...")
+                    logger.error(f"[DEXSCREENER] Status {response.status} for {token_address[:8]}...")
                     return None
-                    
+
         except asyncio.TimeoutError:
-            logger.error(f"[DEXSCREENER] Timeout ({settings.dex_timeout}s) fetching data for token {token_address}")
-        except aiohttp.ClientError as e:
-            logger.error(f"[DEXSCREENER] HTTP client error for token {token_address}: {type(e).__name__}: {e}")
+            logger.error(f"[DEXSCREENER] Timeout for {token_address[:8]}...")
         except Exception as e:
-            logger.error(f"[DEXSCREENER] Unexpected error fetching token {token_address}: {type(e).__name__}: {e}")
-            import traceback
-            logger.error(f"[DEXSCREENER] Traceback: {traceback.format_exc()}")
-        
+            logger.error(f"[DEXSCREENER] Error for {token_address[:8]}...: {e}")
+
         return None
-    
+
     async def _fetch_batch_token_data(self, addresses: List[str], retries: int = 0) -> Optional[List[Dict[str, Any]]]:
-        """Fetch token data for multiple addresses using batch API"""
+        """Fetch data for multiple tokens in one call (DexScreener batch API)"""
         if not self.session or not addresses:
             return None
-        
+
         try:
-            # Limit to 30 addresses per batch (API limit)
+            # Limit to 30 addresses
             if len(addresses) > 30:
                 addresses = addresses[:30]
-                logger.warning(f"Batch size limited to 30 tokens (was {len(addresses)})")
-            
-            # Build batch URL with comma-separated addresses
+
+            # Comma-separated addresses
             addresses_str = ",".join(addresses)
             url = f"{self.BASE_URL}/{addresses_str}"
-            
+
             async with self.session.get(url) as response:
                 if response.status == 200:
                     data = await response.json()
-                    # API returns array of pairs for batch requests
                     if isinstance(data, list):
                         return data
                     else:
-                        logger.warning(f"Unexpected batch response format: {type(data)}")
+                        logger.warning(f"[DEXSCREENER] Unexpected batch format")
                         return None
-                elif response.status == 429:  # Rate limited
+
+                elif response.status == 429:
                     if retries < settings.dex_max_retries:
-                        await asyncio.sleep(2 ** retries)  # Exponential backoff
+                        await asyncio.sleep(2 ** retries)
                         return await self._fetch_batch_token_data(addresses, retries + 1)
+
                 else:
-                    logger.warning(f"DexScreener batch API returned {response.status} for {len(addresses)} tokens")
-                    
+                    logger.warning(f"[DEXSCREENER] Batch API returned {response.status}")
+
         except asyncio.TimeoutError:
-            logger.warning(f"Timeout fetching batch data for {len(addresses)} tokens")
+            logger.warning(f"[DEXSCREENER] Batch timeout for {len(addresses)} tokens")
         except Exception as e:
-            logger.error(f"Error fetching batch token data: {e}")
-        
+            logger.error(f"[DEXSCREENER] Batch error: {e}")
+
         return None
-    
+
+    # ==================== TOKEN UPDATE LOGIC ====================
+
     async def _update_token_from_data(self, token: Dict[str, Any], api_data: List[Dict[str, Any]]):
-        """Update token with data from API"""
+        """
+        Update token with DexScreener data and check alerts
+
+        Flow:
+        1. Extract MC from DexScreener
+        2. Update last_mc in database
+        3. Check alerts (with Jupiter verification)
+        4. Check drop conditions
+        5. Auto-stop if needed
+        """
         try:
             if not api_data:
                 return
-            
+
+            # Get best trading pair
             best_pair = api_data[0]
-            
+
             market_cap = best_pair.get('marketCap')
             if not market_cap:
                 return
-            
-            new_mc = Decimal(str(market_cap))
+
+            dex_mc = Decimal(str(market_cap))
             ticker = best_pair.get('baseToken', {}).get('symbol')
 
-            # Update token in database
-            await self.token_model.update_market_cap(token['id'], new_mc, ticker)
-            
-            # Check for per-target gain alerts
-            await self._check_per_target_alerts(token, new_mc)
+            # Update token's last_mc (from DexScreener - for UI/stats)
+            await self.token_model.update_market_cap(token['id'], dex_mc, ticker)
 
-            # Check for drop alerts after market cap update
-            if await self._check_drop_alerts(token, new_mc):
-                return  # Stop further processing if token monitoring was stopped
+            # Check for alerts (will verify with Jupiter before firing)
+            await self._check_alerts_with_verification(token, dex_mc)
 
-            # Stop monitoring tokens below $8K market cap
-            if new_mc < 8000:
+            # Check for drop alerts
+            if await self._check_drop_alerts(token, dex_mc):
+                return  # Token was stopped
+
+            # Stop monitoring if too small
+            if dex_mc < self.MIN_MC_THRESHOLD:
                 await self.token_model.set_status(token['id'], 'stopped')
-                logger.info(f"Stopped monitoring {token['address'][:8]}... (MC below $8K: ${new_mc:,.0f})")
+                logger.info(f"Stopped {token['address'][:8]}... (MC below ${self.MIN_MC_THRESHOLD}: ${dex_mc:,.0f})")
             else:
-                logger.debug(f"Updated {token['address'][:8]}... MC: ${new_mc:,.0f}")
-            
+                logger.debug(f"Updated {token['address'][:8]}... MC: ${dex_mc:,.0f}")
+
         except Exception as e:
-            logger.error(f"Error updating token from API data: {e}")
+            logger.error(f"Error updating token from data: {e}", exc_info=True)
 
-    def _format_dynamic_alert_message(self, token: Dict[str, Any], state: Dict[str, Any], current_multiplier: Decimal, alert_type: str) -> str:
-        """Formats the alert message for sensitivity and threshold alerts."""
-        
-        def select_gain_emoji(multiplier: float) -> str:
-            if multiplier < 3: return "🔥"
-            if multiplier < 5: return "🚀"
-            if multiplier < 10: return "🌙"
-            return "🌕"
+    # ==================== ALERT SYSTEM (TWO-PHASE) ====================
 
-        def format_time_delta(start_time: datetime) -> str:
-            if not start_time:
-                return ""
-            now = datetime.utcnow()
-            delta = now - start_time.replace(tzinfo=None) # Ensure timezone-naive comparison
-            
-            days = delta.days
-            hours, remainder = divmod(delta.seconds, 3600)
-            minutes, _ = divmod(remainder, 60)
-            
-            if days > 0:
-                return f"{days}d {hours}h ago"
-            elif hours > 0:
-                return f"{hours}h {minutes}m ago"
-            else:
-                return f"{minutes}m ago"
-
-        emoji = select_gain_emoji(float(current_multiplier))
-        symbol = token.get('ticker', token['address'][:6])
-        mc_str = f"${state['initial_market_cap']:,.0f}"
-        time_str = format_time_delta(state['first_sent_at'])
-
-        return f"{emoji} {symbol} is at {current_multiplier:.2f}x!\nMC: {mc_str} | {time_str}"
-
-    async def _check_per_target_alerts(self, token: Dict[str, Any], new_mc: Decimal):
+    async def _check_alerts_with_verification(self, token: Dict[str, Any], dex_mc: Decimal):
         """
-        Checks for and triggers sensitivity and threshold alerts for each target
-        associated with the token's source group.
+        Two-phase alert checking:
+        1. Quick check with DexScreener MC (fast screening)
+        2. Verify with Jupiter MC before firing (authoritative)
+
+        This prevents false alerts from bad DexScreener data while keeping polling fast.
         """
-        import json
         source_group_id = token.get('source_group_id')
         if not source_group_id:
-            logger.debug(f"[ALERT_SKIP] Token {token['address'][:8]}... has no source_group_id - cannot check alerts")
             return
 
-        # 1. Fetch all targets for the group that have alerts enabled
+        # Get all targets monitoring this token with alerts enabled
         targets = await self.target_model.get_targets_for_source_group(source_group_id, alerts_enabled_only=True)
         if not targets:
-            logger.debug(f"[ALERT_SKIP] No targets with alerts enabled for group {source_group_id} (token {token['address'][:8]}...)")
             return
-
-        logger.debug(f"[ALERT_CHECK] Token {token['address'][:8]}... MC ${new_mc:,.0f} - checking {len(targets)} target(s)")
 
         for target in targets:
             try:
-                # 2. Get the alert state for this specific token-target pair
-                # Use token's baseline (first_seen_mc) as initial_market_cap, not current MC
-                baseline_mc = token.get('first_seen_mc') or new_mc
+                # Get alert state for this target+token pair
+                baseline_mc = token.get('first_seen_mc') or dex_mc
                 state = await self.target_alert_state_model.get_or_create(
                     target_id=target['id'],
                     token_id=token['id'],
@@ -363,304 +347,266 @@ class DexScreenerService:
                 )
 
                 if not state or not state['initial_market_cap'] or state['initial_market_cap'] <= 0:
-                    logger.debug(f"[ALERT_SKIP] Target {target['id']} for token {token['id']}, missing baseline MC")
                     continue
 
-                # 3. Calculate current multiplier
-                current_multiplier = new_mc / state['initial_market_cap']
-                last_alert_multiplier = state['last_alert_multiplier']
+                baseline = state['initial_market_cap']
+                last_multiplier = state['last_alert_multiplier']
 
-                logger.debug(f"[ALERT_EVAL] Target {target['id']}: {current_multiplier:.2f}x (last alert: {last_alert_multiplier:.2f}x)")
+                # PHASE 1: Quick check with DexScreener MC
+                dex_multiplier = dex_mc / baseline
 
-                # 4. Evaluate alert modes for this target
-                modes = self.target_model.parse_alert_modes(target)
-                next_alert_to_fire = None
-                alert_type = None
+                alert_to_fire = self._calculate_next_alert(
+                    current_multiplier=dex_multiplier,
+                    last_multiplier=last_multiplier,
+                    target=target
+                )
 
-                # Check threshold alerts
-                if modes.get('threshold', False):
-                    thresholds = self.target_model.parse_alert_thresholds(target)
-                    for threshold in sorted(thresholds):
-                        if current_multiplier >= threshold and last_alert_multiplier < threshold:
-                            next_alert_to_fire = Decimal(str(threshold))
-                            alert_type = "Threshold"
-                            break # Fire the lowest-unfired threshold
-                
-                # Check sensitivity alerts
-                if modes.get('sensitivity', False):
-                    sensitivity = self.target_model.get_alert_sensitivity_percent(target)
-                    sensitivity_target = last_alert_multiplier * Decimal(1 + sensitivity)
-                    if current_multiplier >= sensitivity_target:
-                        # Only fire sensitivity if it's higher than a pending threshold alert
-                        if next_alert_to_fire is None or current_multiplier > next_alert_to_fire:
-                            next_alert_to_fire = current_multiplier
-                            alert_type = "Sensitivity"
+                if not alert_to_fire:
+                    continue  # No alert threshold met
 
-                # 5. If an alert was triggered, queue it
-                if next_alert_to_fire and alert_type:
-                    logger.info(f"[ALERT_TRIGGER] {alert_type} alert for {token['address'][:8]}... target {target['id']} at {next_alert_to_fire:.2f}x")
+                # PHASE 2: VERIFY WITH JUPITER
+                logger.info(
+                    f"[VERIFY] Alert candidate for {token['address'][:8]}... "
+                    f"at {dex_multiplier:.2f}x (Dex) - verifying with Jupiter..."
+                )
 
-                    # Get userbot assigned for forwarding
-                    userbot_assignment = await db.fetchrow("SELECT userbot_id FROM userbot_assignments WHERE group_id = $1", source_group_id)
-                    if not userbot_assignment or not userbot_assignment['userbot_id']:
-                        logger.warning(f"[ALERT_FAIL] No forwarding userbot for group {source_group_id}, cannot send alert")
-                        continue
-                    forwarding_userbot_id = userbot_assignment['userbot_id']
+                # Fetch fresh Jupiter MC (NO CACHE for verification)
+                jupiter_mc = await self.jupiter_service.fetch_market_cap(
+                    token['address'],
+                    use_cache=False  # Always fresh for alerts
+                )
 
-                    # Format message and queue job
-                    message = self._format_dynamic_alert_message(token, state, next_alert_to_fire, alert_type)
-
-                    # Get first message ID for reply threading
-                    first_message_id = None
-                    try:
-                        alert_state = await self.target_alert_state_model.get_by_target_token(target['id'], token['id'])
-                        if alert_state and alert_state['first_message_id']:
-                            first_message_id = alert_state['first_message_id']
-                    except Exception as e:
-                        logger.debug(f"Could not retrieve first message ID: {e}")
-
-                    additional_info = json.dumps({
-                        "message_override": message,
-                        "reply_to_message_id": first_message_id
-                    })
-                    source_info = json.dumps({"name": f"System {alert_type} Alerter"})
-
-                    await self.call_queue_model.add_job(
-                        token_address=token['address'],
-                        source_message_id=None,
-                        source_chat_id=None,
-                        target_chat_id=target['dest_chat_id'],
-                        forwarding_userbot_id=forwarding_userbot_id,
-                        target_group_id=source_group_id,
-                        source_info=source_info,
-                        additional_info=additional_info
+                # Determine verified MC and multiplier
+                if not jupiter_mc or jupiter_mc <= 0:
+                    # Jupiter failed - fallback to DexScreener (Option B)
+                    logger.warning(
+                        f"[VERIFY] Jupiter verification failed for {token['address'][:8]}... "
+                        f"- using DexScreener MC ${dex_mc:,.0f}"
+                    )
+                    verified_mc = dex_mc
+                    verified_multiplier = dex_multiplier
+                else:
+                    # Jupiter succeeded - use authoritative data
+                    verified_mc = jupiter_mc
+                    verified_multiplier = jupiter_mc / baseline
+                    logger.info(
+                        f"[VERIFY] Jupiter confirmed: ${jupiter_mc:,.0f} = {verified_multiplier:.2f}x "
+                        f"(Dex was ${dex_mc:,.0f} = {dex_multiplier:.2f}x)"
                     )
 
-                    # 6. Update the state with the new multiplier
-                    await self.target_alert_state_model.update_after_alert(target['id'], token['id'], next_alert_to_fire)
-                    logger.info(f"[ALERT_SUCCESS] Queued alert and updated state for token {token['id']} in target {target['id']}")
+                # Re-check alert threshold with verified multiplier
+                verified_alert = self._calculate_next_alert(
+                    current_multiplier=verified_multiplier,
+                    last_multiplier=last_multiplier,
+                    target=target
+                )
+
+                if verified_alert:
+                    # FIRE ALERT with verified data
+                    await self._queue_alert(
+                        token=token,
+                        target=target,
+                        state=state,
+                        multiplier=verified_alert['value'],
+                        alert_type=verified_alert['type']
+                    )
+
+                    # Update state
+                    await self.target_alert_state_model.update_after_alert(
+                        target['id'],
+                        token['id'],
+                        verified_alert['value']
+                    )
+
+                    logger.info(
+                        f"[ALERT] ✅ Fired {verified_alert['type']} alert for {token['address'][:8]}... "
+                        f"at {verified_multiplier:.2f}x (verified)"
+                    )
                 else:
-                    # Conditions not met - log why
-                    logger.debug(f"[ALERT_NO_FIRE] Target {target['id']}: conditions not met (curr: {current_multiplier:.2f}x, last: {last_alert_multiplier:.2f}x)")
+                    logger.info(
+                        f"[ALERT] ❌ Cancelled for {token['address'][:8]}... "
+                        f"- verified multiplier {verified_multiplier:.2f}x below threshold"
+                    )
 
             except Exception as e:
-                logger.error(f"[ALERT_ERROR] Error processing alerts for target {target['id']} and token {token['id']}: {e}", exc_info=True)
-    
-    async def _queue_pnl_command(self, token: Dict[str, Any], threshold: Decimal) -> bool:
-        """Queue a /pnl command job instead of sending directly."""
-        logger.debug(f"[PNL_ALERT] Queuing /pnl command for token {token['address']} at {threshold}x.")
-        import json
+                logger.error(f"Error checking alerts for target {target['id']}: {e}", exc_info=True)
 
-        success_count = 0
+    def _calculate_next_alert(
+        self,
+        current_multiplier: Decimal,
+        last_multiplier: Decimal,
+        target: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Calculate if an alert should fire based on target settings
+
+        Returns:
+            {'type': 'threshold'|'sensitivity', 'value': Decimal} or None
+        """
+        modes = self.target_model.parse_alert_modes(target)
+
+        # Check threshold alerts (e.g., 2x, 7x, 25x)
+        if modes.get('threshold', False):
+            thresholds = self.target_model.parse_alert_thresholds(target)
+            for threshold in sorted(thresholds):
+                threshold_decimal = Decimal(str(threshold))
+                if current_multiplier >= threshold_decimal and last_multiplier < threshold_decimal:
+                    return {'type': 'threshold', 'value': threshold_decimal}
+
+        # Check sensitivity alerts (e.g., 50% progression)
+        if modes.get('sensitivity', False):
+            sensitivity = self.target_model.get_alert_sensitivity_percent(target)
+            next_target = last_multiplier * (Decimal('1') + Decimal(str(sensitivity)))
+            if current_multiplier >= next_target:
+                return {'type': 'sensitivity', 'value': current_multiplier}
+
+        return None
+
+    async def _queue_alert(
+        self,
+        token: Dict[str, Any],
+        target: Dict[str, Any],
+        state: Dict[str, Any],
+        multiplier: Decimal,
+        alert_type: str
+    ):
+        """Queue an alert message to the call queue"""
         try:
-            source_group_id = token.get('source_group_id')
-            if not source_group_id:
-                logger.debug(f"[PNL_ALERT] Aborting: No source_group_id found on token {token['id']}.")
-                return False
-
-            # Get the userbot assigned to the source group for forwarding
+            # Get forwarding userbot
             userbot_assignment = await db.fetchrow(
-                "SELECT userbot_id FROM userbot_assignments WHERE group_id = $1", source_group_id
+                "SELECT userbot_id FROM userbot_assignments WHERE group_id = $1",
+                token['source_group_id']
             )
             if not userbot_assignment or not userbot_assignment['userbot_id']:
-                logger.warning(f"[PNL_ALERT] No forwarding userbot assigned to group {source_group_id}. Cannot queue PNL alert.")
-                return False
+                logger.warning(f"No forwarding userbot for group {token['source_group_id']}")
+                return
+
             forwarding_userbot_id = userbot_assignment['userbot_id']
 
-            # Get all targets for this source group
-            targets = await db.fetch("SELECT id, dest_chat_id FROM targets WHERE group_id = $1", source_group_id)
-            if not targets:
-                logger.warning(f"[PNL_ALERT] No targets found for source group {source_group_id}.")
-                return False
+            # Format alert message
+            message = self._format_alert_message(token, state, multiplier, alert_type)
 
-            # This is a system-generated call, not from a specific user message
-            source_info = json.dumps({"name": "System PNL Alerter"})
+            # Get first message ID for threading
+            first_message_id = state.get('first_message_id')
 
-            for target in targets:
-                try:
-                    # Get first message ID for reply threading
-                    first_message_id = None
-                    try:
-                        token_record = await db.fetchrow("SELECT id FROM tokens_tracked WHERE address = $1", token['address'])
-                        if token_record:
-                            alert_state = await self.target_alert_state_model.get_by_target_token(target['id'], token_record['id'])
-                            if alert_state and alert_state['first_message_id']:
-                                first_message_id = alert_state['first_message_id']
-                    except Exception as e:
-                        logger.debug(f"Could not retrieve first message ID for PNL alert: {e}")
+            # Prepare additional info
+            additional_info = json.dumps({
+                "message_override": message,
+                "reply_to_message_id": first_message_id
+            })
+            source_info = json.dumps({"name": f"System {alert_type.title()} Alert"})
 
-                    additional_info = json.dumps({
-                        "message_override": f"/pnl {token['address']}",
-                        "reply_to_message_id": first_message_id
-                    })
-
-                    await self.call_queue_model.add_job(
-                        token_address=token['address'],
-                        target_group_id=source_group_id,
-                        target_chat_id=target['dest_chat_id'],
-                        forwarding_userbot_id=forwarding_userbot_id,
-                        source_info=source_info,
-                        additional_info=additional_info,
-                        # These fields are not applicable for system PNL alerts
-                        routing_rule_id=None,
-                        source_message_id=None,
-                        source_chat_id=None,
-                        source_user_id=None,
-                    )
-                    success_count += 1
-                    logger.info(f"[PNL_ALERT] Queued /pnl for {token['address'][:8]}... to target {target['dest_chat_id']}")
-                except Exception as e:
-                    logger.error(f"Failed to queue PNL command for target {target['dest_chat_id']}: {e}")
-
-            # Also handle curated alpha rules that want PNL alerts
-            curated_rules = await db.fetch("""
-                SELECT r.id as rule_id, r.destination_chat_id, r.forwarding_userbot_id
-                FROM curated_alpha_rules r
-                JOIN curated_alpha_token_state s ON r.id = s.rule_id
-                WHERE s.token_address = $1 AND s.status = 'triggered' AND r.forward_pnl_alerts = true
-            """, token['address'])
-
-            for rule in curated_rules:
-                if not rule['forwarding_userbot_id'] or not rule['destination_chat_id']:
-                    continue
-                try:
-                    # For curated alpha, we don't have target state tracking, so no reply threading
-                    curated_additional_info = json.dumps({
-                        "message_override": f"/pnl {token['address']}",
-                        "reply_to_message_id": None
-                    })
-
-                    await self.call_queue_model.add_job(
-                        token_address=token['address'],
-                        source_message_id=None,
-                        source_chat_id=None,
-                        target_chat_id=rule['destination_chat_id'],
-                        forwarding_userbot_id=rule['forwarding_userbot_id'],
-                        curated_alpha_rule_id=rule['rule_id'],
-                        source_info=source_info,
-                        additional_info=curated_additional_info,
-                    )
-                    success_count += 1
-                    logger.info(f"[CuratedAlpha] Queued PNL alert for {token['address'][:8]}... to curated destination {rule['destination_chat_id']}")
-                except Exception as e:
-                    logger.error(f"Failed to queue Curated Alpha PNL alert for destination {rule['destination_chat_id']}: {e}")
+            # Queue the job
+            await self.call_queue_model.add_job(
+                token_address=token['address'],
+                source_message_id=None,
+                source_chat_id=None,
+                target_chat_id=target['dest_chat_id'],
+                forwarding_userbot_id=forwarding_userbot_id,
+                target_group_id=token['source_group_id'],
+                source_info=source_info,
+                additional_info=additional_info
+            )
 
         except Exception as e:
-            logger.error(f"CRITICAL: Error in _queue_pnl_command: {e}", exc_info=True)
+            logger.error(f"Error queuing alert: {e}", exc_info=True)
 
-        return success_count > 0
+    def _format_alert_message(
+        self,
+        token: Dict[str, Any],
+        state: Dict[str, Any],
+        multiplier: Decimal,
+        alert_type: str
+    ) -> str:
+        """Format the alert message with emoji and stats"""
 
-    def _safe_decimal(self, value: Any, default: Optional[Decimal] = None) -> Optional[Decimal]:
-        """Coerce any numeric-like value into a Decimal with fallback."""
-        if value is None:
-            return default
-        if isinstance(value, Decimal):
-            return value
-        try:
-            return Decimal(str(value))
-        except (InvalidOperation, TypeError, ValueError):
-            return default
+        def select_emoji(mult: float) -> str:
+            if mult < 3:
+                return "🔥"
+            if mult < 5:
+                return "🚀"
+            if mult < 10:
+                return "🌙"
+            return "🌕"
 
-    async def _fetch_jupiter_market_cap(self, token_address: str) -> Optional[Decimal]:
-        """Fetch market cap from Jupiter via the Rust bridge."""
-        try:
-            payload = await rust_dex_bridge.fetch_dex_payload(token_address)
-        except Exception as err:
-            logger.error(f"[JUPITER] Error requesting payload for {token_address[:8]}...: {err}")
-            return None
+        def format_time_ago(timestamp: datetime) -> str:
+            if not timestamp:
+                return ""
+            now = datetime.utcnow()
+            delta = now - timestamp.replace(tzinfo=None)
 
-        if not payload:
-            return None
+            days = delta.days
+            hours, remainder = divmod(delta.seconds, 3600)
+            minutes, _ = divmod(remainder, 60)
 
-        jupiter_payload = payload.get('jupiter') or {}
-        if not jupiter_payload:
-            return None
+            if days > 0:
+                return f"{days}d {hours}h ago"
+            elif hours > 0:
+                return f"{hours}h {minutes}m ago"
+            else:
+                return f"{minutes}m ago"
 
-        mcap_value = (
-            jupiter_payload.get('mcap')
-            or jupiter_payload.get('market_cap')
-            or jupiter_payload.get('marketCap')
-        )
+        emoji = select_emoji(float(multiplier))
+        symbol = token.get('ticker', token['address'][:6])
+        mc_str = f"${state['initial_market_cap']:,.0f}"
+        time_str = format_time_ago(state['first_sent_at'])
 
-        mcap_decimal = self._safe_decimal(mcap_value, default=None)
-        if mcap_decimal is None or mcap_decimal <= 0:
-            return None
+        return f"{emoji} {symbol} is at {multiplier:.2f}x!\nMC: {mc_str} | {time_str}"
 
-        return mcap_decimal
+    # ==================== DROP ALERT MONITORING ====================
 
-    async def _verify_with_jupiter(self, token_address: str, dex_market_cap: Decimal) -> bool:
-        """Validate Dex reading against Jupiter before firing alerts."""
-        if dex_market_cap is None or dex_market_cap <= 0:
-            return False
-
-        jupiter_mc = await self._fetch_jupiter_market_cap(token_address)
-        if not jupiter_mc or jupiter_mc <= 0:
-            logger.warning(f"[JUPITER] Missing market cap for {token_address[:8]}... during verification.")
-            return False
-
-        max_mc = max(jupiter_mc, dex_market_cap)
-        if max_mc == 0:
-            return False
-
-        diff_ratio = abs(jupiter_mc - dex_market_cap) / max_mc
-        if diff_ratio <= self.JUPITER_TOLERANCE:
-            return True
-
-        logger.warning(
-            "[JUPITER] MC mismatch for %s (Dex: %s, Jup: %s, diff: %.2f%%)",
-            token_address[:8],
-            f"{dex_market_cap:,.0f}",
-            f"{jupiter_mc:,.0f}",
-            float(diff_ratio * 100)
-        )
-        return False
-    
     async def _check_drop_alerts(self, token: Dict[str, Any], new_mc: Decimal) -> bool:
         """
-        Check for drop alerts.
-        Returns True if monitoring was stopped, False otherwise.
+        Check for drop from first_seen_mc and stop monitoring if threshold exceeded
+
+        Simple logic: Stop when current MC drops below (first_seen_mc * drop_percentage)
+        Example: first_seen_mc=100K, drop_percentage=0.50 → stop at 50K
+
+        Returns:
+            True if monitoring was stopped, False otherwise
         """
         try:
-            peak_mc = token.get('peak_mc')
-            # Initialize peak_mc if it's not set
-            if not peak_mc or peak_mc <= 0:
-                await self.token_model.update_peak_mc(token['id'], new_mc)
-                token['peak_mc'] = new_mc
-                peak_mc = new_mc
-    
-            # Update peak if new high
-            if new_mc > peak_mc:
-                await self.token_model.update_peak_mc(token['id'], new_mc)
-                token['peak_mc'] = new_mc
-                peak_mc = new_mc
-                
-            # Get drop threshold from settings 
+            first_seen_mc = token.get('first_seen_mc')
+            if not first_seen_mc or first_seen_mc <= 0:
+                return False
+
+            # Get drop threshold from settings
             drop_settings = await db.fetchval("SELECT value FROM settings WHERE key = 'drop_percentage'")
             if not drop_settings:
                 return False
-                
-            import json
-            drop_threshold = float(json.loads(drop_settings))
-            
-            # Check drop from peak
-            if peak_mc > 0: # Avoid division by zero
-                current_from_peak = new_mc / peak_mc
-                if current_from_peak <= drop_threshold:
-                    await self.token_model.set_status(token['id'], 'stopped')
-                    logger.info(
-                        f"Stopped monitoring {token['address'][:8]}... (MC dropped by {(1-current_from_peak)*100:.1f}%, "
-                        f"below threshold of {drop_threshold*100:.0f}% of peak)"
-                    )
-                    return True
-                        
+
+            drop_percentage = float(json.loads(drop_settings))
+
+            # Calculate stop threshold: first_seen_mc * drop_percentage
+            # Example: 100K * 0.50 = 50K stop threshold
+            stop_threshold_mc = first_seen_mc * Decimal(str(drop_percentage))
+
+            # Stop if current MC is at or below the threshold
+            if new_mc <= stop_threshold_mc:
+                await self.token_model.set_status(token['id'], 'stopped')
+                drop_percent = (1 - (new_mc / first_seen_mc)) * 100
+                logger.info(
+                    f"Stopped {token['address'][:8]}... "
+                    f"(MC ${new_mc:,.0f} is {drop_percent:.1f}% below first_seen_mc ${first_seen_mc:,.0f}, "
+                    f"threshold: {drop_percentage * 100:.0f}%)"
+                )
+                return True
+
         except Exception as e:
             logger.error(f"Error checking drop alerts: {e}")
-        
-        return False    
+
+        return False
+
+    # ==================== TOKEN MANAGEMENT ====================
+
     async def add_token(self, token_address: str) -> Dict[str, Any]:
-        """Add a new token for monitoring"""
+        """
+        Add a new token for monitoring
+
+        JUPITER API ONLY for initialization - ensures accurate baseline
+        """
         try:
-            # Check if token already exists
+            # Check if already exists
             existing = await self.token_model.get_by_address(token_address)
             if existing:
                 return {
@@ -668,60 +614,46 @@ class DexScreenerService:
                     'error': 'Token already being tracked',
                     'token': dict(existing)
                 }
-            
-            # Fetch initial data
-            token_data = await self._fetch_token_data(token_address)
-            if not token_data:
+
+            # Fetch from Jupiter API (NO CACHE, NO FALLBACK)
+            logger.info(f"[INIT] Fetching initial data for {token_address[:8]}... from Jupiter")
+            jupiter_data = await self.jupiter_service.get_token_data(token_address, use_cache=False)
+
+            if not jupiter_data:
                 return {
                     'success': False,
-                    'error': 'Could not fetch token data from DexScreener'
+                    'error': 'Could not fetch token data from Jupiter API'
                 }
 
-            # Extract initial market cap from new API format
-            pairs = token_data if isinstance(token_data, list) else token_data.get('pairs', [])
-            if not pairs:
+            # Extract market cap
+            initial_mc = self.jupiter_service.get_market_cap(jupiter_data)
+            if not initial_mc or initial_mc <= 0:
                 return {
                     'success': False,
-                    'error': 'No trading pairs found for token'
+                    'error': 'Invalid market cap from Jupiter'
                 }
 
-            # Just use first pair since liquidity isn't needed
-            best_pair = pairs[0]
-            market_cap = best_pair.get('marketCap')
-
-            if not market_cap:
-                return {
-                    'success': False,
-                    'error': 'Could not determine market cap'
-                }
-
-            jupiter_mc = await self._fetch_jupiter_market_cap(token_address)
-            if jupiter_mc:
-                initial_mc = jupiter_mc
-                logger.debug(f"[JUPITER] Using Jupiter MC {initial_mc} for token {token_address[:8]}... as first_seen_mc")
-            else:
-                initial_mc = Decimal(str(market_cap))
-                logger.debug(f"[JUPITER] Fallback to DexScreener MC {initial_mc} for token {token_address[:8]}...")
-            ticker = best_pair.get('baseToken', {}).get('symbol')
+            # Extract ticker
+            ticker = self.jupiter_service.get_ticker(jupiter_data)
 
             # Create token record
             token = await self.token_model.create_or_update(token_address, initial_mc, ticker)
-            
-            logger.info(f"Added token {token_address[:8]}... with initial MC ${initial_mc:,.0f}")
-            
+
+            logger.info(f"[INIT] ✅ Added {token_address[:8]}... with MC ${initial_mc:,.0f} from Jupiter")
+
             return {
                 'success': True,
                 'token': dict(token),
                 'initial_mc': float(initial_mc)
             }
-            
+
         except Exception as e:
-            logger.error(f"Error adding token: {e}")
+            logger.error(f"Error adding token: {e}", exc_info=True)
             return {
                 'success': False,
                 'error': str(e)
             }
-    
+
     async def remove_token(self, token_address: str) -> Dict[str, Any]:
         """Stop monitoring a token"""
         try:
@@ -731,23 +663,22 @@ class DexScreenerService:
                     'success': False,
                     'error': 'Token not found'
                 }
-            
+
             await self.token_model.set_status(token['id'], 'stopped')
-            
-            logger.info(f"Stopped tracking token {token_address[:8]}...")
-            
+            logger.info(f"Stopped tracking {token_address[:8]}...")
+
             return {
                 'success': True,
                 'token': dict(token)
             }
-            
+
         except Exception as e:
             logger.error(f"Error removing token: {e}")
             return {
                 'success': False,
                 'error': str(e)
             }
-    
+
     async def get_token_info(self, token_address: str) -> Dict[str, Any]:
         """Get current token information"""
         try:
@@ -758,42 +689,45 @@ class DexScreenerService:
                     'success': False,
                     'error': 'Token not found in database'
                 }
-            
-            # Get fresh data from API
-            api_data = await self._fetch_token_data(token_address)
-            
+
+            # Get fresh data from Jupiter
+            jupiter_data = await self.jupiter_service.get_token_data(token_address, use_cache=False)
+
             result = {
                 'success': True,
                 'token': dict(token),
-                'api_data': api_data
+                'jupiter_data': jupiter_data
             }
-            
+
             if token['first_seen_mc'] and token['first_seen_mc'] > 0:
                 current_multiplier = token['last_mc'] / token['first_seen_mc']
                 result['multiplier'] = float(current_multiplier)
-            
+
             return result
-            
+
         except Exception as e:
             logger.error(f"Error getting token info: {e}")
             return {
                 'success': False,
                 'error': str(e)
             }
-    
+
     async def get_service_stats(self) -> Dict[str, Any]:
         """Get service statistics"""
         try:
             token_stats = await self.token_model.get_token_stats()
-            
+            jupiter_cache_stats = self.jupiter_service.get_cache_stats()
+
             return {
                 'running': self.running,
                 'poll_interval': settings.dex_poll_secs,
                 'timeout': settings.dex_timeout,
                 'max_retries': settings.dex_max_retries,
-                'tokens': token_stats
+                'min_mc_threshold': float(self.MIN_MC_THRESHOLD),
+                'tokens': token_stats,
+                'jupiter_cache': jupiter_cache_stats
             }
-            
+
         except Exception as e:
             logger.error(f"Error getting service stats: {e}")
             return {'error': str(e)}

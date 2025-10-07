@@ -1123,7 +1123,33 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
         }
     }
 
-    // 18. 💬 Engagement & Community
+    // 18. 🧛 Vamped.fun Status
+    if let Some(vamped) = &data.vamped_fun_data {
+        parts.push("🧛 <b>Vamped.fun Status</b>".to_string());
+
+        let is_vamped = vamped.is_vamped.unwrap_or(false);
+        let status = if is_vamped { "✅ Vamped" } else { "❌ Not Vamped" };
+        let platform = vamped.platform.as_deref().unwrap_or("Unknown");
+
+        parts.push(format!("{} | <b>Platform:</b> {}", status, platform));
+
+        if let Some(timestamp) = &vamped.timestamp {
+            parts.push(format!("⏰ <b>Checked:</b> {}", timestamp));
+        }
+
+        if let Some(token_info) = &vamped.token_info {
+            if let Some(name) = &token_info.name {
+                parts.push(format!("🏷️ <b>Token Name:</b> {}", html::escape(name)));
+            }
+            if let Some(symbol) = &token_info.symbol {
+                parts.push(format!("💎 <b>Symbol:</b> {}", html::escape(symbol)));
+            }
+        }
+
+        parts.push(String::new());
+    }
+
+    // 19. 💬 Engagement & Community
     if let Some(pf) = &data.pump_fun_data {
         let replies = pf.reply_count.unwrap_or(0);
         let participants = pf.num_participants.unwrap_or(0);
@@ -1137,7 +1163,7 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
         }
     }
 
-    // 19. 📺 Livestream Info
+    // 20. 📺 Livestream Info
     if let Some(pf) = &data.pump_fun_data {
         if pf.livestream_ban_expiry.unwrap_or(0) > 0
             || pf.livestream_downrank_score.unwrap_or(0.0) > 0.0
@@ -1169,7 +1195,7 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
         }
     }
 
-    // 20. 🏛️ Pump.fun Addresses
+    // 21. 🏛️ Pump.fun Addresses
     if let Some(pf) = &data.pump_fun_data {
         let mut address_lines = Vec::new();
         if let Some(mint) = &pf.mint {
@@ -1198,7 +1224,7 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
         }
     }
 
-    // 21. 🖼️ Pump.fun Media
+    // 22. 🖼️ Pump.fun Media
     if let Some(pf) = &data.pump_fun_data {
         let mut media_lines = Vec::new();
         if let Some(image_uri) = &pf.image_uri {

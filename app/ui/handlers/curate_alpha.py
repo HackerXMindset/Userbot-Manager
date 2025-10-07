@@ -48,7 +48,7 @@ class CurateAlphaHandler:
         logger.debug(f"[CuratedAlpha] Received callback: {query.data}")
         parts = query.data.split(':')
         action = parts[1]
-        rule_id = int(parts[2]) if len(parts) > 2 else None
+        rule_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
 
         if action == 'list':
             await self.show_curate_alpha_menu(query)
@@ -77,12 +77,20 @@ class CurateAlphaHandler:
             await self.wizard_set_time_window(query, state)
         elif action == 'toggle_pnl':
             await self.wizard_toggle_pnl(query, state)
+        elif action == 'toggle_blockchain':
+            await self.wizard_toggle_blockchain(query, state)
         elif action == 'summary':
             await self.wizard_show_summary(query, state)
+        elif action == 'summary_back':
+            await self.wizard_show_final_settings(query, state)
         elif action == 'save':
             await self.save_rule(query, state)
         elif action == 'save_edited_settings':
             await self.save_edited_settings(query, state)
+        elif action == 'edit_toggle_chain':
+            await self.edit_toggle_chain(query, state)
+        elif action == 'save_chains':
+            await self.save_edited_chains(query, state)
 
     async def handle_edit_action(self, query: types.CallbackQuery, state: FSMContext, action: str, rule_id: int):
         """Router for various edit actions."""
@@ -90,6 +98,8 @@ class CurateAlphaHandler:
             await self.wizard_start_edit_name(query, state, rule_id)
         elif action == 'edit_sources':
             await self.wizard_start_edit_sources(query, state, rule_id)
+        elif action == 'edit_chains':
+            await self.wizard_start_edit_chains(query, state, rule_id)
         elif action == 'edit_bot':
             await self.wizard_start_edit_bot(query, state, rule_id)
         elif action == 'edit_dest':
@@ -130,8 +140,11 @@ class CurateAlphaHandler:
             else:
                 mentions_display = f"{required_mentions} of {len(selected_source_names)}"
 
+            blockchain_display = Keyboards.format_blockchain_emojis(data.get('allowed_chains', ['SOL']))
+
             text = (f"<b>✨ Rule: {data.get('name')}</b>\n\n"
                    f"<b>Required Sources ({mentions_display}):</b>\n - {'\n - '.join(selected_source_names)}\n"
+                   f"<b>Blockchains:</b> {blockchain_display}\n"
                    f"<b>Forwarding Bot:</b> {bot_name}\n"
                    f"<b>Destination Chat ID:</b> `{data.get('destination_chat_id')}`\n"
                    f"<b>Time Window:</b> {time_display}\n"
@@ -143,10 +156,11 @@ class CurateAlphaHandler:
                     InlineKeyboardButton(text="🔄 Edit Sources", callback_data=f"curate_alpha:edit_sources:{rule_id}")
                 ],
                 [
-                    InlineKeyboardButton(text="🤖 Edit Bot", callback_data=f"curate_alpha:edit_bot:{rule_id}"),
-                    InlineKeyboardButton(text="🎯 Edit Destination", callback_data=f"curate_alpha:edit_dest:{rule_id}")
+                    InlineKeyboardButton(text="⛓️ Edit Chains", callback_data=f"curate_alpha:edit_chains:{rule_id}"),
+                    InlineKeyboardButton(text="🤖 Edit Bot", callback_data=f"curate_alpha:edit_bot:{rule_id}")
                 ],
                 [
+                    InlineKeyboardButton(text="🎯 Edit Destination", callback_data=f"curate_alpha:edit_dest:{rule_id}"),
                     InlineKeyboardButton(text="⏰ Edit Settings", callback_data=f"curate_alpha:edit_settings:{rule_id}")
                 ],
                 [
@@ -196,7 +210,7 @@ class CurateAlphaHandler:
 
     async def wizard_process_name(self, message: types.Message, state: FSMContext):
         """Step 2: Process the name and show source selection."""
-        await state.update_data(name=message.text.strip(), selected_sources=[])
+        await state.update_data(name=message.text.strip(), selected_sources=[], allowed_chains=['SOL'])
         await message.delete()
         await self.wizard_show_source_selection(message, state)
 
@@ -405,14 +419,20 @@ class CurateAlphaHandler:
         if is_edit and 'time_window_seconds' not in data:
             rule = await self.rule_model.get_by_id(rule_id)
             await state.update_data(
-                time_window_seconds=rule['time_window_seconds'], 
+                time_window_seconds=rule['time_window_seconds'],
                 forward_pnl_alerts=rule['forward_pnl_alerts'],
-                required_mentions=rule.get('required_mentions')
+                required_mentions=rule.get('required_mentions'),
+                allowed_chains=rule.get('allowed_chains', ['SOL'])
             )
             data = await state.get_data()
 
         time_window = data.get('time_window_seconds', 86400)
         pnl_alerts = data.get('forward_pnl_alerts', False)
+        allowed_chains_raw = data.get('allowed_chains', ['SOL'])
+        if isinstance(allowed_chains_raw, str):
+            allowed_chains = json.loads(allowed_chains_raw)
+        else:
+            allowed_chains = allowed_chains_raw
 
         text = f"<b>✨ {'Edit' if is_edit else 'Add'} Curated Alpha Rule (6/7)</b>\n\n" \
                f"Configure the final settings."
@@ -427,6 +447,17 @@ class CurateAlphaHandler:
                 InlineKeyboardButton(text="10m", callback_data="curate_alpha:set_time:600"),
                 InlineKeyboardButton(text="30m", callback_data="curate_alpha:set_time:1800"),
                 InlineKeyboardButton(text="1h", callback_data="curate_alpha:set_time:3600"),
+            ],
+            [InlineKeyboardButton(text="-- Blockchains --", callback_data="curate_alpha:noop")],
+            [
+                InlineKeyboardButton(
+                    text=f"{'✅' if 'SOL' in allowed_chains else '☐'} SOL",
+                    callback_data="curate_alpha:toggle_blockchain:SOL"
+                ),
+                InlineKeyboardButton(
+                    text=f"{'✅' if 'BNB' in allowed_chains else '☐'} BNB",
+                    callback_data="curate_alpha:toggle_blockchain:BNB"
+                )
             ],
             [InlineKeyboardButton(text="-- PNL Alerts --", callback_data="curate_alpha:noop")],
             [InlineKeyboardButton(text=f"{'✅' if pnl_alerts else '❌'} Forward /pnl Alerts", callback_data="curate_alpha:toggle_pnl")],
@@ -461,6 +492,44 @@ class CurateAlphaHandler:
         await state.update_data(forward_pnl_alerts=not current_pnl)
         await self.wizard_show_final_settings(query, state)
 
+    async def wizard_toggle_blockchain(self, query: types.CallbackQuery, state: FSMContext):
+        """Toggle SOL/BNB in blockchain selector"""
+        try:
+            logger.debug(f"[BLOCKCHAIN_TOGGLE] Received callback: {query.data}")
+            blockchain = query.data.split(':')[2]  # SOL or BNB
+            logger.debug(f"[BLOCKCHAIN_TOGGLE] Blockchain to toggle: {blockchain}")
+
+            data = await state.get_data()
+            logger.debug(f"[BLOCKCHAIN_TOGGLE] Current state data: {data}")
+
+            allowed_chains_raw = data.get('allowed_chains', ['SOL'])
+            if isinstance(allowed_chains_raw, str):
+                allowed_chains = json.loads(allowed_chains_raw)
+            else:
+                allowed_chains = allowed_chains_raw
+            logger.debug(f"[BLOCKCHAIN_TOGGLE] Current allowed_chains: {allowed_chains}")
+
+            if blockchain in allowed_chains:
+                allowed_chains.remove(blockchain)
+                logger.debug(f"[BLOCKCHAIN_TOGGLE] Removed {blockchain}, new list: {allowed_chains}")
+            else:
+                allowed_chains.append(blockchain)
+                logger.debug(f"[BLOCKCHAIN_TOGGLE] Added {blockchain}, new list: {allowed_chains}")
+
+            # Validation: cannot have zero chains
+            if not allowed_chains:
+                logger.debug(f"[BLOCKCHAIN_TOGGLE] Validation failed - no chains selected")
+                await query.answer("⚠️ At least one blockchain must be selected", show_alert=True)
+                return
+
+            await state.update_data(allowed_chains=allowed_chains)
+            logger.debug(f"[BLOCKCHAIN_TOGGLE] State updated, refreshing UI")
+            await self.wizard_show_final_settings(query, state)
+            logger.debug(f"[BLOCKCHAIN_TOGGLE] Toggle completed successfully")
+        except Exception as e:
+            logger.error(f"[BLOCKCHAIN_TOGGLE] ERROR: {e}", exc_info=True)
+            await query.answer(f"❌ Error toggling blockchain: {str(e)}", show_alert=True)
+
     async def save_edited_settings(self, query: types.CallbackQuery, state: FSMContext):
         """Save the edited settings for a rule."""
         try:
@@ -471,6 +540,11 @@ class CurateAlphaHandler:
                 'forward_pnl_alerts': data['forward_pnl_alerts']
             }
             await self.rule_model.update(rule_id, update_data)
+
+            # Update allowed_chains separately (JSONB requires special handling)
+            if 'allowed_chains' in data:
+                await self.rule_model.update_rule_chains(rule_id, data['allowed_chains'])
+
             await state.clear()
             await self.show_rule_details(query, rule_id)
             await query.answer("✅ Settings updated!")
@@ -515,7 +589,7 @@ class CurateAlphaHandler:
 
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="✅ Save Rule", callback_data="curate_alpha:save")],
-                [InlineKeyboardButton(text="🔙 Back", callback_data=f"curate_alpha:set_time:0")]
+                [InlineKeyboardButton(text="🔙 Back", callback_data="curate_alpha:summary_back")]
             ])
             await query.message.edit_text(text, reply_markup=keyboard)
             logger.debug("[CuratedAlpha] Successfully displayed summary.")
@@ -524,9 +598,13 @@ class CurateAlphaHandler:
             await query.answer("❌ Failed to generate summary. Check logs.", show_alert=True)
 
     async def save_rule(self, query: types.CallbackQuery, state: FSMContext):
-        """Save the new rule to the database."""
         try:
             data = await state.get_data()
+
+            if 'name' not in data:
+                await query.answer("❌ Session data is missing. Please start over.", show_alert=True)
+                await self.show_curate_alpha_menu(query)
+                return
             
             sources = await self.source_model.get_all_sources()
             selected_source_chat_ids = [s['source_chat_id'] for s in sources if s['id'] in data.get('selected_sources', [])]
@@ -539,6 +617,7 @@ class CurateAlphaHandler:
                 'time_window_seconds': data.get('time_window_seconds', 86400),
                 'forward_pnl_alerts': data.get('forward_pnl_alerts', False),
                 'required_mentions': data.get('required_mentions', len(selected_source_chat_ids)),
+                'allowed_chains': json.dumps(data.get('allowed_chains', ['SOL'])),
             })
             await state.clear()
             await query.message.edit_text("✅ <b>Curated Alpha Rule Saved!</b>")
@@ -626,6 +705,80 @@ class CurateAlphaHandler:
         """Start the process to edit a rule's settings."""
         await state.set_data({'rule_id': rule_id, 'edit_mode': True})
         await self.wizard_show_final_settings(query, state)
+
+    async def wizard_start_edit_chains(self, query: types.CallbackQuery, state: FSMContext, rule_id: int):
+        """Start editing blockchain chains for a rule"""
+        rule = await self.rule_model.get_by_id(rule_id)
+        await state.set_data({
+            'rule_id': rule_id,
+            'edit_mode': True,
+            'allowed_chains': rule.get('allowed_chains', ['SOL'])
+        })
+        await self.show_blockchain_selector_edit(query, state)
+
+    async def show_blockchain_selector_edit(self, query: types.CallbackQuery, state: FSMContext):
+        """Show blockchain selector for editing existing rule"""
+        data = await state.get_data()
+        rule_id = data['rule_id']
+        allowed_chains_raw = data.get('allowed_chains', ['SOL'])
+        if isinstance(allowed_chains_raw, str):
+            allowed_chains = json.loads(allowed_chains_raw)
+        else:
+            allowed_chains = allowed_chains_raw
+
+        text = "<b>⛓️ Edit Blockchains</b>\n\nSelect which blockchains this rule should monitor:"
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{'✅' if 'SOL' in allowed_chains else '☐'} SOL",
+                    callback_data=f"curate_alpha:edit_toggle_chain:SOL:{rule_id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"{'✅' if 'BNB' in allowed_chains else '☐'} BNB",
+                    callback_data=f"curate_alpha:edit_toggle_chain:BNB:{rule_id}"
+                )
+            ],
+            [InlineKeyboardButton(text="✅ Save", callback_data=f"curate_alpha:save_chains:{rule_id}")],
+            [InlineKeyboardButton(text="🔙 Cancel", callback_data=f"curate_alpha:view:{rule_id}")]
+        ])
+
+        await query.message.edit_text(text, reply_markup=keyboard)
+
+    async def edit_toggle_chain(self, query: types.CallbackQuery, state: FSMContext):
+        """Toggle blockchain in edit mode"""
+        parts = query.data.split(':')
+        blockchain = parts[2]  # SOL or BNB
+
+        data = await state.get_data()
+        allowed_chains_raw = data.get('allowed_chains', ['SOL'])
+        if isinstance(allowed_chains_raw, str):
+            allowed_chains = json.loads(allowed_chains_raw)
+        else:
+            allowed_chains = allowed_chains_raw
+
+        if blockchain in allowed_chains:
+            allowed_chains.remove(blockchain)
+        else:
+            allowed_chains.append(blockchain)
+
+        if not allowed_chains:
+            await query.answer("⚠️ At least one blockchain required", show_alert=True)
+            return
+
+        await state.update_data(allowed_chains=allowed_chains)
+        await self.show_blockchain_selector_edit(query, state)
+
+    async def save_edited_chains(self, query: types.CallbackQuery, state: FSMContext):
+        """Save edited blockchain selection"""
+        data = await state.get_data()
+        rule_id = data['rule_id']
+        allowed_chains = data['allowed_chains']
+
+        await self.rule_model.update_rule_chains(rule_id, allowed_chains)
+        await state.clear()
+        await query.answer("✅ Blockchains updated!")
+        await self.show_rule_details(query, rule_id)
 
     async def process_field_edit(self, message: types.Message, state: FSMContext):
         """Process a text input for an edit action."""

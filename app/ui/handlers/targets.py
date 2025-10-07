@@ -101,19 +101,30 @@ class TargetsHandler:
             if not targets:
                 text += "No targets configured."
             else:
-                for i, target in enumerate(targets, 1):
+                for i, target in enumerate(targets):
                     group_name = target['group_display_name'] or target['group_title'] or f"Chat {target['group_tg_chat_id']}" if target['group_tg_chat_id'] else "No Group"
 
                     status = "🟢" if target['alerts_enabled'] else "🔴"
                     modes = self.target_model.parse_alert_modes(target)
                     mode_count = sum(1 for v in modes.values() if v)
 
-                    prefix = "├" if i < len(targets) else "└"
+                    # Tree structure like Groups UI
+                    text += f"{status} {group_name}\n"
 
                     if target['alerts_enabled']:
-                        text += f"{prefix} {group_name}  {status} {mode_count} modes\n"
+                        # Get active mode icons
+                        active_icons = []
+                        if modes.get('pnl'): active_icons.append('📈')
+                        if modes.get('threshold'): active_icons.append('🎚️')
+                        if modes.get('sensitivity'): active_icons.append('⚡')
+                        if modes.get('dynamic'): active_icons.append('🔄')
+
+                        mode_icons_str = ' '.join(active_icons) if active_icons else 'None'
+                        text += f"  └ Modes: {mode_count}/4 active ({mode_icons_str})\n"
                     else:
-                        text += f"{prefix} {group_name}  {status} OFF\n"
+                        text += f"  └ Alerts OFF\n"
+
+                    text += "\n"
             
             keyboard_rows = []
             if targets:
@@ -157,20 +168,50 @@ class TargetsHandler:
             end_index = start_index + page_size
             paginated_targets = targets[start_index:end_index]
 
-            text = f"🎯 <b>Targets</b> • Page {page}/{total_pages}\n\n"
+            text = f"🎯 <b>Targets</b> (Page {page}/{total_pages})\n\n"
 
-            for target in paginated_targets:
+            for i, target in enumerate(paginated_targets):
                 group_name = target['group_display_name'] or target['group_title'] or f"Chat {target['group_tg_chat_id']}" if target['group_tg_chat_id'] else "No Group"
                 status = "🟢" if target['alerts_enabled'] else "🔴"
                 modes = self.target_model.parse_alert_modes(target)
                 mode_count = sum(1 for v in modes.values() if v)
+                total_modes = 4
 
-                group_name_short = group_name[:20] if len(group_name) > 20 else group_name
+                group_name_short = group_name[:30] if len(group_name) > 30 else group_name
+
+                # Show tree structure like Groups UI
+                text += f"{status} <b>{group_name_short}</b>\n"
 
                 if target['alerts_enabled']:
-                    text += f"├ {group_name_short}  {status} {mode_count}\n"
+                    # Get active mode icons
+                    active_icons = []
+                    if modes.get('pnl'): active_icons.append('📈')
+                    if modes.get('threshold'): active_icons.append('🎚️')
+                    if modes.get('sensitivity'): active_icons.append('⚡')
+                    if modes.get('dynamic'): active_icons.append('🔄')
+
+                    mode_icons_str = ' '.join(active_icons) if active_icons else 'None'
+
+                    # Calculate preview of next alerts
+                    thresholds = self.target_model.parse_alert_thresholds(target)
+                    sensitivity = self.target_model.get_alert_sensitivity_percent(target)
+
+                    next_alerts = []
+                    if modes.get('sensitivity') and sensitivity:
+                        for j in range(1, 3):
+                            next_alerts.append(1.0 * (1 + sensitivity) ** j)
+                    if modes.get('threshold') and thresholds:
+                        next_alerts.extend(sorted(thresholds)[:3])
+
+                    next_alerts = sorted(set(next_alerts))[:4]
+                    preview = ', '.join([f"{x:.1f}x" if x < 10 else f"{x:.0f}x" for x in next_alerts]) if next_alerts else 'None'
+
+                    text += f"  ├ Modes: {mode_count}/{total_modes} active ({mode_icons_str})\n"
+                    text += f"  └ Next: {preview}\n"
                 else:
-                    text += f"├ {group_name_short}  {status} OFF\n"
+                    text += f"  └ Alerts OFF\n"
+
+                text += "\n"
 
             keyboard_rows = []
             row = []
@@ -204,65 +245,100 @@ class TargetsHandler:
             await query.answer("❌ Error loading targets")
 
     async def show_alerts_menu(self, query: types.CallbackQuery, target_id: int, group_id: int = None):
-        """Show alerts configuration menu for specific target"""
+        """Show all-in-one alerts configuration screen - REDESIGNED for clean UI"""
         try:
             target = await self.target_model.get_by_id(target_id)
             if not target:
                 await query.answer("❌ Target not found")
                 return
 
+            # Get target group name for display
+            group_info = await self.db.fetchrow("""
+                SELECT display_name, title, tg_chat_id
+                FROM groups WHERE id = $1
+            """, target['group_id']) if target.get('group_id') else None
+
+            if group_info:
+                group_name = group_info['display_name'] or group_info['title'] or f"Chat {group_info['tg_chat_id']}"
+            else:
+                group_name = f"Chat {target['dest_chat_id']}"
+
+            # Get alert configuration
             alert_summary = await self.target_model.get_alert_summary(target_id)
             modes = alert_summary.get('modes', {})
             thresholds = alert_summary.get('thresholds', [])
             sensitivity = alert_summary.get('sensitivity_percent', 0.50)
             enabled = alert_summary.get('enabled', True)
 
+            # Status
             status_icon = "🟢" if enabled else "🔴"
             status_text = "ENABLED" if enabled else "DISABLED"
 
-            text = (
-                f"⚙️ Target: <code>{target['dest_chat_id']}</code>\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"{status_icon} ALERTS {status_text}\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━"
-            )
+            # Build clean UI text with tree structure (matching Groups UI)
+            text = f"⚙️ <b>{group_name}</b>\n\n"
+            text += f"<b>STATUS</b>\n{status_icon} Alerts <b>{status_text}</b>\n\n"
 
             if enabled:
-                # Show active modes
-                text += f"\n\nACTIVE MODES\n\n"
-                for mode, is_enabled in modes.items():
-                    icon = "✅" if is_enabled else "❌"
-                    mode_name = mode.upper()
-                    text += f"  {icon}  {mode_name}\n"
+                # Show alert modes with tree structure
+                text += f"<b>MODES</b>\n"
 
-                # Calculate sensitivity sequence (show first 4 steps)
-                sens = sensitivity * 100
-                seq = [1.0 * (1 + sensitivity)**i for i in range(4)]
-                seq_text = " → ".join([f"{s:.2f}x" for s in seq])
+                # PNL mode
+                pnl_status = "✅" if modes.get('pnl', True) else "❌"
+                text += f"📈 PNL Commands\n"
+                text += f"  └ {pnl_status} {'Active' if modes.get('pnl', True) else 'Disabled'}\n\n"
 
-                text += (
-                    f"\n━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"SENSITIVITY      <b>{sens:.0f}%</b>\n"
-                    f"Alert at         {seq_text}...\n"
-                    f"<i>(each +{sens:.0f}% from last)</i>\n\n"
-                    f"THRESHOLDS       <b>{', '.join([f'{x}x' for x in thresholds])}</b>\n"
-                    f"Fixed alerts     {len(thresholds)} milestones\n\n"
-                    f"━━━━━━━━━━━━━━━━━━━━"
-                )
+                # Threshold mode
+                thresh_status = "✅" if modes.get('threshold', True) else "❌"
+                thresh_text = ', '.join([f'{x}x' for x in thresholds]) if thresholds else "None"
+                text += f"🎚️ Threshold\n"
+                text += f"  ├ {thresh_status} {'Active' if modes.get('threshold', True) else 'Disabled'}\n"
+                text += f"  └ Values: {thresh_text}\n\n"
+
+                # Sensitivity mode
+                sens_status = "✅" if modes.get('sensitivity', True) else "❌"
+                sens_pct = sensitivity * 100
+                text += f"⚡ Sensitivity\n"
+                text += f"  ├ {sens_status} {'Active' if modes.get('sensitivity', True) else 'Disabled'}\n"
+                text += f"  └ Rate: {sens_pct:.0f}% (+{sensitivity:.2f} per alert)\n\n"
+
+                # Dynamic mode
+                dynamic_status = "✅" if modes.get('dynamic', False) else "❌"
+                text += f"🔄 Dynamic Tracking\n"
+                text += f"  └ {dynamic_status} {'Active' if modes.get('dynamic', False) else 'Disabled'}\n\n"
+
+                # Preview of next alerts
+                text += f"<b>PREVIEW</b>\n"
+
+                # Combine threshold and sensitivity alerts
+                next_alerts = []
+
+                # Add threshold alerts
+                for thresh in sorted(thresholds):
+                    if modes.get('threshold', True):
+                        next_alerts.append((thresh, 'T'))
+
+                # Add first 3 sensitivity alerts
+                if modes.get('sensitivity', True):
+                    for i in range(1, 4):
+                        sens_mult = 1.0 * (1 + sensitivity) ** i
+                        next_alerts.append((sens_mult, 'S'))
+
+                # Sort and format
+                next_alerts = sorted(set(next_alerts), key=lambda x: x[0])[:6]  # Show first 6
+                preview_text = ", ".join([f"{mult:.2f}x" for mult, _ in next_alerts])
+                text += f"Next alerts: {preview_text}..."
             else:
-                text += (
-                    f"\n\nAll alerts are OFF for this target.\n\n"
-                    f"Tap below to enable."
-                )
+                text += f"<i>Enable alerts to configure modes</i>"
 
-            # Determine the correct back callback
+            # Determine back callback
             back_callback = f"group:alerts:{group_id}" if group_id else "targets:select_for_alerts"
 
-            keyboard = self.keyboards.target_alerts_menu(target, back_callback=back_callback)
+            # Use new keyboard layout
+            keyboard = self.keyboards.target_alerts_config_clean(target, back_callback=back_callback)
             await query.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
 
         except Exception as e:
-            logger.error(f"Error showing alerts menu: {e}")
+            logger.error(f"Error showing alerts menu: {e}", exc_info=True)
             await query.answer("❌ Error loading alert configuration")
 
     async def show_alert_modes(self, query: types.CallbackQuery, target_id: int):

@@ -6,7 +6,28 @@ logger = logging.getLogger(__name__)
 
 class Keyboards:
     """All inline keyboards for the management bot"""
-    
+
+    @staticmethod
+    def format_blockchain_emojis(allowed_chains: List[str]) -> str:
+        """Format blockchain filter as emojis
+
+        Args:
+            allowed_chains: List of allowed blockchains (e.g., ["SOL", "BNB"])
+
+        Returns:
+            String with blockchain emojis (e.g., "🟣 SOL 🟡 BNB")
+        """
+        if not allowed_chains:
+            return "❌"
+
+        emojis = []
+        if "SOL" in allowed_chains:
+            emojis.append("🟣 SOL")
+        if "BNB" in allowed_chains:
+            emojis.append("🟡 BNB")
+
+        return " ".join(emojis) if emojis else "❌"
+
     @staticmethod
     def main_menu() -> InlineKeyboardMarkup:
         """Main menu keyboard"""
@@ -636,7 +657,7 @@ class Keyboards:
 
     @staticmethod
     def target_alerts_menu(target, back_callback: str = "menu:targets") -> InlineKeyboardMarkup:
-        """Target alerts configuration menu - context-aware based on enabled status"""
+        """Target alerts configuration menu - context-aware based on enabled status - LEGACY"""
         enabled = target.get('alerts_enabled', True)
         target_id = target['id']
 
@@ -657,6 +678,93 @@ class Keyboards:
                 [InlineKeyboardButton(text="🟢 Enable Alerts", callback_data=f"targets:alerts_enable:{target_id}")],
                 [InlineKeyboardButton(text="🔙 Back", callback_data=back_callback)]
             ]
+
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def target_alerts_config_clean(target, back_callback: str = "targets:select_for_alerts") -> InlineKeyboardMarkup:
+        """
+        Clean all-in-one alerts configuration keyboard - REDESIGNED
+
+        All modes visible with inline toggles, no separate screens needed
+        """
+        from app.models import TargetModel
+
+        enabled = target.get('alerts_enabled', True)
+        target_id = target['id']
+
+        keyboard = []
+
+        # Row 1: Master enable/disable toggle
+        if enabled:
+            keyboard.append([
+                InlineKeyboardButton(
+                    text="🔴 Disable All Alerts",
+                    callback_data=f"targets:alerts_enable:{target_id}"
+                )
+            ])
+
+            # Row 2-5: Individual mode toggles with inline status
+            target_model = TargetModel(None)
+            modes = target_model.parse_alert_modes(target)
+
+            # PNL mode
+            pnl_status = "✅" if modes.get('pnl', True) else "❌"
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"📈 PNL          {pnl_status}",
+                    callback_data=f"targets:alerts_toggle:{target_id}:pnl"
+                )
+            ])
+
+            # Threshold mode with edit button
+            thresh_status = "✅" if modes.get('threshold', True) else "❌"
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"🎚️ Threshold   {thresh_status}",
+                    callback_data=f"targets:alerts_toggle:{target_id}:threshold"
+                ),
+                InlineKeyboardButton(
+                    text="⚙️ Edit",
+                    callback_data=f"targets:alerts_set_thresholds:{target_id}"
+                )
+            ])
+
+            # Sensitivity mode with edit button
+            sens_status = "✅" if modes.get('sensitivity', True) else "❌"
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"⚡ Sensitivity {sens_status}",
+                    callback_data=f"targets:alerts_toggle:{target_id}:sensitivity"
+                ),
+                InlineKeyboardButton(
+                    text="⚙️ Edit",
+                    callback_data=f"targets:alerts_set_sensitivity:{target_id}"
+                )
+            ])
+
+            # Dynamic mode (now visible!)
+            dynamic_status = "✅" if modes.get('dynamic', False) else "❌"
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"🔄 Dynamic     {dynamic_status}",
+                    callback_data=f"targets:alerts_toggle:{target_id}:dynamic"
+                )
+            ])
+
+        else:
+            # When disabled: only show enable button
+            keyboard.append([
+                InlineKeyboardButton(
+                    text="🟢 Enable Alerts",
+                    callback_data=f"targets:alerts_enable:{target_id}"
+                )
+            ])
+
+        # Back button
+        keyboard.append([
+            InlineKeyboardButton(text="🔙 Back", callback_data=back_callback)
+        ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -947,3 +1055,42 @@ class Keyboards:
 
         keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data="dynamic_reply:menu")])
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def blockchain_selector(current_chains: List[str], rule_id: int = None, context: str = "routing") -> InlineKeyboardMarkup:
+        """Blockchain selection keyboard for routing rules
+
+        Args:
+            current_chains: List of currently selected blockchains (e.g., ["SOL", "BNB"])
+            rule_id: ID of the rule being edited (None for new rule creation)
+            context: Context for callbacks ("routing" or "curated")
+        """
+        sol_check = "✅" if "SOL" in current_chains else "☐"
+        bnb_check = "✅" if "BNB" in current_chains else "☐"
+
+        # Build callback prefix based on context
+        if rule_id is not None:
+            callback_prefix = f"{context}:blockchain"
+            confirm_callback = f"{context}:blockchain_confirm:{rule_id}"
+            back_callback = f"{context}:view:{rule_id}"
+        else:
+            callback_prefix = f"{context}:blockchain"
+            confirm_callback = f"{context}:blockchain_confirm:new"
+            back_callback = f"{context}:cancel"
+
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"🟣 Solana {sol_check}",
+                    callback_data=f"{callback_prefix}:toggle_sol:{rule_id or 'new'}"
+                ),
+                InlineKeyboardButton(
+                    text=f"🟡 BNB {bnb_check}",
+                    callback_data=f"{callback_prefix}:toggle_bnb:{rule_id or 'new'}"
+                )
+            ],
+            [
+                InlineKeyboardButton(text="◀️ Back", callback_data=back_callback),
+                InlineKeyboardButton(text="✅ Confirm", callback_data=confirm_callback)
+            ]
+        ])

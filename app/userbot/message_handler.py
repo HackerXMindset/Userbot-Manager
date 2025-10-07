@@ -287,11 +287,12 @@ class MessageHandler:
             target_groups = await self.source_manager.get_target_groups_for_source(event.chat_id)
 
             # Process message for tokens regardless of routing rules (needed for curated alpha)
-            addresses = await self.token_monitor.process_source_message(event, event.chat_id, target_groups or [])
+            # Returns list of tuples: [(address, blockchain), ...]
+            tagged_addresses = await self.token_monitor.process_source_message(event, event.chat_id, target_groups or [])
 
             # Handle Curated Alpha logic independently (works without routing rules)
-            if addresses:
-                await self._handle_curated_alpha(addresses, event.chat_id, event)
+            if tagged_addresses:
+                await self._handle_curated_alpha(tagged_addresses, event.chat_id, event)
 
             # Early return if no routing rules for regular forwarding
             if not target_groups:
@@ -300,32 +301,32 @@ class MessageHandler:
 
             logger.info(f"[SPLIT-RESP] Found {len(target_groups)} target groups: {[f'{g['title']}({g['id']})' for g in target_groups]}")
 
-            if not addresses:
+            if not tagged_addresses:
                 logger.debug(f"[SPLIT-RESP] No token addresses found in message")
                 return
-            
-            logger.info(f"[SPLIT-RESP] Extracted {len(addresses)} token addresses: {[addr[:8] + '...' for addr in addresses]}")
+
+            logger.info(f"[SPLIT-RESP] Extracted {len(tagged_addresses)} token addresses: {[(addr[:8] + '...', chain) for addr, chain in tagged_addresses]}")
 
             # Filter out recently forwarded tokens
-            unseen_addresses = []
-            for address in addresses:
+            unseen_tagged_addresses = []
+            for address, blockchain in tagged_addresses:
                 recently_forwarded = await db.fetchval("""
                     SELECT 1 FROM forwarded_tokens_log
-                    WHERE token_address = $1 AND source_chat_id = $2
+                    WHERE token_address = $1 AND source_chat_id = $2 AND blockchain = $3
                     AND forwarded_at > NOW() - INTERVAL '24 hours'
                     LIMIT 1
-                """, address, event.chat_id)
+                """, address, event.chat_id, blockchain)
 
                 if recently_forwarded:
-                    logger.info(f"Token {address[:8]}... from source {event.chat_id} was already forwarded recently. Skipping.")
+                    logger.info(f"Token {address[:8]}... ({blockchain}) from source {event.chat_id} was already forwarded recently. Skipping.")
                 else:
-                    unseen_addresses.append(address)
+                    unseen_tagged_addresses.append((address, blockchain))
 
-            if not unseen_addresses:
+            if not unseen_tagged_addresses:
                 logger.info("All extracted tokens were recently forwarded. Nothing to do.")
                 return
-            
-            addresses_to_forward = unseen_addresses
+
+            addresses_to_forward = unseen_tagged_addresses
             logger.info(f"[SPLIT-RESP] Starting job queue population for {len(addresses_to_forward)} new tokens across {len(target_groups)} target groups")
 
             # Queue tokens for all target groups
@@ -366,8 +367,16 @@ class MessageHandler:
                     logger.info(f"[SPLIT-RESP] Using assigned forwarding userbot {forwarding_userbot_id}")
 
                 # Queue each token for this target group
-                for address in addresses_to_forward:
+                for address, blockchain in addresses_to_forward:
                     try:
+                        # Check blockchain filter
+                        allowed_chains = routing_rule.get('allowed_chains', ['SOL'])
+                        if blockchain not in allowed_chains:
+                            logger.info(f"[CHAIN_FILTER] Rule {routing_rule['id']} allows {allowed_chains}, token is {blockchain} - SKIPPED")
+                            continue
+
+                        logger.debug(f"[CHAIN_FILTER] Rule {routing_rule['id']} allows {allowed_chains}, token is {blockchain} - ALLOWED")
+
                         # Get source info for the call
                         display_source_name = live_source_name or source.get('display_name') or source.get('name') or source.get('title')
                         source_info = f"From {display_source_name or event.chat_id}"
@@ -389,12 +398,13 @@ class MessageHandler:
                             "caller_user_id": event.sender_id,
                         }
 
-                        logger.debug(f"[SPLIT-RESP] Queueing token {address[:8]}... for target {target_group['id']} via userbot {forwarding_userbot_id}")
+                        logger.debug(f"[SPLIT-RESP] Queueing token {address[:8]}... ({blockchain}) for target {target_group['id']} via userbot {forwarding_userbot_id}")
 
-                        # Add job to call queue
+                        # Add job to call queue with blockchain info
                         job = await self.call_queue_model.add_job(
                             routing_rule_id=routing_rule['id'],
                             token_address=address,
+                            blockchain=blockchain,
                             source_message_id=event.id,
                             source_chat_id=event.chat_id,
                             source_user_id=event.sender_id,
@@ -408,16 +418,16 @@ class MessageHandler:
                         if job:
                             group_queued += 1
                             total_queued += 1
-                            logger.debug(f"[SPLIT-RESP] ✅ Job {job['id']} created for {address[:8]}... → {target_group['title']}")
+                            logger.debug(f"[SPLIT-RESP] ✅ Job {job['id']} created for {address[:8]}... ({blockchain}) → {target_group['title']}")
                         else:
                             group_failed += 1
                             total_failed += 1
-                            logger.warning(f"[SPLIT-RESP] ❌ Failed to queue {address[:8]}... for {target_group['title'] or target_group['tg_chat_id']}")
+                            logger.warning(f"[SPLIT-RESP] ❌ Failed to queue {address[:8]}... ({blockchain}) for {target_group['title'] or target_group['tg_chat_id']}")
 
                     except Exception as token_error:
                         group_failed += 1
                         total_failed += 1
-                        logger.error(f"[SPLIT-RESP] ❌ Error queuing token {address[:8]}... for target {target_group['tg_chat_id']} via userbot {self.userbot_id}: {token_error}")
+                        logger.error(f"[SPLIT-RESP] ❌ Error queuing token {address[:8]}... ({blockchain}) for target {target_group['tg_chat_id']} via userbot {self.userbot_id}: {token_error}")
                         import traceback
                         logger.error(f"[SPLIT-RESP] Full traceback: {traceback.format_exc()}")
 
@@ -434,15 +444,15 @@ class MessageHandler:
                     # Use executemany for efficiency if available, otherwise loop
                     if hasattr(db.pool, 'executemany'):
                         await db.pool.executemany("""
-                            INSERT INTO forwarded_tokens_log (token_address, source_chat_id)
-                            VALUES ($1, $2)
-                        """, [(addr, event.chat_id) for addr in addresses_to_forward])
+                            INSERT INTO forwarded_tokens_log (token_address, source_chat_id, blockchain)
+                            VALUES ($1, $2, $3)
+                        """, [(addr, event.chat_id, blockchain) for addr, blockchain in addresses_to_forward])
                     else: # Fallback for pools that don't support it
-                        for addr in addresses_to_forward:
+                        for addr, blockchain in addresses_to_forward:
                              await db.execute("""
-                                INSERT INTO forwarded_tokens_log (token_address, source_chat_id)
-                                VALUES ($1, $2)
-                            """, addr, event.chat_id)
+                                INSERT INTO forwarded_tokens_log (token_address, source_chat_id, blockchain)
+                                VALUES ($1, $2, $3)
+                            """, addr, event.chat_id, blockchain)
                     logger.info(f"Logged {len(addresses_to_forward)} new tokens to forwarded_tokens_log for source {event.chat_id}")
                 except Exception as log_error:
                     logger.error(f"Failed to log forwarded tokens: {log_error}")
@@ -1323,9 +1333,11 @@ class MessageHandler:
             'utils': self.utils
         }
 
-    async def _handle_curated_alpha(self, addresses: List[str], source_chat_id: int, event):
+    async def _handle_curated_alpha(self, tagged_addresses: List[tuple], source_chat_id: int, event):
         """
         Processes tokens against Curated Alpha rules.
+        Args:
+            tagged_addresses: List of (address, blockchain) tuples
         """
         try:
             logger.debug(f"[CuratedAlpha] Processing event for source chat ID: {source_chat_id}")
@@ -1347,8 +1359,13 @@ class MessageHandler:
             )
             current_source_name = self.utils.get_chat_title(getattr(event, 'chat', None))
 
-            for address in addresses:
+            for address, blockchain in tagged_addresses:
                 for rule in rules:
+                    # Check blockchain filter
+                    allowed_chains = rule.get('allowed_chains', ['SOL'])
+                    if blockchain not in allowed_chains:
+                        logger.debug(f"[CuratedAlpha] Rule {rule['id']} allows {allowed_chains}, token is {blockchain} - SKIPPED")
+                        continue
                     rule_id = rule['id']
                     logger.debug(f"[CuratedAlpha] Checking token {address[:8]} against rule {rule_id} ('{rule['name']}')")
                     logger.debug(f"[CuratedAlpha] Rule requirements: Mentions={rule.get('required_mentions', 'All')}, Sources={rule['required_source_chat_ids']}")
@@ -1392,13 +1409,37 @@ class MessageHandler:
                     else:
                         # First time seeing this token for this rule
                         logger.debug(f"[CuratedAlpha] Creating new tracking state for token {address[:8]} in rule {rule_id}.")
-                        await self.curated_alpha_token_state_model.create({
-                            'rule_id': rule_id,
-                            'token_address': address,
-                            'seen_in_source_chat_ids': [source_chat_id]
-                        })
-                        seen_sources_set = {source_chat_id}
-                        required_sources_set = set(rule['required_source_chat_ids'])
+                        try:
+                            await self.curated_alpha_token_state_model.create({
+                                'rule_id': rule_id,
+                                'token_address': address,
+                                'seen_in_source_chat_ids': [source_chat_id]
+                            })
+                            seen_sources_set = {source_chat_id}
+                            required_sources_set = set(rule['required_source_chat_ids'])
+                        except asyncpg.UniqueViolationError:
+                            # Race condition - another message already created this. Refetch and update.
+                            logger.debug(f"[CuratedAlpha] Race condition detected, refetching state for token {address[:8]} in rule {rule_id}")
+                            existing_state = await self.db.fetchrow("""
+                                SELECT * FROM curated_alpha_token_state
+                                WHERE rule_id = $1 AND token_address = $2
+                            """, rule_id, address)
+
+                            if existing_state and existing_state['status'] == 'tracking':
+                                if source_chat_id not in existing_state['seen_in_source_chat_ids']:
+                                    updated_seen_sources = existing_state['seen_in_source_chat_ids'] + [source_chat_id]
+                                    await self.curated_alpha_token_state_model.update(existing_state['id'], {
+                                        'seen_in_source_chat_ids': updated_seen_sources
+                                    })
+                                    logger.debug(f"[CuratedAlpha] Updated token {address[:8]} after race condition. Seen in: {updated_seen_sources}")
+                                    seen_sources_set = set(updated_seen_sources)
+                                else:
+                                    seen_sources_set = set(existing_state['seen_in_source_chat_ids'])
+                            else:
+                                # State exists but not tracking anymore, skip
+                                logger.debug(f"[CuratedAlpha] Token {address[:8]} state exists but status is {existing_state['status'] if existing_state else 'unknown'}. Skipping.")
+                                continue
+                            required_sources_set = set(rule['required_source_chat_ids'])
 
                     # Check if the condition is now met
                     required_sources_set = set(rule['required_source_chat_ids'])
@@ -1495,6 +1536,7 @@ class MessageHandler:
                         await self.call_queue_model.add_job(
                             curated_alpha_rule_id=rule_id,
                             token_address=address,
+                            blockchain=blockchain,
                             source_message_id=event.id,
                             source_chat_id=source_chat_id,
                             source_user_id=event.sender_id,
@@ -1505,7 +1547,7 @@ class MessageHandler:
                             additional_info=additional_info,
                             priority=10 # Higher priority for curated calls
                         )
-                        logger.info(f"[CuratedAlpha] Queued call for {address[:8]}... to {rule['destination_chat_id']}")
+                        logger.info(f"[CuratedAlpha] Queued call for {address[:8]}... ({blockchain}) to {rule['destination_chat_id']}")
 
         except Exception as e:
             logger.error(f"Error in _handle_curated_alpha: {e}", exc_info=True)

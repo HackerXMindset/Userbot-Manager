@@ -13,6 +13,7 @@ pub struct TokenData {
     pub dexscreener_orders_data: Option<Vec<DexScreenerOrder>>,
     pub dev_sol_balance: Option<f64>,
     pub dev_token_holding: Option<DevTokenHolding>,
+    pub vamped_fun_data: Option<VampedFunData>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -472,4 +473,21 @@ pub struct TokenAmount {
     pub decimals: u8,
     pub ui_amount: Option<f64>,
     pub ui_amount_string: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VampedFunData {
+    pub mint_address: Option<String>,
+    pub platform: Option<String>,
+    pub is_vamped: Option<bool>,
+    pub timestamp: Option<String>,
+    pub token_info: Option<VampedTokenInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VampedTokenInfo {
+    pub name: Option<String>,
+    pub symbol: Option<String>,
+    pub image: Option<String>,
 }

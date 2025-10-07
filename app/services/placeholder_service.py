@@ -358,6 +358,13 @@ class PlaceholderService:
             'helius_top10_share': 'N/A',
             'helius_top20_share': 'N/A',
             'helius_remaining_share': 'N/A',
+            'vamped_platform': 'N/A',
+            'vamped_status': 'N/A',
+            'vamped_is_vamped': 'N/A',
+            'vamped_timestamp': 'N/A',
+            'vamped_token_name': 'N/A',
+            'vamped_token_symbol': 'N/A',
+            'vamped_token_image': 'N/A',
         }
 
         for i in range(1, 6):
@@ -996,6 +1003,25 @@ class PlaceholderService:
                         placeholders[
                             f"helius_holder_{entry['index']}_percent_of_supply"
                         ] = format_number(percent, decimals=2)
+
+        # Vamped.fun placeholders
+        vamped_fun_payload = None
+        if rust_payload:
+            vamped_fun_payload = rust_payload.get('vamped_fun')
+
+        if vamped_fun_payload:
+            placeholders['vamped_platform'] = vamped_fun_payload.get('platform') or 'N/A'
+
+            is_vamped = vamped_fun_payload.get('isVamped') or vamped_fun_payload.get('is_vamped')
+            placeholders['vamped_is_vamped'] = 'Yes' if is_vamped else 'No'
+            placeholders['vamped_status'] = '✅ Vamped' if is_vamped else '❌ Not Vamped'
+
+            placeholders['vamped_timestamp'] = vamped_fun_payload.get('timestamp') or 'N/A'
+
+            token_info = vamped_fun_payload.get('tokenInfo') or vamped_fun_payload.get('token_info') or {}
+            placeholders['vamped_token_name'] = token_info.get('name') or 'N/A'
+            placeholders['vamped_token_symbol'] = token_info.get('symbol') or 'N/A'
+            placeholders['vamped_token_image'] = token_info.get('image') or 'N/A'
 
         # Fallback and supplement with DB data
         if db_token:

@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     
     # Solana
     solana_pattern: str = r'\b[1-9A-HJ-NP-Za-km-z]{32,44}\b'
+
+    # BNB/BSC (Ethereum-compatible addresses)
+    bnb_pattern: str = r'0x[a-fA-F0-9]{40}\b'
     
     @field_validator('admin_telegram_ids')
     @classmethod

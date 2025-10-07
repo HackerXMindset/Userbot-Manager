@@ -17,7 +17,8 @@ class CallQueueModel(BaseModel):
                      forwarding_userbot_id: int, routing_rule_id: int = None,
                      curated_alpha_rule_id: int = None, target_group_id: int = None,
                      source_info: str = None, additional_info: str = None,
-                     priority: int = 0, source_user_id: int = None) -> asyncpg.Record:
+                     priority: int = 0, source_user_id: int = None,
+                     blockchain: str = None) -> asyncpg.Record:
         """Add a new call job to the queue, with fallback for older schema."""
 
         try:
@@ -49,6 +50,9 @@ class CallQueueModel(BaseModel):
             if source_user_id:
                 cols.append("source_user_id")
                 vals.append(source_user_id)
+            if blockchain:
+                cols.append("blockchain")
+                vals.append(blockchain)
 
             placeholders = ", ".join([f"${i+1}" for i in range(len(vals))])
             query = f"""

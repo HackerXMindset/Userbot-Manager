@@ -1,6 +1,7 @@
 from typing import Dict, Any, Optional, List
 from .base import BaseModel
 import asyncpg
+import json
 
 class SourceChatModel(BaseModel):
     """Model for managing source chats"""
@@ -54,18 +55,33 @@ class SourceChatModel(BaseModel):
         return await self.db.fetchrow(query, source_chat_id, source_type, name, title)
     
     async def add_routing_rule(self, source_id: int, target_group_id: int,
-                              monitoring_userbot_id: int = None, forwarding_userbot_id: int = None) -> asyncpg.Record:
-        """Add a routing rule from source to target group with userbot assignments"""
+                              monitoring_userbot_id: int = None, forwarding_userbot_id: int = None,
+                              allowed_chains: List[str] = None) -> asyncpg.Record:
+        """Add a routing rule from source to target group with userbot assignments and blockchain filter"""
+        if allowed_chains is None:
+            allowed_chains = ["SOL", "BNB"]  # Default to both chains for new rules
+
+        # Validate blockchain identifiers
+        VALID_CHAINS = {"SOL", "BNB"}
+
+        if not allowed_chains:
+            raise ValueError("At least one blockchain must be selected")
+
+        invalid_chains = set(allowed_chains) - VALID_CHAINS
+        if invalid_chains:
+            raise ValueError(f"Invalid blockchain identifiers: {invalid_chains}. Valid options: {VALID_CHAINS}")
+
         query = """
-            INSERT INTO routing_rules (source_chat_id, target_group_id, monitoring_userbot_id, forwarding_userbot_id)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO routing_rules (source_chat_id, target_group_id, monitoring_userbot_id, forwarding_userbot_id, allowed_chains)
+            VALUES ($1, $2, $3, $4, $5::jsonb)
             ON CONFLICT (source_chat_id, target_group_id) DO UPDATE SET
                 enabled = true,
                 monitoring_userbot_id = $3,
-                forwarding_userbot_id = $4
+                forwarding_userbot_id = $4,
+                allowed_chains = $5::jsonb
             RETURNING *
         """
-        return await self.db.fetchrow(query, source_id, target_group_id, monitoring_userbot_id, forwarding_userbot_id)
+        return await self.db.fetchrow(query, source_id, target_group_id, monitoring_userbot_id, forwarding_userbot_id, json.dumps(allowed_chains))
     
     async def get_routing_rules(self, source_id: int) -> List[asyncpg.Record]:
         """Get all routing rules for a source with userbot assignments"""
@@ -89,6 +105,26 @@ class SourceChatModel(BaseModel):
         query = "DELETE FROM routing_rules WHERE source_chat_id = $1 AND target_group_id = $2"
         result = await self.db.execute(query, source_id, target_group_id)
         return result.split()[-1] == '1'
+
+    async def update_routing_rule_chains(self, rule_id: int, allowed_chains: List[str]) -> asyncpg.Record:
+        """Update allowed_chains for a routing rule"""
+        # Validate blockchain identifiers
+        VALID_CHAINS = {"SOL", "BNB"}
+
+        if not allowed_chains:
+            raise ValueError("At least one blockchain must be selected")
+
+        invalid_chains = set(allowed_chains) - VALID_CHAINS
+        if invalid_chains:
+            raise ValueError(f"Invalid blockchain identifiers: {invalid_chains}. Valid options: {VALID_CHAINS}")
+
+        query = """
+            UPDATE routing_rules
+            SET allowed_chains = $1::jsonb
+            WHERE id = $2
+            RETURNING *
+        """
+        return await self.db.fetchrow(query, json.dumps(allowed_chains), rule_id)
     
     async def toggle_enabled(self, source_id: int) -> bool:
         """Toggle source chat enabled status"""

@@ -138,7 +138,7 @@ class ManagementBot:
         # Sources
         self.dp.callback_query.register(
             self.sources_handler.handle_sources_action,
-            F.data.startswith(('sources:', 'add_route_page:', 'sources_manage_page:')),
+            F.data.startswith(('sources:', 'add_route_page:', 'sources_manage_page:', 'routing:')),
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
