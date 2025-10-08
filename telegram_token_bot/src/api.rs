@@ -1,3 +1,4 @@
+use crate::social::format_social_label;
 use crate::types::*;
 use anyhow::{anyhow, Result};
 use reqwest::Client;
@@ -36,7 +37,14 @@ impl ApiClient {
         Ok(Self { client, api_key })
     }
 
-    pub async fn analyze_token(&self, mint_address: &str) -> Result<TokenData> {
+    pub async fn analyze_token(&self, contract: &DetectedContract) -> Result<TokenAnalysis> {
+        match contract.chain {
+            Chain::Solana => self.analyze_solana_token(&contract.address).await,
+            Chain::Bnb => self.analyze_bnb_token(&contract.address).await,
+        }
+    }
+
+    async fn analyze_solana_token(&self, mint_address: &str) -> Result<TokenAnalysis> {
         let (
             dexscreener_result,
             holders_result,
@@ -94,7 +102,26 @@ impl ApiClient {
             vamped_fun_data: vamped_result.ok(),
         };
 
-        Ok(token_data)
+        Ok(TokenAnalysis::Solana(token_data))
+    }
+
+    pub async fn analyze_bnb_token(&self, contract_address: &str) -> Result<TokenAnalysis> {
+        let (okx_result, dexscreener_result, token_summary_result, orders_result) = tokio::join!(
+            self.get_okx_latest_info(contract_address),
+            self.get_dexscreener_data(contract_address),
+            self.get_dexscreener_token_summary(contract_address),
+            self.get_dexscreener_orders_data("bsc", contract_address),
+        );
+
+        let raw_data = okx_result?;
+        let normalized = Self::normalize_bnb_data(
+            contract_address,
+            &raw_data,
+            dexscreener_result.ok(),
+            token_summary_result.ok(),
+            orders_result.ok(),
+        );
+        Ok(TokenAnalysis::Bnb(normalized))
     }
 
     pub async fn fetch_dex_payload(&self, mint_address: &str) -> Result<DexPayload> {
@@ -153,6 +180,179 @@ impl ApiClient {
             supply_ui_amount,
             dev_token_holding,
             vamped_fun,
+        })
+    }
+
+    async fn get_okx_latest_info(&self, contract_address: &str) -> Result<OkxTokenData> {
+        let url = format!(
+            "https://web3.okx.com/priapi/v1/dx/market/v2/latest/info?tokenContractAddress={}&chainId=56",
+            contract_address
+        );
+        let response = timeout(Duration::from_secs(5), self.client.get(&url).send()).await??;
+        let payload: OkxLatestInfoResponse = response.json().await?;
+        if let Some(data) = payload.data {
+            Ok(data)
+        } else {
+            let message = payload
+                .error_message
+                .or(payload.msg)
+                .or(payload.detail_msg)
+                .or(payload.error_code)
+                .unwrap_or_else(|| "unknown error".to_string());
+            Err(anyhow!(
+                "OKX latest info missing data for {} ({})",
+                contract_address,
+                message
+            ))
+        }
+    }
+
+    async fn get_dexscreener_token_summary(
+        &self,
+        contract_address: &str,
+    ) -> Result<Vec<TokenPair>> {
+        let url = format!(
+            "https://api.dexscreener.com/tokens/v1/bsc/{}",
+            contract_address
+        );
+        let response = timeout(Duration::from_secs(3), self.client.get(&url).send()).await??;
+        let data: Vec<TokenPair> = response.json().await?;
+        Ok(data)
+    }
+
+    fn normalize_bnb_data(
+        contract_address: &str,
+        raw: &OkxTokenData,
+        dexscreener_data: Option<DexScreenerData>,
+        dexscreener_token_summary: Option<Vec<TokenPair>>,
+        dexscreener_orders: Option<Vec<DexScreenerOrder>>,
+    ) -> BnbTokenData {
+        let resolved_address = raw
+            .token_contract_address
+            .as_ref()
+            .map(|addr| addr.trim())
+            .filter(|addr| !addr.is_empty())
+            .map(|addr| addr.to_string())
+            .unwrap_or_else(|| contract_address.to_string());
+
+        let price = Self::parse_opt_f64(raw.price.as_ref());
+        let change_24h = Self::parse_opt_f64(raw.change.as_ref());
+        let change_4h = Self::parse_opt_f64(raw.change_4h.as_ref());
+        let change_1h = Self::parse_opt_f64(raw.change_1h.as_ref());
+        let change_5m = Self::parse_opt_f64(raw.change_5m.as_ref());
+        let market_cap = Self::parse_opt_f64(raw.market_cap.as_ref());
+        let liquidity = Self::parse_opt_f64(raw.liquidity.as_ref());
+        let volume_24h = Self::parse_opt_f64(raw.volume.as_ref());
+        let holders = Self::parse_opt_u64(raw.holders.as_ref());
+        let top10 = Self::parse_opt_f64(raw.top10_hold_amount_percentage.as_ref());
+        let dev_ratio = Self::parse_opt_f64(raw.dev_holding_ratio.as_ref());
+        let risk_level = Self::parse_opt_u8(raw.risk_level.as_ref());
+
+        let token_logo_url = Self::normalize_url(raw.token_logo_url.clone())
+            .or_else(|| Self::normalize_url(raw.token_large_logo_url.clone()));
+
+        let chain_name = raw
+            .chain_name
+            .as_ref()
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
+            .map(|name| name.to_string());
+
+        let holder_maps_url = Self::normalize_url(
+            raw.token_third_part_info
+                .as_ref()
+                .and_then(|info| info.okx_web_site_url.clone()),
+        );
+
+        let bubble_maps_url = Self::normalize_url(
+            raw.token_third_part_info
+                .as_ref()
+                .and_then(|info| info.third_party_web_site_url.clone()),
+        );
+
+        let dex_socials = dexscreener_data
+            .as_ref()
+            .and_then(|dex| dex.pairs.as_ref())
+            .and_then(|pairs| pairs.first())
+            .and_then(|pair| pair.info.as_ref())
+            .and_then(|info| info.socials.as_ref())
+            .map(|socials| {
+                socials
+                    .iter()
+                    .filter_map(|social| {
+                        let handle = social
+                            .handle
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|h| !h.is_empty())?;
+                        let label = format_social_label(social.platform.as_deref(), handle);
+                        Some(format!("{}: {}", label, handle))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .and_then(|entries| {
+                if entries.is_empty() {
+                    None
+                } else {
+                    Some(entries.join("\n"))
+                }
+            });
+
+        BnbTokenData {
+            contract_address: resolved_address,
+            name: raw
+                .token_name
+                .as_ref()
+                .map(|name| name.trim().to_string())
+                .unwrap_or_default(),
+            symbol: raw
+                .token_symbol
+                .as_ref()
+                .map(|symbol| symbol.trim().to_string())
+                .unwrap_or_default(),
+            price,
+            change_24h,
+            change_4h,
+            change_1h,
+            change_5m,
+            market_cap,
+            liquidity,
+            volume_24h,
+            holders,
+            top10_hold_percentage: top10,
+            dev_holding_ratio: dev_ratio,
+            risk_level,
+            chain_name,
+            token_logo_url,
+            holder_maps_url,
+            bubble_maps_url,
+            dex_socials,
+            dexscreener_data,
+            dexscreener_token_summary,
+            dexscreener_orders_data: dexscreener_orders,
+        }
+    }
+
+    fn parse_opt_f64(value: Option<&String>) -> Option<f64> {
+        value.and_then(|raw| raw.trim().parse::<f64>().ok())
+    }
+
+    fn parse_opt_u64(value: Option<&String>) -> Option<u64> {
+        value.and_then(|raw| raw.trim().parse::<u64>().ok())
+    }
+
+    fn parse_opt_u8(value: Option<&String>) -> Option<u8> {
+        value.and_then(|raw| raw.trim().parse::<u8>().ok())
+    }
+
+    fn normalize_url(value: Option<String>) -> Option<String> {
+        value.and_then(|raw| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
         })
     }
 
@@ -272,12 +472,13 @@ impl ApiClient {
         });
         let response = timeout(
             Duration::from_secs(5),
-            self.client.post(url)
+            self.client
+                .post(url)
                 .header("Content-Type", "application/json")
                 .header("Origin", "https://www.vamped.fun")
                 .header("Referer", "https://www.vamped.fun/")
                 .json(&payload)
-                .send()
+                .send(),
         )
         .await??;
 

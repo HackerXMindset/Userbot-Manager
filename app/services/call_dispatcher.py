@@ -130,6 +130,16 @@ class CallDispatcher:
             forwarding_userbot_id = job['forwarding_userbot_id']
             token_address = job['token_address']
             target_chat_id = job['target_chat_id']
+            additional_info = self._parse_additional_info(job.get('additional_info'))
+
+            blockchain_value = job.get('blockchain') or additional_info.get('blockchain')
+            if blockchain_value:
+                blockchain = str(blockchain_value).upper()
+                if not job.get('blockchain') and additional_info.get('blockchain'):
+                    logger.debug("Falling back to blockchain %s from additional_info for job %s", blockchain, job_id)
+            else:
+                blockchain = 'SOL'
+
             # --- NEW SIMPLIFIED TEMPLATE LOGIC ---
             message_content = token_address
             use_mgmt_bot = False
@@ -141,13 +151,19 @@ class CallDispatcher:
                 group_record = await db.fetchrow("SELECT id FROM groups WHERE tg_chat_id = $1", target_chat_id)
                 if group_record:
                     target_group_id = group_record['id']
-                    logger.debug(f"Dispatcher found group_id {target_group_id} for chat {target_chat_id}")
-                    template_record = await self.assignment_model.get_template_for_group(target_group_id)
+                    logger.debug(
+                        "Dispatcher found group_id %s for chat %s (blockchain %s)",
+                        target_group_id,
+                        target_chat_id,
+                        blockchain,
+                    )
+                    template_record = await self.assignment_model.get_template_for_group(
+                        target_group_id,
+                        blockchain=blockchain,
+                    )
             except Exception as e:
                 logger.error(f"Error looking up template for chat {target_chat_id}: {e}")
             # --- END NEW LOGIC ---
-
-            additional_info = self._parse_additional_info(job.get('additional_info'))
 
             # Handle message override for system-generated calls like PNL alerts
             message_override = additional_info.get('message_override')
@@ -173,6 +189,7 @@ class CallDispatcher:
                 job_context['current_call_sources'] = source_details
                 job_context['current_caller_name'] = caller_name
                 job_context['current_caller_id'] = caller_user_id
+                job_context['blockchain'] = blockchain
                 
                 placeholder_service = PlaceholderService(token_address, job_context)
                 placeholders = await placeholder_service.get_all_placeholders()

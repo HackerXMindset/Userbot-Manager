@@ -265,7 +265,7 @@ class ManagementBot:
         # Templates
         self.dp.callback_query.register(
             self.templates_handler.handle_templates_action,
-            F.data.startswith(('templates:', 'templates_page:')),
+            F.data.startswith(('templates:', 'templates_page:', 'templates_assign_page:')),
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
 
@@ -638,7 +638,7 @@ class ManagementBot:
         elif action == 'curate_alpha':
             await self.curate_alpha_handler.show_curate_alpha_menu(query)
         elif action == 'templates':
-            await self.templates_handler.show_templates_menu(query)
+            await self.templates_handler.show_templates_root(query)
         elif action == 'close':
             await query.message.delete()
         

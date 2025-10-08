@@ -1,4 +1,5 @@
 import logging
+import re
 from aiogram import types
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -19,11 +20,84 @@ class TemplatesHandler:
         self.template_model = TemplateModel(db)
         self.assignment_model = TemplateAssignmentModel(db)
         self.group_model = GroupModel(db)
+        self._placeholder_pattern = re.compile(r"\{([^{}]+)\}|\$\{([^{}]+)\}")
 
-    async def show_templates_menu(self, query: types.CallbackQuery, page: int = 1):
-        """Display the main templates management menu with pagination."""
+    # ------------------------------ Helpers ------------------------------
+
+    def _extract_placeholders(self, text: str) -> set:
+        placeholders = set()
+        if not text:
+            return placeholders
+        for match in self._placeholder_pattern.finditer(text):
+            key = match.group(1) or match.group(2)
+            if key:
+                placeholders.add(key)
+        return placeholders
+
+    def _validate_template_text(self, text: str, blockchain: str) -> None:
+        chain = (blockchain or 'SOL').upper()
+        placeholders = self._extract_placeholders(text)
+
+        if chain != 'BNB':
+            bnb_keys = sorted(p for p in placeholders if p.startswith('bnb_'))
+            if bnb_keys:
+                formatted = ', '.join(f"{{{key}}}" for key in bnb_keys)
+                raise ValueError(
+                    f"❌ SOL templates cannot use BNB-only placeholders: {formatted}"
+                )
+        else:
+            sol_specific_prefixes = ('jup_', 'helius_', 'pump_', 'vamped_', 'sol_', 'birdeye_')
+            sol_keys = sorted(
+                p for p in placeholders if any(p.startswith(prefix) for prefix in sol_specific_prefixes)
+            )
+            if sol_keys:
+                formatted = ', '.join(f"{{{key}}}" for key in sol_keys)
+                raise ValueError(
+                    f"❌ BNB templates cannot use Solana-only placeholders: {formatted}"
+                )
+
+    def _placeholder_help_text(self, blockchain: str) -> str:
+        chain = (blockchain or 'SOL').upper()
+        if chain == 'BNB':
+            return (
+                "BNB-only placeholders start with <code>{bnb_...}</code>."
+                " Useful ones include <code>{bnb_price}</code>, <code>{bnb_change_24h}</code>,"
+                " <code>{bnb_market_cap}</code>, and summary slots like"
+                " <code>{bnb_summary_1_price_usd}</code> or <code>{bnb_summary_1_liquidity_usd}</code>."
+                " General placeholders such as <code>{address}</code>, <code>{token_name}</code>,"
+                " <code>{volume_h24}</code>, and <code>{txns_h24_buys}</code> work for both chains."
+            )
+
+        return (
+            "General placeholders like <code>{address}</code>, <code>{token_name}</code>,"
+            " <code>{price_usd}</code>, and <code>{volume_h24}</code> are available."
+            " SOL templates cannot use BNB-only keys (<code>{bnb_...}</code>)."
+        )
+
+    async def show_templates_root(self, query: types.CallbackQuery):
+        """Show chain selector before listing templates."""
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🟣 Solana Templates", callback_data="templates:chain:SOL"),
+            ],
+            [
+                InlineKeyboardButton(text="🟡 BNB Templates", callback_data="templates:chain:BNB"),
+            ],
+            [
+                InlineKeyboardButton(text="🔙 Back", callback_data="menu:main"),
+            ],
+        ])
+
+        await query.message.edit_text(
+            "<b>📝 Custom Post Templates</b>\n\nChoose which blockchain's templates to manage.",
+            reply_markup=keyboard,
+        )
+
+    async def show_templates_menu(self, query: types.CallbackQuery, blockchain: str, page: int = 1):
+        """Display templates for a specific blockchain with pagination."""
         try:
-            templates = await self.template_model.get_all_with_assignment_counts()
+            chain = (blockchain or 'SOL').upper()
+            templates = await self.template_model.get_all_with_assignment_counts(chain)
             
             page_size = 9
             total_pages = (len(templates) + page_size - 1) // page_size if templates else 1
@@ -31,27 +105,37 @@ class TemplatesHandler:
             end_index = start_index + page_size
             paginated_templates = templates[start_index:end_index]
 
-            text = f"<b>📝 Custom Post Templates ({len(templates)})</b> (Page {page}/{total_pages})\n\n"
-            text += "Manage templates for call messages."
+            text = (
+                f"<b>📝 {chain} Templates ({len(templates)})</b> "
+                f"(Page {page}/{total_pages})\n\nManage templates for call messages."
+            )
 
             keyboard_rows = []
             for t in paginated_templates:
+                chain_label = t.get('blockchain', 'SOL')
                 keyboard_rows.append([
                     InlineKeyboardButton(
-                        text=f"{t['name']} ({t['assignment_count']} assigned)",
+                        text=f"{t['name']} [{chain_label}] ({t['assignment_count']} assigned)",
                         callback_data=f"templates:view:{t['id']}"
                     )
                 ])
 
             if total_pages > 1:
-                pagination_buttons = self.keyboards.pagination(f"templates_page", page, total_pages)
+                pagination_buttons = self.keyboards.pagination(
+                    f"templates_page:{chain}",
+                    page,
+                    total_pages,
+                )
                 keyboard_rows.append(pagination_buttons)
 
             keyboard_rows.append([
-                InlineKeyboardButton(text="➕ Create New Template", callback_data="templates:add")
+                InlineKeyboardButton(
+                    text=f"➕ Create New {chain} Template",
+                    callback_data=f"templates:add:{chain}"
+                )
             ])
             keyboard_rows.append([
-                InlineKeyboardButton(text="🔙 Back", callback_data="menu:main")
+                InlineKeyboardButton(text="🔙 Back", callback_data="templates:main")
             ])
 
             await query.message.edit_text(
@@ -68,32 +152,78 @@ class TemplatesHandler:
         """Handle callbacks for the templates section."""
         parts = query.data.split(':')
 
-        # Pagination for main templates menu
+        # Pagination for chain-specific templates menu
         if parts[0] == 'templates_page':
-            if len(parts) > 2 and parts[1] == 'page' and parts[2].isdigit():
-                page = int(parts[2])
-                await self.show_templates_menu(query, page=page)
+            logger.info(f"[TEMPLATES DEBUG] templates_page callback parts={parts}")
+            if len(parts) >= 4 and parts[2] == 'page' and parts[3].isdigit():
+                chain = parts[1]
+                page = int(parts[3])
+                await self.show_templates_menu(query, chain, page=page)
             else:
                 await query.answer()
             return
 
         # Pagination for assignment menu
         if parts[0] == 'templates_assign_page':
-            template_id = int(parts[1])
-            if len(parts) > 3 and parts[2] == 'page' and parts[3].isdigit():
-                page = int(parts[3])
+            logger.info(f"[TEMPLATES DEBUG] ===== PAGINATION CALLBACK =====")
+            logger.info(f"[TEMPLATES DEBUG] Full callback data: {query.data}")
+            logger.info(f"[TEMPLATES DEBUG] Split parts: {parts}")
+            logger.info(f"[TEMPLATES DEBUG] Number of parts: {len(parts)}")
+
+            if len(parts) >= 5:
+                logger.info(f"[TEMPLATES DEBUG] parts[0]={parts[0]}")
+                logger.info(f"[TEMPLATES DEBUG] parts[1]={parts[1]} (template_id)")
+                logger.info(f"[TEMPLATES DEBUG] parts[2]={parts[2]} (chain)")
+                logger.info(f"[TEMPLATES DEBUG] parts[3]={parts[3]} (should be 'page')")
+                logger.info(f"[TEMPLATES DEBUG] parts[4]={parts[4]} (page number)")
+                logger.info(f"[TEMPLATES DEBUG] parts[3] == 'page': {parts[3] == 'page'}")
+                logger.info(f"[TEMPLATES DEBUG] parts[4].isdigit(): {parts[4].isdigit()}")
+
+            if len(parts) >= 5 and parts[3] == 'page' and parts[4].isdigit():
+                logger.info(f"[TEMPLATES DEBUG] >>> Taking NEW FORMAT branch (5-part)")
+                template_id = int(parts[1])
+                chain = parts[2]
+                page = int(parts[4])
+                logger.info(f"[TEMPLATES DEBUG] Parsed: template_id={template_id}, chain={chain}, page={page}")
+                logger.info(f"[TEMPLATES DEBUG] Updating state with chain={chain}")
+                await state.update_data(template_assignment_chain=chain)
+                logger.info(f"[TEMPLATES DEBUG] Calling show_assignment_menu...")
                 await self.show_assignment_menu(query, template_id, state, page=page)
+                logger.info(f"[TEMPLATES DEBUG] show_assignment_menu completed")
+            elif len(parts) >= 4 and parts[2] == 'page' and parts[3].isdigit():
+                logger.info(f"[TEMPLATES DEBUG] >>> Taking LEGACY FORMAT branch (3-part)")
+                template_id = int(parts[1])
+                page = int(parts[3])
+                logger.info(f"[TEMPLATES DEBUG] Parsed: template_id={template_id}, page={page}")
+                logger.info(f"[TEMPLATES DEBUG] Calling show_assignment_menu...")
+                await self.show_assignment_menu(query, template_id, state, page=page)
+                logger.info(f"[TEMPLATES DEBUG] show_assignment_menu completed")
             else:
+                logger.warning(f"[TEMPLATES DEBUG] >>> NO BRANCH MATCHED - unable to parse!")
+                logger.warning(f"[TEMPLATES DEBUG] Condition checks:")
+                logger.warning(f"[TEMPLATES DEBUG]   - len(parts) >= 5: {len(parts) >= 5}")
+                if len(parts) >= 5:
+                    logger.warning(f"[TEMPLATES DEBUG]   - parts[3] == 'page': {parts[3] == 'page'} (parts[3]='{parts[3]}')")
+                    logger.warning(f"[TEMPLATES DEBUG]   - parts[4].isdigit(): {parts[4].isdigit()} (parts[4]='{parts[4]}')")
+                logger.warning(f"[TEMPLATES DEBUG]   - len(parts) >= 4: {len(parts) >= 4}")
+                if len(parts) >= 4:
+                    logger.warning(f"[TEMPLATES DEBUG]   - parts[2] == 'page': {parts[2] == 'page'} (parts[2]='{parts[2]}')")
+                    logger.warning(f"[TEMPLATES DEBUG]   - parts[3].isdigit(): {parts[3].isdigit()} (parts[3]='{parts[3]}')")
                 await query.answer()
+            logger.info(f"[TEMPLATES DEBUG] ===== END PAGINATION CALLBACK =====")
             return
 
         action = parts[1]
-        item_id = int(parts[2]) if len(parts) > 2 else None
+        item_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
 
         if action == 'main':
-            await self.show_templates_menu(query, page=1)
+            await self.show_templates_root(query)
+        elif action == 'chain':
+            chain = parts[2] if len(parts) > 2 else 'SOL'
+            await self.show_templates_menu(query, chain, page=1)
         elif action == 'add':
-            await self.wizard_start_add(query, state)
+            chain = parts[2] if len(parts) > 2 else 'SOL'
+            await self.wizard_start_add(query, state, chain)
         elif action == 'view':
             await self.show_template_details(query, item_id)
         elif action == 'delete':
@@ -124,12 +254,13 @@ class TemplatesHandler:
             template = await self.template_model.get_by_id(template_id)
             if not template:
                 await query.answer("❌ Template not found.")
-                return await self.show_templates_menu(query)
+                return await self.show_templates_root(query)
 
             assigned_groups = await self.assignment_model.get_assigned_groups(template_id)
 
             import html
             text = f"<b>📝 Template: {template['name']}</b>\n\n"
+            text += f"<b>Blockchain:</b> {template.get('blockchain', 'SOL')}\n"
             text += f"<b>Assignments:</b> {len(assigned_groups)} groups\n\n"
             text += "<b>Preview:</b>\n"
             text += f"<pre>{html.escape(template['template_text'])}</pre>"
@@ -147,7 +278,7 @@ class TemplatesHandler:
                     InlineKeyboardButton(text="🗑️ Delete", callback_data=f"templates:delete:{template_id}")
                 ],
                 [
-                    InlineKeyboardButton(text="🔙 Back to Templates", callback_data="templates:main")
+                    InlineKeyboardButton(text="🔙 Back to Templates", callback_data=f"templates:chain:{template.get('blockchain', 'SOL')}")
                 ]
             ])
 
@@ -184,13 +315,21 @@ class TemplatesHandler:
                 return
 
             all_groups = await self.group_model.get_groups_with_stats()
-            
+            chain = template.get('blockchain', 'SOL')
+
             # Initialize state if it's not already set for this wizard
             if await state.get_state() != ManagementStates.template_assign_select_groups:
                 assigned_groups_records = await self.assignment_model.get_assigned_groups(template_id)
-                assigned_group_ids = {g['id'] for g in assigned_groups_records}
+                assigned_group_ids = {
+                    g['id']
+                    for g in assigned_groups_records
+                    if g.get('blockchain', chain) == chain
+                }
                 await state.set_state(ManagementStates.template_assign_select_groups)
-                await state.update_data(current_assignments=list(assigned_group_ids))
+                await state.update_data(
+                    current_assignments=list(assigned_group_ids),
+                    template_assignment_chain=chain,
+                )
 
             data = await state.get_data()
             current_assignments = set(data.get('current_assignments', []))
@@ -203,8 +342,11 @@ class TemplatesHandler:
             end_index = start_index + page_size
             paginated_groups = all_groups[start_index:end_index]
 
-            text = f"🤝 Assign Template: <b>{template['name']}</b> (Page {page}/{total_pages})\n\n"
-            text += "Select which target groups should use this template."
+            text = (
+                f"🤝 Assign Template: <b>{template['name']}</b>\n"
+                f"<b>Blockchain:</b> {chain} (Page {page}/{total_pages})\n\n"
+                "Select which target groups should use this template."
+            )
 
             keyboard_rows = []
             for group in paginated_groups:
@@ -219,7 +361,8 @@ class TemplatesHandler:
                 ])
             
             if total_pages > 1:
-                pagination_buttons = self.keyboards.pagination(f"templates_assign_page:{template_id}", page, total_pages)
+                pagination_prefix = f"templates_assign_page:{template_id}:{chain}"
+                pagination_buttons = self.keyboards.pagination(pagination_prefix, page, total_pages)
                 keyboard_rows.append(pagination_buttons)
 
             keyboard_rows.append([
@@ -241,6 +384,11 @@ class TemplatesHandler:
             data = await state.get_data()
             current_assignments = set(data.get('current_assignments', []))
             page = data.get('current_page', 1)
+            chain = data.get('template_assignment_chain')
+            if not chain:
+                template = await self.template_model.get_by_id(template_id)
+                chain = template.get('blockchain', 'SOL') if template else 'SOL'
+                await state.update_data(template_assignment_chain=chain)
 
             if group_id in current_assignments:
                 current_assignments.remove(group_id)
@@ -262,20 +410,25 @@ class TemplatesHandler:
         try:
             data = await state.get_data()
             new_assignments = set(data.get('current_assignments', []))
+            chain = data.get('template_assignment_chain', 'SOL')
 
             # Fetch current DB assignments for this template
             existing_assignments = await self.assignment_model.get_assigned_groups(template_id)
-            existing_ids = {group['id'] for group in existing_assignments}
+            existing_ids = {
+                group['id']
+                for group in existing_assignments
+                if group.get('blockchain', chain) == chain
+            }
 
             # Determine groups to remove and add
             to_remove = existing_ids - new_assignments
             to_add = new_assignments - existing_ids
 
             for group_id in to_remove:
-                await self.assignment_model.unassign(group_id)
+                await self.assignment_model.unassign(group_id, blockchain=chain)
 
             for group_id in to_add:
-                await self.assignment_model.assign(group_id, template_id)
+                await self.assignment_model.assign(group_id, template_id, blockchain=chain)
 
             await query.answer("✅ Assignments saved!")
             await state.clear()
@@ -304,20 +457,24 @@ class TemplatesHandler:
     async def delete_template(self, query: types.CallbackQuery, template_id: int):
         """Delete a template after confirmation."""
         try:
+            template = await self.template_model.get_by_id(template_id)
+            chain = template.get('blockchain', 'SOL') if template else 'SOL'
             await self.template_model.delete(template_id)
             await query.answer("✅ Template deleted successfully.")
-            await self.show_templates_menu(query)
+            await self.show_templates_menu(query, chain)
         except Exception as e:
             logger.error(f"Error deleting template: {e}")
             await query.answer("❌ Error deleting template.")
 
-    async def wizard_start_add(self, query: types.CallbackQuery, state: FSMContext):
-        """Start the 'add new template' wizard."""
+    async def wizard_start_add(self, query: types.CallbackQuery, state: FSMContext, blockchain: str = 'SOL'):
+        """Start the 'add new template' wizard for a specific blockchain."""
         await state.clear()
+        chain = (blockchain or 'SOL').upper()
+        await state.update_data(template_blockchain=chain)
         await query.message.edit_text(
-            "<b>➕ Create New Template (1/2)</b>\n\n"
+            f"<b>➕ Create New {chain} Template (1/2)</b>\n\n"
             "Please enter a unique name for this template (e.g., 'Standard Call', 'Pump.fun Special').",
-            reply_markup=self.keyboards.cancel_button("templates:main")
+            reply_markup=self.keyboards.cancel_button(f"templates:chain:{chain}")
         )
         await state.set_state(ManagementStates.template_add_name)
 
@@ -333,13 +490,17 @@ class TemplatesHandler:
             await message.reply("A template with this name already exists. Please choose another name.")
             return
 
+        data = await state.get_data()
+        chain = data.get('template_blockchain', 'SOL')
+
         await state.update_data(template_name=template_name)
-        
+
         await message.reply(
-            "<b>➕ Create New Template (2/2)</b>\n\n"
+            f"<b>➕ Create New {chain} Template (2/2)</b>\n\n"
             "Great! Now, please send the template text. You can use placeholders like `{address}`, `${token_symbol}`, etc.\n\n"
-            "Use standard Telegram markdown for formatting.",
-            reply_markup=self.keyboards.cancel_button("templates:main")
+            "Use standard Telegram markdown for formatting.\n\n"
+            f"{self._placeholder_help_text(chain)}",
+            reply_markup=self.keyboards.cancel_button(f"templates:chain:{chain}")
         )
         await state.set_state(ManagementStates.template_add_text)
 
@@ -348,16 +509,27 @@ class TemplatesHandler:
         template_text = message.text
         data = await state.get_data()
         template_name = data.get("template_name")
+        chain = data.get("template_blockchain", 'SOL')
 
         if not template_name:
-            await message.reply("Session expired, please start over.", reply_markup=self.keyboards.back_button("templates:main"))
+            await message.reply(
+                "Session expired, please start over.",
+                reply_markup=self.keyboards.back_button("templates:main"),
+            )
             await state.clear()
+            return
+
+        try:
+            self._validate_template_text(template_text, chain)
+        except ValueError as err:
+            await message.reply(str(err))
             return
 
         try:
             new_template = await self.template_model.create({
                 "name": template_name,
-                "template_text": template_text
+                "template_text": template_text,
+                "blockchain": chain
             })
             await message.reply(
                 f"✅ Template '<b>{template_name}</b>' created successfully!",
@@ -397,9 +569,12 @@ class TemplatesHandler:
     async def wizard_edit_text(self, query: types.CallbackQuery, template_id: int, state: FSMContext):
         """Start the wizard to edit a template's text."""
         await state.clear()
-        await state.update_data(template_id=template_id)
+        template = await self.template_model.get_by_id(template_id)
+        chain = template.get('blockchain', 'SOL') if template else 'SOL'
+        await state.update_data(template_id=template_id, template_blockchain=chain)
         await query.message.edit_text(
-            "✏️ Please send the new template text.",
+            "✏️ Please send the new template text.\n\n"
+            f"{self._placeholder_help_text(chain)}",
             reply_markup=self.keyboards.cancel_button(f"templates:view:{template_id}")
         )
         await state.set_state(ManagementStates.template_edit_text)
@@ -429,10 +604,17 @@ class TemplatesHandler:
         new_text = message.text
         data = await state.get_data()
         template_id = data.get("template_id")
+        chain = data.get('template_blockchain', 'SOL')
 
         if not template_id:
             await message.reply("Session expired, please start over.")
             await state.clear()
+            return
+
+        try:
+            self._validate_template_text(new_text, chain)
+        except ValueError as err:
+            await message.reply(str(err))
             return
 
         try:

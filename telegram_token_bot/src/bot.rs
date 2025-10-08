@@ -1,7 +1,10 @@
 use crate::api::ApiClient;
+use crate::social::{detect_social_platform, format_social_label};
 use crate::types::*;
 use anyhow::Result;
+use once_cell::sync::Lazy;
 use regex::Regex;
+use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 use teloxide::update_listeners::{AsUpdateStream, UpdateListener};
@@ -9,6 +12,12 @@ use teloxide::{prelude::*, types::UpdateKind, update_listeners, utils::html};
 use tokio::sync::watch;
 use tokio_stream::StreamExt;
 use tracing::error;
+
+static SOLANA_ADDRESS_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b").expect("valid solana regex"));
+
+static BNB_ADDRESS_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\b0x[a-fA-F0-9]{40}\b").expect("valid bnb regex"));
 
 fn format_compact_amount(value: f64) -> String {
     let abs_val = value.abs();
@@ -23,6 +32,79 @@ fn format_compact_amount(value: f64) -> String {
     } else {
         format!("{:.2}", value)
     }
+}
+
+fn format_float_trimmed(value: f64, decimals: usize) -> String {
+    let mut formatted = format!("{:.*}", decimals, value);
+    if formatted.contains('.') {
+        while formatted.ends_with('0') {
+            formatted.pop();
+        }
+        if formatted.ends_with('.') {
+            formatted.pop();
+        }
+    }
+    if formatted.is_empty() {
+        "0".to_string()
+    } else {
+        formatted
+    }
+}
+
+fn maybe_format_float(value: Option<f64>, decimals: usize) -> Option<String> {
+    value.map(|v| format_float_trimmed(v, decimals))
+}
+
+fn maybe_format_percentage(value: Option<f64>) -> Option<String> {
+    value.map(|v| format_float_trimmed(v, 2))
+}
+
+fn select_primary_pair<'a>(dex_data: &'a DexScreenerData) -> Option<&'a TokenPair> {
+    let pairs = dex_data.pairs.as_ref()?;
+    let mut best_pair = None;
+    let mut best_liquidity = 0.0;
+
+    for pair in pairs {
+        let liq = pair.liquidity.as_ref().and_then(|l| l.usd).unwrap_or(0.0);
+
+        if best_pair.is_none() || liq.partial_cmp(&best_liquidity) == Some(Ordering::Greater) {
+            best_liquidity = liq;
+            best_pair = Some(pair);
+        }
+    }
+
+    best_pair.or_else(|| pairs.first())
+}
+
+fn format_pair_timestamp(timestamp_ms: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp_millis(timestamp_ms)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+}
+
+fn format_unix_timestamp_ms(timestamp_ms: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp_millis(timestamp_ms)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+}
+
+fn format_relative_timestamp(timestamp_ms: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp_millis(timestamp_ms).map(|dt| {
+        let now = chrono::Utc::now();
+        let duration = now - dt;
+        let hours = duration.num_hours();
+        if hours >= 48 {
+            format!("{} days ago", duration.num_days())
+        } else if hours >= 1 {
+            let minutes = duration.num_minutes() % 60;
+            format!("{}h {}m ago", hours, minutes)
+        } else {
+            let minutes = duration.num_minutes();
+            if minutes > 0 {
+                format!("{}m ago", minutes)
+            } else {
+                "just now".to_string()
+            }
+        }
+    })
 }
 
 pub async fn start_bot(
@@ -74,16 +156,16 @@ pub async fn start_bot(
 
 async fn handle_message(bot: Bot, msg: Message, api_client: Arc<ApiClient>) -> ResponseResult<()> {
     if let Some(text) = msg.text() {
-        if let Some(contract_address) = detect_contract_address(text) {
+        if let Some(contract) = detect_contract_address(text) {
             // Start timing
             let start_time = Instant::now();
 
             // Analyze token
-            match api_client.analyze_token(&contract_address).await {
-                Ok(token_data) => {
+            match api_client.analyze_token(&contract).await {
+                Ok(analysis) => {
                     let elapsed = start_time.elapsed();
                     let timing_text = format!("⚡ {}ms!", elapsed.as_millis());
-                    let (formatted_text, _image_url) = format_token_data(&token_data);
+                    let (formatted_text, _image_url) = format_analysis(&analysis);
                     let final_text = format!("{}\n\n{}", timing_text, formatted_text);
 
                     let lines: Vec<&str> = final_text.split('\n').collect();
@@ -122,10 +204,28 @@ async fn handle_message(bot: Bot, msg: Message, api_client: Arc<ApiClient>) -> R
     Ok(())
 }
 
-fn detect_contract_address(text: &str) -> Option<String> {
-    // Solana address regex pattern has been noted. Testing with various Solana address formats is recommended to ensure accuracy.
-    let pattern = Regex::new(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b").ok()?;
-    pattern.find(text).map(|m| m.as_str().to_string())
+fn detect_contract_address(text: &str) -> Option<DetectedContract> {
+    let sol_match = SOLANA_ADDRESS_REGEX.find(text);
+    let bnb_match = BNB_ADDRESS_REGEX.find(text);
+
+    match (sol_match, bnb_match) {
+        (Some(sol), Some(bnb)) => {
+            if sol.start() <= bnb.start() {
+                Some(DetectedContract::new(
+                    sol.as_str().to_string(),
+                    Chain::Solana,
+                ))
+            } else {
+                Some(DetectedContract::new(bnb.as_str().to_string(), Chain::Bnb))
+            }
+        }
+        (Some(sol), None) => Some(DetectedContract::new(
+            sol.as_str().to_string(),
+            Chain::Solana,
+        )),
+        (None, Some(bnb)) => Some(DetectedContract::new(bnb.as_str().to_string(), Chain::Bnb)),
+        (None, None) => None,
+    }
 }
 
 fn create_progress_bar(percentage: f64) -> String {
@@ -139,53 +239,14 @@ fn create_progress_bar(percentage: f64) -> String {
     format!("[{}{}] {:.1}%", filled, empty, percentage)
 }
 
-fn detect_social_platform(url: &str) -> String {
-    let url_lower = url.to_lowercase();
-
-    if url_lower.contains("twitter.com") || url_lower.contains("x.com") {
-        "Twitter".to_string()
-    } else if url_lower.contains("t.me") {
-        "Telegram".to_string()
-    } else if url_lower.contains("discord.gg") || url_lower.contains("discord.com") {
-        "Discord".to_string()
-    } else if url_lower.contains("github.com") {
-        "GitHub".to_string()
-    } else if url_lower.contains("facebook.com") {
-        "Facebook".to_string()
-    } else if url_lower.contains("instagram.com") {
-        "Instagram".to_string()
-    } else if url_lower.contains("linkedin.com") {
-        "LinkedIn".to_string()
-    } else if url_lower.contains("reddit.com") {
-        "Reddit".to_string()
-    } else if url_lower.contains("youtube.com") {
-        "YouTube".to_string()
-    } else if url_lower.contains("twitch.tv") {
-        "Twitch".to_string()
-    } else if url_lower.contains("coingecko.com") {
-        "CoinGecko".to_string()
-    } else if url_lower.contains("coinmarketcap.com") {
-        "CoinMarketCap".to_string()
-    } else if url_lower.contains("bitcointalk.org") {
-        "BitcoinTalk".to_string()
-    } else if url_lower.contains("slack.com") {
-        "Slack".to_string()
-    } else if url_lower.contains("wechat.com") {
-        "WeChat".to_string()
-    } else if url_lower.contains("medium.com") || url_lower.contains("blog") {
-        "Blog".to_string()
-    } else if url_lower.contains("whitepaper") || url_lower.contains(".pdf") {
-        "Whitepaper".to_string()
-    } else if url_lower.contains("mailto:") {
-        "Email".to_string()
-    } else if url_lower.starts_with("http") {
-        "Website".to_string()
-    } else {
-        "Other".to_string()
+fn format_analysis(analysis: &TokenAnalysis) -> (String, Option<String>) {
+    match analysis {
+        TokenAnalysis::Solana(data) => format_solana_token_data(data),
+        TokenAnalysis::Bnb(data) => format_bnb_token_data(data),
     }
 }
 
-fn format_token_data(data: &TokenData) -> (String, Option<String>) {
+fn format_solana_token_data(data: &TokenData) -> (String, Option<String>) {
     let ca = &data.mint_address;
     let mut parts = Vec::new();
 
@@ -1128,7 +1189,11 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
         parts.push("🧛 <b>Vamped.fun Status</b>".to_string());
 
         let is_vamped = vamped.is_vamped.unwrap_or(false);
-        let status = if is_vamped { "✅ Vamped" } else { "❌ Not Vamped" };
+        let status = if is_vamped {
+            "✅ Vamped"
+        } else {
+            "❌ Not Vamped"
+        };
         let platform = vamped.platform.as_deref().unwrap_or("Unknown");
 
         parts.push(format!("{} | <b>Platform:</b> {}", status, platform));
@@ -1262,5 +1327,561 @@ fn format_token_data(data: &TokenData) -> (String, Option<String>) {
         }
     }
 
+    (parts.join("\n"), image_url)
+}
+
+fn format_bnb_token_data(data: &BnbTokenData) -> (String, Option<String>) {
+    let ca = &data.contract_address;
+    let mut parts = Vec::new();
+
+    let name = if data.name.trim().is_empty() {
+        "Unknown".to_string()
+    } else {
+        data.name.trim().to_string()
+    };
+    let symbol = if data.symbol.trim().is_empty() {
+        "N/A".to_string()
+    } else {
+        data.symbol.trim().to_string()
+    };
+
+    let name_esc = html::escape(&name);
+    let symbol_esc = html::escape(&symbol);
+    let ca_esc = html::escape(ca);
+
+    let primary_pair = data
+        .dexscreener_data
+        .as_ref()
+        .and_then(|dex| select_primary_pair(dex));
+
+    parts.push(format!("🌐 <b>{} ({})</b>", name_esc, symbol_esc));
+    parts.push(format!("<code>{}</code>", ca_esc));
+
+    let mut explorer_links = vec![
+        format!("<a href=\"https://bscscan.com/token/{0}\">BscScan</a>", ca),
+        format!(
+            "<a href=\"https://dexscreener.com/bsc/{0}\">DexScreener</a>",
+            ca
+        ),
+    ];
+    if let Some(pair) = primary_pair {
+        if let Some(url) = &pair.url {
+            let dex_label = pair
+                .dex_id
+                .as_deref()
+                .map(|id| id.to_uppercase())
+                .unwrap_or_else(|| "DEX".to_string());
+            explorer_links.push(format!(
+                "<a href=\"{}\">{} Pair (dex)</a>",
+                html::escape(url),
+                html::escape(&dex_label)
+            ));
+        }
+    }
+    if let Some(holder_maps) = &data.holder_maps_url {
+        explorer_links.push(format!(
+            "<a href=\"{}\">Holder Maps</a>",
+            html::escape(holder_maps)
+        ));
+    }
+    if let Some(bubble_maps) = &data.bubble_maps_url {
+        explorer_links.push(format!(
+            "<a href=\"{}\">BubbleMaps</a>",
+            html::escape(bubble_maps)
+        ));
+    }
+    parts.push(explorer_links.join(" | "));
+
+    if let Some(chain_name) = &data.chain_name {
+        parts.push(format!("⛓️ <b>Chain:</b> {}", html::escape(chain_name)));
+    } else {
+        parts.push("⛓️ <b>Chain:</b> BNB Chain".to_string());
+    }
+    if let Some(pair) = primary_pair {
+        if let Some(dex_id) = &pair.dex_id {
+            parts.push(format!("🏷️ <b>DEX:</b> {}", html::escape(dex_id)));
+        }
+        if let Some(labels) = &pair.labels {
+            if !labels.is_empty() {
+                let labels_text = labels
+                    .iter()
+                    .map(|label| html::escape(label))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                parts.push(format!("🏷️ <b>Tags:</b> {}", labels_text));
+            }
+        }
+
+        if pair.chain_id.is_some()
+            || pair.pair_address.is_some()
+            || pair.base_token.is_some()
+            || pair.quote_token.is_some()
+        {
+            parts.push("🔗 <b>Pair Metadata (dex)</b>".to_string());
+            if let Some(chain_id) = &pair.chain_id {
+                parts.push(format!("🌍 <b>Chain ID:</b> {}", html::escape(chain_id)));
+            }
+            if let Some(pair_address) = &pair.pair_address {
+                parts.push(format!(
+                    "🔗 <b>Pair Address:</b> <code>{}</code>",
+                    html::escape(pair_address)
+                ));
+            }
+            if let Some(base_token) = &pair.base_token {
+                let base_name = base_token.name.as_deref().unwrap_or("Unknown");
+                let base_symbol = base_token.symbol.as_deref().unwrap_or("?");
+                let base_address = base_token.address.as_deref().unwrap_or("n/a");
+                parts.push(format!(
+                    "🪙 <b>Base:</b> {} ({}) — <code>{}</code>",
+                    html::escape(base_name),
+                    html::escape(base_symbol),
+                    html::escape(base_address)
+                ));
+            }
+            if let Some(quote_token) = &pair.quote_token {
+                let quote_name = quote_token.name.as_deref().unwrap_or("Unknown");
+                let quote_symbol = quote_token.symbol.as_deref().unwrap_or("?");
+                let quote_address = quote_token.address.as_deref().unwrap_or("n/a");
+                parts.push(format!(
+                    "💱 <b>Quote:</b> {} ({}) — <code>{}</code>",
+                    html::escape(quote_name),
+                    html::escape(quote_symbol),
+                    html::escape(quote_address)
+                ));
+            }
+            parts.push(String::new());
+        }
+    }
+    parts.push(String::new());
+
+    parts.push("💰 <b>Price & Market</b>".to_string());
+    if let Some(pair) = primary_pair {
+        if let Some(price_usd) = &pair.price_usd {
+            parts.push(format!("💰 <b>Price (dex):</b> ${}", price_usd));
+        }
+        if let Some(price_native) = &pair.price_native {
+            let quote_symbol = pair
+                .quote_token
+                .as_ref()
+                .and_then(|q| q.symbol.as_deref())
+                .unwrap_or("BNB");
+            parts.push(format!(
+                "💱 <b>Price ({}):</b> {}",
+                html::escape(quote_symbol),
+                price_native
+            ));
+        }
+        if let Some(mc) = pair.market_cap {
+            parts.push(format!(
+                "🧢 <b>MC (dex):</b> ${}",
+                format_compact_amount(mc)
+            ));
+        }
+        if let Some(fdv) = pair.fdv {
+            parts.push(format!(
+                "💎 <b>FDV (dex):</b> ${}",
+                format_compact_amount(fdv)
+            ));
+        }
+    }
+    if let Some(price_str) = maybe_format_float(data.price, 12) {
+        parts.push(format!("💰 <b>Price:</b> ${}", price_str));
+    }
+    if let Some(mc) = data.market_cap {
+        parts.push(format!(
+            "🧢 <b>Market Cap:</b> ${}",
+            format_compact_amount(mc)
+        ));
+    }
+    if let Some(liq) = data.liquidity {
+        parts.push(format!(
+            "💧 <b>Liquidity:</b> ${}",
+            format_compact_amount(liq)
+        ));
+    }
+    if let Some(volume) = data.volume_24h {
+        parts.push(format!(
+            "📊 <b>24h Volume:</b> ${}",
+            format_compact_amount(volume)
+        ));
+    }
+    if let Some(summary_pairs) = &data.dexscreener_token_summary {
+        if !summary_pairs.is_empty() {
+            parts.push(String::new());
+            parts.push("📌 <b>Dex Summary (tokens)</b>".to_string());
+            for summary in summary_pairs {
+                let dex_id = summary.dex_id.clone().unwrap_or_else(|| "dex".to_string());
+                let chain_id = summary
+                    .chain_id
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                let price_usd = summary.price_usd.as_deref().unwrap_or("n/a");
+                let price_native = summary.price_native.as_deref().unwrap_or("n/a");
+                let base_symbol = summary
+                    .base_token
+                    .as_ref()
+                    .and_then(|t| t.symbol.as_deref())
+                    .unwrap_or("?");
+                let quote_symbol = summary
+                    .quote_token
+                    .as_ref()
+                    .and_then(|t| t.symbol.as_deref())
+                    .unwrap_or("?");
+                let pair_url = summary.url.as_deref().unwrap_or("https://dexscreener.com");
+                let pair_address = summary.pair_address.as_deref().unwrap_or("n/a");
+
+                parts.push(format!(
+                    "• {} ({}) | Base {} / Quote {} | Price ${} ({})",
+                    html::escape(&dex_id),
+                    html::escape(&chain_id),
+                    html::escape(base_symbol),
+                    html::escape(quote_symbol),
+                    html::escape(price_usd),
+                    html::escape(price_native)
+                ));
+
+                if let Some(volume) = &summary.volume {
+                    parts.push(format!(
+                        "  📊 Vol 24h/6h/1h/5m: ${:.0} / ${:.0} / ${:.0} / ${:.0}",
+                        volume.h24.unwrap_or(0.0),
+                        volume.h6.unwrap_or(0.0),
+                        volume.h1.unwrap_or(0.0),
+                        volume.m5.unwrap_or(0.0)
+                    ));
+                }
+                if let Some(price_change) = &summary.price_change {
+                    parts.push(format!(
+                        "  📈 Δ 24h/6h/1h/5m: {:.2}% / {:.2}% / {:.2}% / {:.2}%",
+                        price_change.h24.unwrap_or(0.0),
+                        price_change.h6.unwrap_or(0.0),
+                        price_change.h1.unwrap_or(0.0),
+                        price_change.m5.unwrap_or(0.0)
+                    ));
+                }
+                if let Some(liquidity) = &summary.liquidity {
+                    parts.push(format!(
+                        "  💧 Liquidity: USD ${} | Base {:.2} | Quote {:.2}",
+                        liquidity
+                            .usd
+                            .map(format_compact_amount)
+                            .unwrap_or_else(|| "0".to_string()),
+                        liquidity.base.unwrap_or(0.0),
+                        liquidity.quote.unwrap_or(0.0)
+                    ));
+                }
+                if let Some(fdv) = summary.fdv {
+                    parts.push(format!("  💎 FDV: ${}", format_compact_amount(fdv)));
+                }
+                if let Some(market_cap) = summary.market_cap {
+                    parts.push(format!(
+                        "  🧢 Market Cap: ${}",
+                        format_compact_amount(market_cap)
+                    ));
+                }
+                if let Some(pair_created_at) = summary.pair_created_at {
+                    if let Some(formatted) = format_pair_timestamp(pair_created_at) {
+                        parts.push(format!("  🆕 Pair Created: {}", formatted));
+                    }
+                }
+
+                parts.push(format!(
+                    "  🔗 Pair Address: <code>{}</code>",
+                    html::escape(pair_address)
+                ));
+                parts.push(format!(
+                    "  🔗 Link: <a href=\"{}\">{} pair (tokens)</a>",
+                    html::escape(pair_url),
+                    html::escape(&dex_id.to_uppercase())
+                ));
+            }
+        }
+    }
+    if let Some(pair) = primary_pair {
+        if let Some(volume) = &pair.volume {
+            parts.push(String::new());
+            parts.push("📊 <b>Volume (dex)</b>".to_string());
+            parts.push(format!(
+                "📊 <b>24h:</b> ${:.0} | 6h: ${:.0} | 1h: ${:.0} | 5m: ${:.0}",
+                volume.h24.unwrap_or(0.0),
+                volume.h6.unwrap_or(0.0),
+                volume.h1.unwrap_or(0.0),
+                volume.m5.unwrap_or(0.0)
+            ));
+        }
+    }
+    parts.push(String::new());
+
+    parts.push("📈 <b>Price Changes</b>".to_string());
+    if let Some(change) = maybe_format_percentage(data.change_24h) {
+        parts.push(format!("📈 <b>24h:</b> {}%", change));
+    }
+    if let Some(change_4h) = maybe_format_percentage(data.change_4h) {
+        parts.push(format!("⏱️ <b>4h:</b> {}%", change_4h));
+    }
+    if let Some(change_1h) = maybe_format_percentage(data.change_1h) {
+        parts.push(format!("🕒 <b>1h:</b> {}%", change_1h));
+    }
+    if let Some(change_5m) = maybe_format_percentage(data.change_5m) {
+        parts.push(format!("⚡ <b>5m:</b> {}%", change_5m));
+    }
+    if let Some(pair) = primary_pair {
+        if let Some(price_change) = &pair.price_change {
+            parts.push(format!(
+                "📈 <b>24h/6h/1h/5m (dex):</b> {:.2}% / {:.2}% / {:.2}% / {:.2}%",
+                price_change.h24.unwrap_or(0.0),
+                price_change.h6.unwrap_or(0.0),
+                price_change.h1.unwrap_or(0.0),
+                price_change.m5.unwrap_or(0.0)
+            ));
+        }
+    }
+    parts.push(String::new());
+
+    parts.push("👥 <b>Holder Metrics</b>".to_string());
+    if let Some(holders) = data.holders {
+        parts.push(format!("👥 <b>Total Holders:</b> {}", holders));
+    }
+    if let Some(top10) = maybe_format_percentage(data.top10_hold_percentage) {
+        parts.push(format!("🏦 <b>Top 10 Share:</b> {}%", top10));
+    }
+    if let Some(dev_ratio_pct) = maybe_format_percentage(data.dev_holding_ratio.map(|v| v * 100.0))
+    {
+        parts.push(format!("🛠️ <b>Dev Holding:</b> {}%", dev_ratio_pct));
+    }
+    parts.push(String::new());
+
+    if let Some(pair) = primary_pair {
+        if let Some(txns) = &pair.txns {
+            if let (Some(h24), Some(h6), Some(h1), Some(m5)) =
+                (&txns.h24, &txns.h6, &txns.h1, &txns.m5)
+            {
+                parts.push(String::new());
+                parts.push("🔄 <b>Transactions (dex)</b>".to_string());
+                parts.push(format!(
+                    "🔄 <b>24h:</b> {} buys / {} sells",
+                    h24.buys.unwrap_or(0),
+                    h24.sells.unwrap_or(0)
+                ));
+                parts.push(format!(
+                    "⏱️ <b>6h:</b> {} buys / {} sells",
+                    h6.buys.unwrap_or(0),
+                    h6.sells.unwrap_or(0)
+                ));
+                parts.push(format!(
+                    "🕒 <b>1h:</b> {} buys / {} sells",
+                    h1.buys.unwrap_or(0),
+                    h1.sells.unwrap_or(0)
+                ));
+                parts.push(format!(
+                    "⚡ <b>5m:</b> {} buys / {} sells",
+                    m5.buys.unwrap_or(0),
+                    m5.sells.unwrap_or(0)
+                ));
+            }
+        }
+
+        if let Some(liquidity) = &pair.liquidity {
+            parts.push(String::new());
+            parts.push("💧 <b>Liquidity (dex)</b>".to_string());
+            parts.push(format!(
+                "💧 <b>USD:</b> ${}",
+                liquidity
+                    .usd
+                    .map(format_compact_amount)
+                    .unwrap_or_else(|| "0".to_string())
+            ));
+            parts.push(format!(
+                "🪙 <b>Base/Quote:</b> {:.2} / {:.2}",
+                liquidity.base.unwrap_or(0.0),
+                liquidity.quote.unwrap_or(0.0)
+            ));
+        }
+
+        if let Some(info) = &pair.info {
+            if let Some(websites) = &info.websites {
+                let website_lines: Vec<String> = websites
+                    .iter()
+                    .filter_map(|website| website.url.as_ref())
+                    .map(|url| {
+                        let safe_url = html::escape(url);
+                        format!("🔗 <a href=\"{0}\">{0}</a>", safe_url)
+                    })
+                    .collect();
+                if !website_lines.is_empty() {
+                    parts.push(String::new());
+                    parts.push("🌐 <b>Websites (dex)</b>".to_string());
+                    parts.extend(website_lines);
+                }
+            }
+
+            if let Some(socials) = &info.socials {
+                let mut social_lines = Vec::new();
+                for social in socials {
+                    if let Some(handle) = social.handle.as_deref() {
+                        let label = format_social_label(social.platform.as_deref(), handle);
+                        let safe_handle = html::escape(handle);
+                        let safe_label = html::escape(&label);
+                        social_lines.push(format!(
+                            "📣 <b>{}:</b> <a href=\"{}\">{}</a>",
+                            safe_label, safe_handle, safe_handle
+                        ));
+                    }
+                }
+                if !social_lines.is_empty() {
+                    parts.push(String::new());
+                    parts.push("📣 <b>Socials (dex)</b>".to_string());
+                    parts.extend(social_lines);
+                }
+            }
+
+            if let Some(image_url) = &info.image_url {
+                if data.token_logo_url.is_none() {
+                    parts.push(String::new());
+                    parts.push(format!(
+                        "🖼️ <b>Image (dex):</b> <a href=\"{0}\">{0}</a>",
+                        html::escape(image_url)
+                    ));
+                }
+            }
+        }
+
+        if let Some(boosts) = &pair.boosts {
+            if boosts.active.unwrap_or(0) > 0 {
+                parts.push(String::new());
+                parts.push(format!(
+                    "🚀 <b>Boosts (dex):</b> {} active",
+                    boosts.active.unwrap_or(0)
+                ));
+            }
+        }
+
+        if let Some(created_at) = pair.pair_created_at {
+            if let Some(formatted) = format_pair_timestamp(created_at) {
+                parts.push(String::new());
+                parts.push(format!("🆕 <b>Pair Created (dex):</b> {}", formatted));
+            }
+        }
+    }
+
+    if let Some(dex_data) = &data.dexscreener_data {
+        if let Some(pairs) = &dex_data.pairs {
+            if pairs.len() > 1 {
+                parts.push("🔁 <b>Other Pairs (dex)</b>".to_string());
+                let primary_address = primary_pair
+                    .and_then(|pair| pair.pair_address.clone())
+                    .unwrap_or_default();
+                for pair in pairs {
+                    let pair_addr = pair.pair_address.clone().unwrap_or_default();
+                    if !primary_address.is_empty()
+                        && pair_addr.eq_ignore_ascii_case(&primary_address)
+                    {
+                        continue;
+                    }
+                    let dex_id = pair.dex_id.clone().unwrap_or_else(|| "dex".to_string());
+                    let chain_id = pair.chain_id.as_deref().unwrap_or("unknown");
+                    let price = pair.price_usd.as_deref().unwrap_or("n/a");
+                    let liq = pair
+                        .liquidity
+                        .as_ref()
+                        .and_then(|l| l.usd)
+                        .map(|usd| format_compact_amount(usd))
+                        .unwrap_or_else(|| "0".to_string());
+                    let base_symbol = pair
+                        .base_token
+                        .as_ref()
+                        .and_then(|t| t.symbol.as_deref())
+                        .unwrap_or("?");
+                    let quote_symbol = pair
+                        .quote_token
+                        .as_ref()
+                        .and_then(|t| t.symbol.as_deref())
+                        .unwrap_or("?");
+                    let url = pair.url.as_deref().unwrap_or("https://dexscreener.com");
+                    let pair_addr_display = if pair_addr.is_empty() {
+                        "n/a".to_string()
+                    } else {
+                        pair_addr.clone()
+                    };
+                    parts.push(format!(
+                        "• {} ({}) | Base {} | Quote {} | Price ${} | 💧 ${} | Pair: <code>{}</code> | <a href=\"{}\">{} pair (dex)</a>",
+                        html::escape(&dex_id),
+                        html::escape(chain_id),
+                        html::escape(base_symbol),
+                        html::escape(quote_symbol),
+                        html::escape(price),
+                        html::escape(&liq),
+                        html::escape(&pair_addr_display),
+                        html::escape(url),
+                        html::escape(&dex_id.to_uppercase())
+                    ));
+                }
+                parts.push(String::new());
+            }
+        }
+    }
+
+    if let Some(orders) = &data.dexscreener_orders_data {
+        parts.push("🧾 <b>Dex Orders</b>".to_string());
+        let mut token_profile = None;
+        let mut takeover_order = None;
+
+        for order in orders {
+            if order.r#type == "tokenProfile" && order.status.eq_ignore_ascii_case("approved") {
+                token_profile = Some(order);
+            }
+            if order.r#type == "communityTakeover" && order.status.eq_ignore_ascii_case("approved")
+            {
+                takeover_order = Some(order);
+            }
+        }
+
+        if let Some(order) = token_profile {
+            let mut line = String::from("💠 <b>Token Profile Paid:</b> ✅");
+            if let Some(human) = format_relative_timestamp(order.payment_timestamp) {
+                line.push_str(&format!(" ({})", human));
+            }
+            if let Some(iso) = format_unix_timestamp_ms(order.payment_timestamp) {
+                line.push_str(&format!("\n   <code>{}</code>", iso));
+            }
+            parts.push(line);
+        } else {
+            parts.push("💠 <b>Token Profile Paid:</b> ❌".to_string());
+        }
+
+        if let Some(order) = takeover_order {
+            let mut line = String::from("🤝 <b>Community Takeover:</b> ✅");
+            if let Some(human) = format_relative_timestamp(order.payment_timestamp) {
+                line.push_str(&format!(" ({})", human));
+            }
+            if let Some(iso) = format_unix_timestamp_ms(order.payment_timestamp) {
+                line.push_str(&format!("\n   <code>{}</code>", iso));
+            }
+            parts.push(line);
+        }
+
+        let mut order_lines = Vec::new();
+        for order in orders.iter().take(5) {
+            let mut line = format!("• {} ({})", order.r#type, order.status);
+            if let Some(human) = format_relative_timestamp(order.payment_timestamp) {
+                line.push_str(&format!(" – {}", human));
+            }
+            order_lines.push(line);
+        }
+        if !order_lines.is_empty() {
+            parts.push(order_lines.join("\n"));
+        }
+        parts.push(String::new());
+    }
+
+    if let Some(risk_level) = data.risk_level {
+        parts.push(format!("🚨 <b>Risk Level:</b> {}", risk_level));
+    }
+
+    let mut image_url = data.token_logo_url.clone();
+    if image_url.is_none() {
+        image_url = primary_pair
+            .and_then(|pair| pair.info.as_ref())
+            .and_then(|info| info.image_url.clone());
+    }
     (parts.join("\n"), image_url)
 }

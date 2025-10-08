@@ -396,6 +396,7 @@ class MessageHandler:
                                 }
                             ],
                             "caller_user_id": event.sender_id,
+                            "blockchain": blockchain,
                         }
 
                         logger.debug(f"[SPLIT-RESP] Queueing token {address[:8]}... ({blockchain}) for target {target_group['id']} via userbot {forwarding_userbot_id}")
@@ -1530,6 +1531,7 @@ class MessageHandler:
                             "source_chat_id": source_chat_id,
                             "seen_sources": seen_source_details,
                             "caller_user_id": event.sender_id,
+                            "blockchain": blockchain,
                         }
                         additional_info = json.dumps(additional_info_dict)
 

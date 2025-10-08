@@ -11,6 +11,7 @@ use tokio::sync::watch;
 use tracing::{error, info};
 
 use crate::api::{ApiClient, DexPayload};
+use crate::types::{BnbTokenData, TokenAnalysis};
 
 #[derive(Clone)]
 struct AppState {
@@ -27,6 +28,7 @@ pub async fn run_http_server(
     let state = AppState { api_client };
     let router = Router::new()
         .route("/dex/:address", get(get_dex_payload))
+        .route("/bnb/:address", get(get_bnb_analysis))
         .with_state(state);
 
     info!("HTTP server listening on {}", addr);
@@ -57,6 +59,26 @@ async fn get_dex_payload(
             Err((
                 StatusCode::BAD_GATEWAY,
                 "Failed to fetch Dex data".to_string(),
+            ))
+        }
+    }
+}
+
+async fn get_bnb_analysis(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> Result<Json<BnbTokenData>, (StatusCode, String)> {
+    match state.api_client.analyze_bnb_token(&address).await {
+        Ok(TokenAnalysis::Bnb(payload)) => Ok(Json(payload)),
+        Ok(_) => Err((
+            StatusCode::BAD_GATEWAY,
+            "Unexpected analysis variant".to_string(),
+        )),
+        Err(err) => {
+            error!("BNB analysis error for {}: {:?}", address, err);
+            Err((
+                StatusCode::BAD_GATEWAY,
+                "Failed to fetch BNB data".to_string(),
             ))
         }
     }

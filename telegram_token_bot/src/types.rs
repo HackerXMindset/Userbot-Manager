@@ -1,5 +1,29 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chain {
+    Solana,
+    Bnb,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectedContract {
+    pub address: String,
+    pub chain: Chain,
+}
+
+impl DetectedContract {
+    pub fn new(address: String, chain: Chain) -> Self {
+        Self { address, chain }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum TokenAnalysis {
+    Solana(TokenData),
+    Bnb(BnbTokenData),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenData {
     pub mint_address: String,
@@ -14,6 +38,99 @@ pub struct TokenData {
     pub dev_sol_balance: Option<f64>,
     pub dev_token_holding: Option<DevTokenHolding>,
     pub vamped_fun_data: Option<VampedFunData>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BnbTokenData {
+    pub contract_address: String,
+    pub name: String,
+    pub symbol: String,
+    pub price: Option<f64>,
+    pub change_24h: Option<f64>,
+    pub change_4h: Option<f64>,
+    pub change_1h: Option<f64>,
+    pub change_5m: Option<f64>,
+    pub market_cap: Option<f64>,
+    pub liquidity: Option<f64>,
+    pub volume_24h: Option<f64>,
+    pub holders: Option<u64>,
+    pub top10_hold_percentage: Option<f64>,
+    pub dev_holding_ratio: Option<f64>,
+    pub risk_level: Option<u8>,
+    pub chain_name: Option<String>,
+    pub token_logo_url: Option<String>,
+    pub holder_maps_url: Option<String>,
+    pub bubble_maps_url: Option<String>,
+    pub dex_socials: Option<String>,
+    pub dexscreener_data: Option<DexScreenerData>,
+    pub dexscreener_token_summary: Option<Vec<TokenPair>>,
+    pub dexscreener_orders_data: Option<Vec<DexScreenerOrder>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OkxLatestInfoResponse {
+    pub code: Option<i32>,
+    #[serde(rename = "detailMsg")]
+    pub detail_msg: Option<String>,
+    pub msg: Option<String>,
+    #[serde(rename = "error_code")]
+    pub error_code: Option<String>,
+    #[serde(rename = "error_message")]
+    pub error_message: Option<String>,
+    pub data: Option<OkxTokenData>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OkxTokenData {
+    pub chain_bw_logo_url: Option<String>,
+    pub chain_logo_url: Option<String>,
+    pub chain_name: Option<String>,
+    pub change: Option<String>,
+    #[serde(rename = "change1H")]
+    pub change_1h: Option<String>,
+    #[serde(rename = "change4H")]
+    pub change_4h: Option<String>,
+    #[serde(rename = "change5M")]
+    pub change_5m: Option<String>,
+    pub circulating_supply: Option<String>,
+    pub dev_holding_ratio: Option<String>,
+    pub holders: Option<String>,
+    #[serde(rename = "isSupportHolder")]
+    pub is_support_holder: Option<String>,
+    pub liquidity: Option<String>,
+    pub market_cap: Option<String>,
+    pub max_price: Option<String>,
+    pub min_price: Option<String>,
+    pub native_token_symbol: Option<String>,
+    pub price: Option<String>,
+    #[serde(rename = "riskLevel")]
+    pub risk_level: Option<String>,
+    #[serde(rename = "tokenContractAddress")]
+    pub token_contract_address: Option<String>,
+    #[serde(rename = "tokenLargeLogoUrl")]
+    pub token_large_logo_url: Option<String>,
+    #[serde(rename = "tokenLogoUrl")]
+    pub token_logo_url: Option<String>,
+    #[serde(rename = "tokenName")]
+    pub token_name: Option<String>,
+    #[serde(rename = "tokenSymbol")]
+    pub token_symbol: Option<String>,
+    #[serde(rename = "tokenThirdPartInfo")]
+    pub token_third_part_info: Option<OkxTokenThirdPartInfo>,
+    pub top10_hold_amount_percentage: Option<String>,
+    pub trade_num: Option<String>,
+    pub transaction_num: Option<String>,
+    pub volume: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OkxTokenThirdPartInfo {
+    #[serde(rename = "okxWebSiteUrl")]
+    pub okx_web_site_url: Option<String>,
+    #[serde(rename = "thirdPartyWebSiteUrl")]
+    pub third_party_web_site_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +197,7 @@ pub struct TokenPair {
     pub url: Option<String>,
     #[serde(rename = "pairAddress")]
     pub pair_address: Option<String>,
+    pub labels: Option<Vec<String>>,
     #[serde(rename = "baseToken")]
     pub base_token: Option<BaseToken>,
     #[serde(rename = "quoteToken")]

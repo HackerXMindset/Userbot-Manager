@@ -45,6 +45,36 @@ class RustDexBridge:
 
         return None
 
+    async def fetch_bnb_payload(self, token_address: str) -> Optional[Dict[str, Any]]:
+        """Fetch BNB analysis JSON via the Rust HTTP endpoint."""
+        if not self.base_url:
+            logger.error("Rust analysis base URL is not configured.")
+            return None
+
+        url = f"{self.base_url}/bnb/{token_address}"
+        timeout = aiohttp.ClientTimeout(total=12)
+
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        body = await response.text()
+                        logger.error(
+                            "Rust BNB endpoint error %s for %s: %s",
+                            response.status,
+                            token_address,
+                            body,
+                        )
+                        return None
+
+                    return await response.json(content_type=None)
+
+        except aiohttp.ClientError as err:
+            logger.error("Rust BNB HTTP error for %s: %s", token_address, err)
+        except Exception as err:  # pragma: no cover - defensive logging
+            logger.error("Unexpected Rust BNB error for %s: %s", token_address, err)
+
+        return None
+
 
 rust_dex_bridge = RustDexBridge(settings.rust_analysis_base_url)
-

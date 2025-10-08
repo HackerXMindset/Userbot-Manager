@@ -434,6 +434,12 @@ class CurateAlphaHandler:
         else:
             allowed_chains = allowed_chains_raw
 
+        # Ensure allowed_chains is always a list
+        if isinstance(allowed_chains, str):
+            allowed_chains = [allowed_chains]
+        elif not isinstance(allowed_chains, list):
+            allowed_chains = ['SOL']
+
         text = f"<b>✨ {'Edit' if is_edit else 'Add'} Curated Alpha Rule (6/7)</b>\n\n" \
                f"Configure the final settings."
 
@@ -469,7 +475,7 @@ class CurateAlphaHandler:
         else:
             keyboard_rows.append([InlineKeyboardButton(text="➡️ Continue to Summary", callback_data="curate_alpha:summary")])
         
-        back_cb = f"curate_alpha:view:{rule_id}" if is_edit else f"curate_alpha:process_bot:{data.get('forwarding_userbot_id')}"
+        back_cb = f"curate_alpha:view:{rule_id}" if is_edit else "curate_alpha:select_bot"
         keyboard_rows.append([InlineKeyboardButton(text="🔙 Back", callback_data=back_cb)])
 
         markup = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
@@ -507,6 +513,13 @@ class CurateAlphaHandler:
                 allowed_chains = json.loads(allowed_chains_raw)
             else:
                 allowed_chains = allowed_chains_raw
+
+            # Ensure allowed_chains is always a list
+            if isinstance(allowed_chains, str):
+                allowed_chains = [allowed_chains]
+            elif not isinstance(allowed_chains, list):
+                allowed_chains = ['SOL']
+
             logger.debug(f"[BLOCKCHAIN_TOGGLE] Current allowed_chains: {allowed_chains}")
 
             if blockchain in allowed_chains:
@@ -756,6 +769,12 @@ class CurateAlphaHandler:
             allowed_chains = json.loads(allowed_chains_raw)
         else:
             allowed_chains = allowed_chains_raw
+
+        # Ensure allowed_chains is always a list
+        if isinstance(allowed_chains, str):
+            allowed_chains = [allowed_chains]
+        elif not isinstance(allowed_chains, list):
+            allowed_chains = ['SOL']
 
         if blockchain in allowed_chains:
             allowed_chains.remove(blockchain)

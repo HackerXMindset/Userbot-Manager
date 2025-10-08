@@ -77,7 +77,7 @@ class PnlHandler:
                 logger.warning(f'Unknown PNL action: {action}')
                 await query.answer('❌ Unknown action', show_alert=True)
         except Exception as e:
-            logger.error(f'Error in handle_pnl_action: {e}\{traceback.format_exc()}')
+            logger.error(f'Error in handle_pnl_action: {e}\n{traceback.format_exc()}')
             await query.answer('❌ An error occurred. Please try again.', show_alert=True)
 
     async def show_rules_list(self, query: types.CallbackQuery):
@@ -96,7 +96,7 @@ class PnlHandler:
             await query.message.edit_text(text, reply_markup=keyboard)
             await query.answer()
         except Exception as e:
-            logger.error(f'Error in show_rules_list: {e}\{traceback.format_exc()}')
+            logger.error(f'Error in show_rules_list: {e}\n{traceback.format_exc()}')
             await query.answer('❌ An error occurred. Please try again.', show_alert=True)
 
     async def show_rule_details(self, query: types.CallbackQuery, rule_id: int):
@@ -116,7 +116,7 @@ class PnlHandler:
             await query.message.edit_text(text, reply_markup=keyboard)
             await query.answer()
         except Exception as e:
-            logger.error(f'Error in show_rule_details: {e}\{traceback.format_exc()}')
+            logger.error(f'Error in show_rule_details: {e}\n{traceback.format_exc()}')
             await query.answer('❌ An error occurred. Please try again.', show_alert=True)
 
     async def toggle_rule_enabled(self, query: types.CallbackQuery, rule_id: int):
@@ -126,7 +126,7 @@ class PnlHandler:
             await query.answer(f'✅ Rule has been {"enabled" if new_status else "disabled"}.')
             await self.show_rule_details(query, rule_id)
         except Exception as e:
-            logger.error(f'Error in toggle_rule_enabled: {e}\{traceback.format_exc()}')
+            logger.error(f'Error in toggle_rule_enabled: {e}\n{traceback.format_exc()}')
             await query.answer('❌ An error occurred. Please try again.', show_alert=True)
 
     async def confirm_delete_rule(self, query: types.CallbackQuery, rule_id: int):
@@ -141,7 +141,7 @@ class PnlHandler:
             await query.message.edit_text(text, reply_markup=keyboard)
             await query.answer()
         except Exception as e:
-            logger.error(f'Error in confirm_delete_rule: {e}\{traceback.format_exc()}')
+            logger.error(f'Error in confirm_delete_rule: {e}\n{traceback.format_exc()}')
             await query.answer('❌ An error occurred. Please try again.', show_alert=True)
 
     async def delete_rule(self, query: types.CallbackQuery, rule_id: int):
@@ -151,7 +151,7 @@ class PnlHandler:
             await query.message.edit_text('✅ PNL Forwarding Rule deleted successfully!')
             await self.show_rules_list(query)
         except Exception as e:
-            logger.error(f'Error in delete_rule: {e}\{traceback.format_exc()}')
+            logger.error(f'Error in delete_rule: {e}\n{traceback.format_exc()}')
             await query.answer('❌ An error occurred. Please try again.', show_alert=True)
 
     async def show_forwarding_bot_selection(self, query: types.CallbackQuery, state: FSMContext, rule_id: int):
