@@ -22,12 +22,6 @@ class ManagementStates(StatesGroup):
     userbot_login_2fa = State()
     userbot_set_name = State()
     
-    
-    # Targets
-    target_edit_alert_mode = State()
-    target_edit_sensitivity = State()
-    target_edit_thresholds = State()
-    
     # Sources
     adding_source_chat_id = State()
     adding_source_user_id = State()

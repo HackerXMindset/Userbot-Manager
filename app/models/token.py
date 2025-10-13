@@ -61,7 +61,10 @@ class TokenModel(BaseModel):
             query = """
                 UPDATE tokens_tracked 
                 SET last_mc = $1, 
-                    first_seen_mc = COALESCE(first_seen_mc, $1),
+                    first_seen_mc = CASE
+                        WHEN first_seen_mc IS NULL OR first_seen_mc <= 0 THEN $1
+                        ELSE first_seen_mc
+                    END,
                     ticker = COALESCE($3, ticker),
                     last_checked_at = NOW()
                 WHERE id = $2
@@ -74,7 +77,10 @@ class TokenModel(BaseModel):
             query_fallback = """
                 UPDATE tokens_tracked 
                 SET last_mc = $1, 
-                    first_seen_mc = COALESCE(first_seen_mc, $1),
+                    first_seen_mc = CASE
+                        WHEN first_seen_mc IS NULL OR first_seen_mc <= 0 THEN $1
+                        ELSE first_seen_mc
+                    END,
                     last_checked_at = NOW()
                 WHERE id = $2
                 RETURNING *

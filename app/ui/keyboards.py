@@ -34,25 +34,21 @@ class Keyboards:
         return InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="🧾 Overview", callback_data="menu:status"),
-                InlineKeyboardButton(text="📈 Tracking", callback_data="menu:tracking")
+                InlineKeyboardButton(text="🎯 Target", callback_data="menu:groups")
             ],
             [
-                InlineKeyboardButton(text="🎯 Target", callback_data="menu:groups"),
                 InlineKeyboardButton(text="👤 Agents", callback_data="menu:userbots")
             ],
             [
                 InlineKeyboardButton(text="📡 Sources", callback_data="menu:sources"),
-                InlineKeyboardButton(text="🚨 Alerts", callback_data="menu:alerts")
+                InlineKeyboardButton(text="💹 Profit Logs", callback_data="menu:pnl")
             ],
             [
-                InlineKeyboardButton(text="💹 Profit Logs", callback_data="menu:pnl"),
                 InlineKeyboardButton(text="📬 Inbox", callback_data="menu:notifications"),
-            ],
-            [
-                InlineKeyboardButton(text="✨ Curate Alpha", callback_data="menu:curate_alpha"),
                 InlineKeyboardButton(text="📡 Auto-Tap", callback_data="menu:auto_click")
             ],
             [
+                InlineKeyboardButton(text="✨ Curate Alpha", callback_data="menu:curate_alpha"),
                 InlineKeyboardButton(text="📝 Templates", callback_data="menu:templates")
             ],
             [
@@ -654,153 +650,6 @@ class Keyboards:
             text += f"\n  └ Timezone: {timezone}"
 
         return text
-
-    @staticmethod
-    def target_alerts_menu(target, back_callback: str = "menu:targets") -> InlineKeyboardMarkup:
-        """Target alerts configuration menu - context-aware based on enabled status - LEGACY"""
-        enabled = target.get('alerts_enabled', True)
-        target_id = target['id']
-
-        if enabled:
-            # When enabled: show disable + config options
-            keyboard = [
-                [InlineKeyboardButton(text="🔴 Disable All", callback_data=f"targets:alerts_enable:{target_id}")],
-                [InlineKeyboardButton(text="🎛️ Modes", callback_data=f"targets:alerts_modes:{target_id}")],
-                [
-                    InlineKeyboardButton(text="⚡ Sensitivity", callback_data=f"targets:alerts_set_sensitivity:{target_id}"),
-                    InlineKeyboardButton(text="🎚️ Thresholds", callback_data=f"targets:alerts_set_thresholds:{target_id}")
-                ],
-                [InlineKeyboardButton(text="🔙 Back", callback_data=back_callback)]
-            ]
-        else:
-            # When disabled: only show enable button
-            keyboard = [
-                [InlineKeyboardButton(text="🟢 Enable Alerts", callback_data=f"targets:alerts_enable:{target_id}")],
-                [InlineKeyboardButton(text="🔙 Back", callback_data=back_callback)]
-            ]
-
-        return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-    @staticmethod
-    def target_alerts_config_clean(target, back_callback: str = "targets:select_for_alerts") -> InlineKeyboardMarkup:
-        """
-        Clean all-in-one alerts configuration keyboard - REDESIGNED
-
-        All modes visible with inline toggles, no separate screens needed
-        """
-        from app.models import TargetModel
-
-        enabled = target.get('alerts_enabled', True)
-        target_id = target['id']
-
-        keyboard = []
-
-        # Row 1: Master enable/disable toggle
-        if enabled:
-            keyboard.append([
-                InlineKeyboardButton(
-                    text="🔴 Disable All Alerts",
-                    callback_data=f"targets:alerts_enable:{target_id}"
-                )
-            ])
-
-            # Row 2-5: Individual mode toggles with inline status
-            target_model = TargetModel(None)
-            modes = target_model.parse_alert_modes(target)
-
-            # PNL mode
-            pnl_status = "✅" if modes.get('pnl', True) else "❌"
-            keyboard.append([
-                InlineKeyboardButton(
-                    text=f"📈 PNL          {pnl_status}",
-                    callback_data=f"targets:alerts_toggle:{target_id}:pnl"
-                )
-            ])
-
-            # Threshold mode with edit button
-            thresh_status = "✅" if modes.get('threshold', True) else "❌"
-            keyboard.append([
-                InlineKeyboardButton(
-                    text=f"🎚️ Threshold   {thresh_status}",
-                    callback_data=f"targets:alerts_toggle:{target_id}:threshold"
-                ),
-                InlineKeyboardButton(
-                    text="⚙️ Edit",
-                    callback_data=f"targets:alerts_set_thresholds:{target_id}"
-                )
-            ])
-
-            # Sensitivity mode with edit button
-            sens_status = "✅" if modes.get('sensitivity', True) else "❌"
-            keyboard.append([
-                InlineKeyboardButton(
-                    text=f"⚡ Sensitivity {sens_status}",
-                    callback_data=f"targets:alerts_toggle:{target_id}:sensitivity"
-                ),
-                InlineKeyboardButton(
-                    text="⚙️ Edit",
-                    callback_data=f"targets:alerts_set_sensitivity:{target_id}"
-                )
-            ])
-
-            # Dynamic mode (now visible!)
-            dynamic_status = "✅" if modes.get('dynamic', False) else "❌"
-            keyboard.append([
-                InlineKeyboardButton(
-                    text=f"🔄 Dynamic     {dynamic_status}",
-                    callback_data=f"targets:alerts_toggle:{target_id}:dynamic"
-                )
-            ])
-
-        else:
-            # When disabled: only show enable button
-            keyboard.append([
-                InlineKeyboardButton(
-                    text="🟢 Enable Alerts",
-                    callback_data=f"targets:alerts_enable:{target_id}"
-                )
-            ])
-
-        # Back button
-        keyboard.append([
-            InlineKeyboardButton(text="🔙 Back", callback_data=back_callback)
-        ])
-
-        return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-    @staticmethod
-    def target_alerts_mode_keyboard(target) -> InlineKeyboardMarkup:
-        """Target alert modes toggle keyboard - vertical button list"""
-        from app.models import TargetModel
-
-        # Parse current modes
-        target_model = TargetModel(None)
-        modes = target_model.parse_alert_modes(target)
-
-        mode_icons = {"pnl": "📈", "dynamic": "🔄", "threshold": "🎚️", "sensitivity": "⚡"}
-        mode_names = {"pnl": "PNL", "dynamic": "Dynamic", "threshold": "Threshold", "sensitivity": "Sensitivity"}
-
-        keyboard = []
-
-        # Only show main modes (skip dynamic - legacy)
-        for mode in ["pnl", "threshold", "sensitivity"]:
-            if mode in modes:
-                icon = mode_icons[mode]
-                name = mode_names[mode]
-                status = "✅" if modes[mode] else "❌"
-
-                # Format: [📈 PNL          ✅]
-                button_text = f"{icon} {name:<12} {status}"
-                keyboard.append([
-                    InlineKeyboardButton(
-                        text=button_text,
-                        callback_data=f"targets:alerts_toggle:{target['id']}:{mode}"
-                    )
-                ])
-
-        keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data=f"targets:alerts_menu:{target['id']}")])
-
-        return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
     def auto_click_menu(rules: List[Dict]) -> InlineKeyboardMarkup:

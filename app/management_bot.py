@@ -15,8 +15,8 @@ from app.db import db
 from app.ui.keyboards import Keyboards
 from app.ui.states import ManagementStates
 from app.ui.handlers import (
-    MenuHandler, GroupsHandler, UserbotsHandler, TargetsHandler,
-    SchedulesHandler, SourcesHandler, AlertsHandler, PnlHandler,
+    MenuHandler, GroupsHandler, UserbotsHandler,
+    SchedulesHandler, SourcesHandler, PnlHandler,
     CommandForwardingHandler, NotificationsHandler, AutoClickHandler,
     DynamicReplyHandler, CurateAlphaHandler, TemplatesHandler
 )
@@ -34,10 +34,8 @@ class ManagementBot:
         self.menu_handler = MenuHandler(db, self.keyboards)
         self.groups_handler = GroupsHandler(db, self.keyboards)
         self.userbots_handler = UserbotsHandler(db, self.keyboards, self)
-        self.targets_handler = TargetsHandler(db, self.keyboards)
         self.schedules_handler = SchedulesHandler(db, self.keyboards)
         self.sources_handler = SourcesHandler(db, self.keyboards)
-        self.alerts_handler = AlertsHandler(db, self.keyboards)
         self.pnl_handler = PnlHandler(db, self.keyboards)
         self.cmd_fwd_handler = CommandForwardingHandler(db, self.keyboards)
         self.notifications_handler = NotificationsHandler(db, self.keyboards)
@@ -81,13 +79,6 @@ class ManagementBot:
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
 
-        # Targets
-        self.dp.callback_query.register(
-            self.targets_handler.handle_target_action,
-            F.data.startswith('targets:') | F.data.startswith('targets_alerts_page:'),
-            F.from_user.id.in_(settings.admin_telegram_ids_list)
-        )
-        
         # Userbot assignments
         self.dp.callback_query.register(
             self.handle_userbot_assignment,
@@ -112,11 +103,6 @@ class ManagementBot:
         
         
         # Tracking actions
-        self.dp.callback_query.register(
-            self.handle_tracking_action,
-            F.data.startswith('tracking:'),
-            F.from_user.id.in_(settings.admin_telegram_ids_list)
-        )
         
         # Cleanup confirmation
         self.dp.callback_query.register(
@@ -126,11 +112,6 @@ class ManagementBot:
         )
         
         # Tracking time period selection
-        self.dp.callback_query.register(
-            self.handle_tracking_time,
-            F.data.startswith('tracking_time:'),
-            F.from_user.id.in_(settings.admin_telegram_ids_list)
-        )
         
         
         
@@ -142,13 +123,6 @@ class ManagementBot:
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
         
-        # Alerts
-        self.dp.callback_query.register(
-            self.alerts_handler.handle_alerts_action,
-            F.data.startswith('alerts:'),
-            F.from_user.id.in_(settings.admin_telegram_ids_list)
-        )
-
         # PNL
         self.dp.callback_query.register(
             self.pnl_handler.handle_pnl_action,
@@ -316,20 +290,6 @@ class ManagementBot:
             ManagementStates.adding_group,
             F.from_user.id.in_(settings.admin_telegram_ids_list)
         )
-
-
-        self.dp.message.register(
-            self.targets_handler.process_sensitivity_input,
-            ManagementStates.target_edit_sensitivity,
-            F.from_user.id.in_(settings.admin_telegram_ids_list)
-        )
-
-        self.dp.message.register(
-            self.targets_handler.process_thresholds_input,
-            ManagementStates.target_edit_thresholds,
-            F.from_user.id.in_(settings.admin_telegram_ids_list)
-        )
-        
         self.dp.message.register(
             self.process_userbot_phone,
             ManagementStates.userbot_login_phone,
@@ -624,10 +584,6 @@ class ManagementBot:
             await self.userbots_handler.show_userbots_menu(query)
         elif action == 'sources':
             await self.sources_handler.show_sources_menu(query)
-        elif action == 'alerts':
-            await self.alerts_handler.show_alerts_menu(query)
-        elif action == 'tracking':
-            await self.menu_handler.show_tracking_menu(query)
         elif action == 'pnl':
             await self.pnl_handler.show_rules_list(query)
         elif action == 'notifications':
@@ -643,49 +599,6 @@ class ManagementBot:
             await query.message.delete()
         
         await query.answer()
-    
-    async def handle_tracking_action(self, query: types.CallbackQuery):
-        """Handle tracking-related actions"""
-        try:
-            # Parse callback: tracking:action
-            action = query.data.split(':', 1)[1]
-            
-            if action == 'cleanup':
-                await self.menu_handler.confirm_cleanup(query)
-            elif action == 'cleanup:confirm':
-                await self.menu_handler.execute_cleanup(query)
-            else:
-                await query.answer("❌ Unknown tracking action")
-                
-        except Exception as e:
-            logger.error(f"Error handling tracking action: {e}")
-            await query.answer("❌ Error processing tracking action")
-    
-    async def cleanup_tracking_data(self, query: types.CallbackQuery):
-        """Clean up old tracking data"""
-        try:
-            # Show confirmation dialog
-            text = (
-                f"<b>🧹 Cleanup Tracking Data</b>\n\n"
-                f"This will remove:\n"
-                f"• Stopped tokens (older than 24h)\n"
-                f"• Failed call records (older than 7 days)\n"
-                f"<b>⚠️ This action cannot be undone!</b>\n"
-                f"Are you sure you want to proceed?"
-            )
-            
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Yes, Cleanup", callback_data="confirm_cleanup"),
-                    InlineKeyboardButton(text="❌ Cancel", callback_data="menu:tracking")
-                ]
-            ])
-            
-            await query.message.edit_text(text, reply_markup=keyboard)
-            
-        except Exception as e:
-            logger.error(f"Error showing cleanup confirmation: {e}")
-            await query.answer("❌ Error loading cleanup dialog")
     
     async def confirm_cleanup(self, query: types.CallbackQuery):
         """Actually perform the cleanup"""
@@ -734,7 +647,6 @@ class ManagementBot:
             )
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📈 Back to Tracking", callback_data="menu:tracking")],
                 [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]
             ])
             
@@ -744,19 +656,6 @@ class ManagementBot:
         except Exception as e:
             logger.error(f"Error performing cleanup: {e}")
             await query.answer("❌ Error performing cleanup")
-    
-    async def handle_tracking_time(self, query: types.CallbackQuery):
-        """Handle tracking time period selection"""
-        try:
-            # Parse callback: tracking_time:1d
-            timeframe = query.data.split(':', 1)[1]
-            
-            # Show tracking menu with selected timeframe
-            await self.menu_handler.show_tracking_menu(query, timeframe)
-            
-        except Exception as e:
-            logger.error(f"Error handling tracking time selection: {e}")
-            await query.answer("❌ Error loading tracking data")
     
     
     async def handle_schedules(self, query: types.CallbackQuery):

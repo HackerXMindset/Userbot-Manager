@@ -129,43 +129,7 @@ class GroupsHandler:
         elif action == 'set_name':
             group_id = int(parts[2])
             await self.start_set_group_name(query, group_id, state)
-        elif action == 'alerts':
-            group_id = int(parts[2])
-            await self.show_target_selection_for_alerts(query, group_id)
-    
-    async def show_target_selection_for_alerts(self, query: types.CallbackQuery, group_id: int):
-        """Show a list of targets within a group to configure alerts for."""
-        try:
-            targets = await self.target_model.get_by_group_id(group_id)
-            if not targets:
-                await query.answer("❌ No targets found for this group.", show_alert=True)
-                return
-
-            group = await self.group_model.get_by_id(group_id)
-            group_name = group.get('display_name') or group.get('title') or f"Group {group_id}"
-
-            text = f"<b>⚙️ Configure Alerts for {group_name}</b>\n\nSelect a target to configure:"
-            
-            keyboard_rows = []
-            for target in targets:
-                button_text = f"🎯 Target {target['dest_chat_id']}"
-                # Add group_id to the callback for back-navigation
-                callback_data = f"targets:alerts_menu:{target['id']}:{group_id}"
-                keyboard_rows.append([
-                    InlineKeyboardButton(text=button_text, callback_data=callback_data)
-                ])
-            
-            keyboard_rows.append([
-                InlineKeyboardButton(text="🔙 Back to Group", callback_data=f"group:view:{group_id}")
-            ])
-
-            await query.message.edit_text(
-                text,
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
-            )
-        except Exception as e:
-            logger.error(f"Error showing target selection for alerts: {e}")
-            await query.answer("❌ Error loading targets for alert configuration.")
+        # No alerts configuration actions anymore
     
     async def start_add_group(self, query: types.CallbackQuery, state: FSMContext):
         """Start the add group process"""
@@ -288,29 +252,6 @@ class GroupsHandler:
             # Get the base keyboard
             keyboard_rows = self.keyboards.group_details(dict(group)).inline_keyboard
             
-            # Fetch targets to create dynamic alert buttons
-            targets = await self.target_model.get_by_group_id(group_id)
-            
-            if len(targets) == 1:
-                # If only one target, link directly to its config
-                target = targets[0]
-                configure_alerts_button = [
-                    InlineKeyboardButton(
-                        text="⚙️ Configure Alerts",
-                        callback_data=f"targets:alerts_menu:{target['id']}:{group_id}"
-                    )
-                ]
-                keyboard_rows.insert(-1, configure_alerts_button)
-            elif len(targets) > 1:
-                # If multiple targets, link to the selection screen
-                configure_alerts_button = [
-                    InlineKeyboardButton(
-                        text="⚙️ Configure Target Alerts",
-                        callback_data=f"group:alerts:{group_id}"
-                    )
-                ]
-                keyboard_rows.insert(-1, configure_alerts_button)
-
             await query.message.edit_text(
                 text,
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows)

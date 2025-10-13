@@ -141,7 +141,7 @@ class Scheduler:
             # Get tokens that:
             # 1. Are active
             # 2. Haven't been called in this group recently
-            # 3. Have gain potential or alerts to trigger
+            # 3. Show growth since the last call
             tokens = await db.fetch("""
                 SELECT t.* 
                 FROM tokens_tracked t
@@ -153,7 +153,7 @@ class Scheduler:
                     AND status IN ('sent', 'queued')
                 )
                 AND (
-                    -- Has untriggered gain alerts
+                    -- Has improved multiplier since last call
                     (t.last_mc / t.first_seen_mc) > t.last_hit_multiplier
                     OR 
                     -- New token (never called)
@@ -365,4 +365,3 @@ class Scheduler:
         except Exception as e:
             logger.error(f"Error getting command schedule statistics: {e}")
             return {}
-

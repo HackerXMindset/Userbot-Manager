@@ -79,10 +79,10 @@ class TokenMonitor:
             result = await dex_service.add_token(address)
             
             if not result['success']:
-                logger.error(f"Failed to add token {address[:8]}... to DexScreener: {result.get('error', 'Unknown error')}")
+                logger.info(f"Skipping Dex registration for {address[:8]}...: {result.get('error', 'no data available')}")
                 return None
             
-            # Use first target group as primary source group for alerts
+            # Use first target group as primary source group for routing
             source_group_id = target_groups[0]['id'] if target_groups else None
             
             # Update the existing record with source group info (DexScreener already created it)

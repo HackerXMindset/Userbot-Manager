@@ -4,9 +4,7 @@ from .menu import MenuHandler
 from .groups import GroupsHandler
 from .userbots import UserbotsHandler
 from .schedules import SchedulesHandler
-from .targets import TargetsHandler
 from .sources import SourcesHandler
-from .alerts import AlertsHandler
 from .pnl import PnlHandler
 from .command_forwarding import CommandForwardingHandler
 from .notifications import NotificationsHandler
@@ -20,9 +18,7 @@ __all__ = [
     "GroupsHandler",
     "UserbotsHandler",
     "SchedulesHandler",
-    "TargetsHandler",
     "SourcesHandler",
-    "AlertsHandler",
     "PnlHandler",
     "CommandForwardingHandler",
     "NotificationsHandler",

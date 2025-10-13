@@ -8,7 +8,6 @@ import time
 import json
 from typing import Dict, Any, Optional, List, Set
 from datetime import datetime, timedelta
-from decimal import Decimal
 
 from app.db import db
 from app.models import BotModel, TargetModel, TokenModel
@@ -18,7 +17,6 @@ from app.models.token_call_history import TokenCallHistoryModel
 from app.models.source_chat import SourceChatModel
 from app.models.group import GroupModel
 from app.models.curated_alpha import CuratedAlphaTokenStateModel
-from app.models.target_alert_state import TargetAlertStateModel
 from app.userbot.call_executor import CallExecutor
 from app.services.placeholder_service import PlaceholderService
 from app.services.call_history_service import CallHistoryService
@@ -46,7 +44,6 @@ class CallDispatcher:
         self.group_model = GroupModel(db)
         self.curated_alpha_state_model = CuratedAlphaTokenStateModel(db)
         self.target_model = TargetModel(db)
-        self.target_alert_state_model = TargetAlertStateModel(db)
         self.token_model = TokenModel(db)
         self._source_cache: Dict[int, Dict[str, Any]] = {}
 
@@ -196,22 +193,7 @@ class CallDispatcher:
                 message_content = placeholder_service.format_template(template_record['template_text'], placeholders)
                 use_mgmt_bot = template_record.get('use_management_bot', False)
 
-            # Get first message ID for reply threading if this is a system alert
             reply_to_message_id = additional_info.get('reply_to_message_id')
-            if not reply_to_message_id and additional_info.get('message_override') and target_group_id:
-                try:
-                    # Look up first message ID from alert state
-                    token_record = await db.fetchrow("SELECT id FROM tokens_tracked WHERE address = $1", token_address)
-                    if token_record:
-                        targets = await db.fetch("SELECT id FROM targets WHERE group_id = $1", target_group_id)
-                        for target in targets:
-                            alert_state = await self.target_alert_state_model.get_by_target_token(target['id'], token_record['id'])
-                            if alert_state and alert_state['first_message_id']:
-                                reply_to_message_id = alert_state['first_message_id']
-                                logger.debug(f"Found first message ID {reply_to_message_id} for alert threading")
-                                break
-                except Exception as e:
-                    logger.warning(f"Could not retrieve first message ID for threading: {e}")
             
             logger.debug(f"Final message content for job {job_id}:\n{message_content}")
 
@@ -251,30 +233,6 @@ class CallDispatcher:
 
             # Update job status
             if success:
-                # Store first message ID for future reply threading
-                sent_message_id = send_result.get('message_id')
-                if sent_message_id and token_address and target_group_id:
-                    try:
-                        # Find token_id from address
-                        token_record = await db.fetchrow("SELECT id FROM tokens_tracked WHERE address = $1", token_address)
-                        if token_record:
-                            # Find targets for this group
-                            targets = await db.fetch("SELECT id FROM targets WHERE group_id = $1", target_group_id)
-                            for target in targets:
-                                await self.target_alert_state_model.ensure_state(
-                                    target_id=target['id'],
-                                    token_id=token_record['id'],
-                                    message_id=sent_message_id
-                                )
-                    except Exception as e:
-                        logger.warning(f"Could not store first message ID for threading: {e}")
-
-                # PHASE 3: Record alert state baseline
-                try:
-                    await self._record_alert_state_baseline(job, send_result, placeholders)
-                except Exception as alert_state_error:
-                    logger.error(f"Failed to record alert state for job {job_id}: {alert_state_error}")
-
                 # Log successful call to history
                 try:
                     market_cap_cents = self._parse_market_cap_to_cents(placeholders.get('market_cap'))
@@ -292,18 +250,6 @@ class CallDispatcher:
                 await self.call_queue_model.mark_completed(job_id)
                 logger.info(f"[DISPATCHER] ✅ Job {job_id} completed.")
             else:
-                # If reply failed and we have reply_to_message_id, clear it from state
-                if reply_to_message_id and "message_id_invalid" in error_msg.lower():
-                    try:
-                        token_record = await db.fetchrow("SELECT id FROM tokens_tracked WHERE address = $1", token_address)
-                        if token_record and target_group_id:
-                            targets = await db.fetch("SELECT id FROM targets WHERE group_id = $1", target_group_id)
-                            for target in targets:
-                                await self.target_alert_state_model.clear_first_message(target['id'], token_record['id'])
-                                logger.info(f"Cleared invalid first_message_id {reply_to_message_id} for target {target['id']}")
-                    except Exception as e:
-                        logger.warning(f"Could not clear invalid first_message_id: {e}")
-
                 await self.call_queue_model.mark_failed(job_id, error_msg)
                 logger.warning(f"[DISPATCHER] ❌ Job {job_id} failed: {error_msg}")
             
@@ -313,56 +259,6 @@ class CallDispatcher:
             await self.call_queue_model.mark_failed(job_id, f"Processing error: {str(e)}")
             logger.error(f"Critical error processing job {job_id}: {e}", exc_info=True)
             return False
-
-    async def _record_alert_state_baseline(self, job: Dict[str, Any], send_result: Dict[str, Any], placeholders: Dict[str, Any]):
-        """Records the initial call state for sensitivity-based alerts."""
-        logger.debug(f"Recording alert state baseline for job {job['id']}")
-        
-        # 1. Get Target ID
-        target = await self.target_model.get_by_dest_chat_id(job['target_chat_id'])
-        if not target:
-            logger.warning(f"Could not find target for chat_id {job['target_chat_id']} to record alert state.")
-            return
-        target_id = target['id']
-
-        # 2. Get Token ID
-        token = await self.token_model.get_by_address(job['token_address'])
-        if not token:
-            logger.warning(f"Could not find token {job['token_address']} to record alert state.")
-            return
-        token_id = token['id']
-
-        # 3. Get Market Cap
-        market_cap_str = placeholders.get('market_cap')
-        initial_mc = None
-        if market_cap_str and market_cap_str != 'N/A':
-            try:
-                value = market_cap_str.replace('$', '').replace(',', '').strip()
-                multiplier = 1
-                if value.endswith('K'):
-                    multiplier = 1_000
-                    value = value[:-1]
-                elif value.endswith('M'):
-                    multiplier = 1_000_000
-                    value = value[:-1]
-                elif value.endswith('B'):
-                    multiplier = 1_000_000_000
-                    value = value[:-1]
-                initial_mc = Decimal(value) * multiplier
-            except Exception as e:
-                logger.warning(f"Could not parse market cap string '{market_cap_str}' for alert state: {e}")
-
-        # 4. Get Message ID
-        message_id = send_result.get('message_id')
-
-        # 5. Call ensure_state
-        await self.target_alert_state_model.ensure_state(
-            target_id=target_id,
-            token_id=token_id,
-            message_id=message_id,
-            initial_mc=initial_mc
-        )
-        logger.info(f"Successfully recorded alert state baseline for token {token_id} in target {target_id}.")
 
     async def _log_call_to_history(
         self,
