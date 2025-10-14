@@ -1,0 +1,10 @@
+    async def clear_source_bots(self, query: types.CallbackQuery, source_id: int):
+        """Clear both monitor and forward bots for source"""
+        try:
+            await self.source_model.update_source_bots(source_id, monitoring_userbot_id=None, forwarding_userbot_id=None)
+            await query.answer("✅ Source bots cleared!")
+            await self.show_source_details(query, source_id)
+
+        except Exception as e:
+            logger.error(f"Error clearing source bots: {e}")
+            await query.answer("❌ Error clearing bots")

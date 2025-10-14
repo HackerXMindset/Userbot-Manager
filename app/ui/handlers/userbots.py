@@ -145,6 +145,29 @@ class UserbotsHandler:
         elif action == 'restart':
             userbot_id = int(parts[2])
             await self.restart_worker(query, userbot_id)
+
+    async def handle_userbot_assignment(self, query: types.CallbackQuery) -> None:
+        """Assign a userbot to a group and refresh the details view."""
+        try:
+            parts = query.data.split(':')
+            group_id = int(parts[2])
+            userbot_id = int(parts[3])
+
+            await self.bot_model.assign_to_group(userbot_id, group_id)
+            await self.db.execute("UPDATE groups SET enabled = true WHERE id = $1", group_id)
+
+            group = await self.db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
+            userbot = await self.db.fetchrow("SELECT * FROM bots WHERE id = $1", userbot_id)
+
+            group_name = group['title'] or f"Chat {group['tg_chat_id']}"
+            bot_name = userbot['session_name'] or f"Bot {userbot_id}"
+
+            await query.answer(f"✅ {bot_name} assigned to {group_name}")
+            await self.management_bot.groups_handler.show_group_details(query, group_id)
+
+        except Exception as error:
+            logger.error("Error handling userbot assignment: %s", error)
+            await query.answer("❌ Error assigning userbot")
     
     async def start_userbot_login(self, query: types.CallbackQuery, state: FSMContext):
         """Start userbot login process"""

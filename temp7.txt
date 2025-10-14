@@ -1,0 +1,32 @@
+    async def show_forward_bot_selection(self, query: types.CallbackQuery, source_id: int):
+        """Show available bots for forward bot selection"""
+        try:
+            from app.models.bot import BotModel
+            bot_model = BotModel(self.db)
+            bots = await bot_model.get_active_userbots()
+
+            text = "<b>📤 Select Forward Bot</b>\n\n"
+            text += "Choose which userbot will forward curated calls from this source:\n\n"
+
+            keyboard_rows = []
+            for bot in bots:
+                name = bot.get('display_name') or bot['session_name']
+                keyboard_rows.append([
+                    InlineKeyboardButton(
+                        text=f"🤖 {name}",
+                        callback_data=f"sources:select_forward_bot:{source_id}:{bot['id']}"
+                    )
+                ])
+
+            keyboard_rows.append([
+                InlineKeyboardButton(text="❌ Clear Forward", callback_data=f"sources:select_forward_bot:{source_id}:0")
+            ])
+            keyboard_rows.append([
+                InlineKeyboardButton(text="🔙 Back", callback_data=f"sources:source_details:{source_id}")
+            ])
+
+            await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows))
+
+        except Exception as e:
+            logger.error(f"Error showing forward bot selection: {e}")
+            await query.answer("❌ Error loading bots")

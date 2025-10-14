@@ -1,0 +1,43 @@
+    async def show_group_sources(self, query: types.CallbackQuery, group_id: int):
+        """Show sources for a specific group"""
+        try:
+            group = await self.db.fetchrow("SELECT * FROM groups WHERE id = $1", group_id)
+            sources = await self.source_model.get_by_group(group_id)
+            
+            group_name = group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}"
+            text = f"<b>📋 Sources for {group_name}</b>\n\n"
+            
+            if not sources:
+                text += "No sources configured."
+            else:
+                for source in sources:
+                    status = "✅" if source['enabled'] else "❌"
+                    type_emoji = "📢" if source['source_type'] == 'channel' else "👥"
+                    title = source['title'] or f"ID: {source['source_chat_id']}"
+                    user_count = source['user_count'] if source['source_type'] == 'group' else "All"
+                    text += f"{status} {type_emoji} {title}\n"
+                    text += f"   Users: {user_count}\n\n"
+            
+            keyboard_rows = []
+            for source in sources:
+                title = (source['title'] or f"ID: {source['source_chat_id']}")[:25]
+                keyboard_rows.append([
+                    InlineKeyboardButton(
+                        text=f"⚙️ {title}",
+                        callback_data=f"source_edit:{source['id']}"
+                    )
+                ])
+            
+            keyboard_rows.extend([
+                [InlineKeyboardButton(text="🔙 Back", callback_data="sources:manage")],
+                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]
+            ])
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error showing group sources: {e}")
+            await query.answer("❌ Error loading group sources")
+    

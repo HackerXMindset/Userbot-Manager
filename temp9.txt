@@ -1,0 +1,25 @@
+    async def set_forward_bot(self, query: types.CallbackQuery, source_id: int, bot_id: int):
+        """Set or clear forward bot for source"""
+        try:
+            # Get current source to preserve monitor bot
+            source = await self.source_model.get_by_id(source_id)
+            if not source:
+                await query.answer("❌ Source not found")
+                return
+
+            forward_bot_id = bot_id if bot_id != 0 else None
+            current_monitor_bot = source.get('default_monitoring_userbot_id')
+
+            await self.source_model.update_source_bots(
+                source_id,
+                monitoring_userbot_id=current_monitor_bot,
+                forwarding_userbot_id=forward_bot_id
+            )
+
+            action_text = "cleared" if forward_bot_id is None else "set"
+            await query.answer(f"✅ Forward bot {action_text}!")
+            await self.show_source_details(query, source_id)
+
+        except Exception as e:
+            logger.error(f"Error setting forward bot: {e}")
+            await query.answer("❌ Error updating forward bot")
