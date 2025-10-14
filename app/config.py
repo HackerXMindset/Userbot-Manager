@@ -79,3 +79,45 @@ class Settings(BaseSettings):
     }
 
 settings = Settings()
+
+# Gain alert system defaults (fallback if DB unavailable)
+GAIN_THRESHOLD_DEFAULT_PCT = 0.30  # 30% gain triggers alert
+DROP_THRESHOLD_DEFAULT_PCT = 0.70  # 70% of first_seen_mc triggers stop
+DROP_FLOOR_MC_DEFAULT = 8000.0     # $8,000 absolute floor
+
+async def get_gain_alert_settings():
+    """
+    Load gain alert settings from database with fallback to defaults.
+    Returns dict with: gain_threshold_pct, drop_threshold_pct, drop_floor_mc
+    """
+    from app.db import db
+
+    try:
+        # Fetch settings from DB
+        gain_threshold = await db.fetchval(
+            "SELECT value FROM settings WHERE key = $1",
+            'gain_threshold_pct'
+        )
+        drop_threshold = await db.fetchval(
+            "SELECT value FROM settings WHERE key = $1",
+            'drop_threshold_pct'
+        )
+        drop_floor = await db.fetchval(
+            "SELECT value FROM settings WHERE key = $1",
+            'drop_floor_mc'
+        )
+
+        return {
+            'gain_threshold_pct': float(gain_threshold) if gain_threshold else GAIN_THRESHOLD_DEFAULT_PCT,
+            'drop_threshold_pct': float(drop_threshold) if drop_threshold else DROP_THRESHOLD_DEFAULT_PCT,
+            'drop_floor_mc': float(drop_floor) if drop_floor else DROP_FLOOR_MC_DEFAULT,
+        }
+    except Exception as e:
+        # Fallback to defaults if DB unavailable
+        import logging
+        logging.warning(f"Failed to load gain alert settings from DB, using defaults: {e}")
+        return {
+            'gain_threshold_pct': GAIN_THRESHOLD_DEFAULT_PCT,
+            'drop_threshold_pct': DROP_THRESHOLD_DEFAULT_PCT,
+            'drop_floor_mc': DROP_FLOOR_MC_DEFAULT,
+        }

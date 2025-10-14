@@ -52,6 +52,7 @@ def _default_registrars() -> Iterable[RouteRegistrar]:
     from . import notifications  # noqa: WPS433
     from . import pnl  # noqa: WPS433
     from . import schedules  # noqa: WPS433
+    from . import settings  # noqa: WPS433
     from . import sources  # noqa: WPS433
     from . import templates  # noqa: WPS433
     from . import userbots  # noqa: WPS433
@@ -69,3 +70,4 @@ def _default_registrars() -> Iterable[RouteRegistrar]:
     yield curate_alpha.register
     yield templates.register
     yield schedules.register
+    yield settings.register

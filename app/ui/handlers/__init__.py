@@ -12,6 +12,7 @@ from .auto_click import AutoClickHandler
 from .dynamic_reply import DynamicReplyHandler
 from .curate_alpha import CurateAlphaHandler
 from .templates import TemplatesHandler
+from .settings import SettingsHandler
 
 __all__ = [
     "MenuHandler",
@@ -26,4 +27,5 @@ __all__ = [
     "DynamicReplyHandler",
     "CurateAlphaHandler",
     "TemplatesHandler",
+    "SettingsHandler",
 ]

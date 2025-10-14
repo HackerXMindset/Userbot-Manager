@@ -231,6 +231,8 @@ class CallDispatcher:
                     error_msg = f"Userbot {forwarding_userbot_id} not available"
                     logger.error(f"[DISPATCHER] ❌ Job {job_id}: {error_msg}")
 
+            forwarded_message_id = send_result.get('message_id') if success else None
+
             # Update job status
             if success:
                 # Log successful call to history
@@ -243,6 +245,7 @@ class CallDispatcher:
                         caller_name,
                         caller_user_id,
                         market_cap_cents,
+                        forwarded_message_id,
                     )
                 except Exception as history_error:
                     logger.warning(f"Failed to log call history for job {job_id}: {history_error}")
@@ -268,6 +271,7 @@ class CallDispatcher:
         caller_name: Optional[str],
         caller_user_id: Optional[int],
         market_cap_cents: Optional[int],
+        forwarded_message_id: Optional[int],
     ):
         """Log successful call to call history table with rich data."""
         try:
@@ -300,6 +304,7 @@ class CallDispatcher:
                     'curated_alpha_rule_id': job.get('curated_alpha_rule_id'),
                     'market_cap_cents': market_cap_cents,
                     'call_job_id': job.get('id'),
+                    'forwarded_message_id': forwarded_message_id,
                 }
 
                 await self.call_history_service.log_call(call_data)

@@ -22,7 +22,8 @@ class TokenCallHistoryModel(BaseModel):
                       routing_rule_id: Optional[int] = None,
                       curated_alpha_rule_id: Optional[int] = None,
                       market_cap_at_call: Optional[int] = None,
-                      call_job_id: Optional[int] = None) -> asyncpg.Record:
+                      call_job_id: Optional[int] = None,
+                      forwarded_message_id: Optional[int] = None) -> asyncpg.Record:
         """Log a successful call to history"""
         data = {
             'token_address': token_address,
@@ -50,6 +51,24 @@ class TokenCallHistoryModel(BaseModel):
             data['market_cap_at_call'] = market_cap_at_call
         if call_job_id is not None:
             data['call_job_id'] = call_job_id
+        if forwarded_message_id is not None:
+            data['forwarded_message_id'] = forwarded_message_id
+
+        if target_chat_id is not None:
+            try:
+                exists = await self.db.fetchval(
+                    """
+                    SELECT 1 FROM token_call_history
+                    WHERE token_address = $1 AND target_chat_id = $2
+                    LIMIT 1
+                    """,
+                    token_address,
+                    target_chat_id,
+                )
+                if not exists:
+                    data['is_first_message'] = True
+            except Exception:
+                data.setdefault('is_first_message', False)
 
         return await self.create(data)
 

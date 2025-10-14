@@ -12,7 +12,7 @@ from app.ui.handlers import (
     MenuHandler, GroupsHandler, UserbotsHandler,
     SchedulesHandler, SourcesHandler, PnlHandler,
     CommandForwardingHandler, NotificationsHandler, AutoClickHandler,
-    DynamicReplyHandler, CurateAlphaHandler, TemplatesHandler
+    DynamicReplyHandler, CurateAlphaHandler, TemplatesHandler, SettingsHandler
 )
 from app.ui.routers import (
     ManagementRouterContext,
@@ -48,8 +48,9 @@ class ManagementBot(ScheduleMixin):
 
         self.curate_alpha_handler = CurateAlphaHandler(db, self.keyboards)
         self.templates_handler = TemplatesHandler(db, self.keyboards)
+        self.settings_handler = SettingsHandler(db, self.keyboards)
         self.cleanup_service = AdminCleanupService(db, self.keyboards)
-        
+
         self.setup_handlers()
 
     def set_system_manager(self, manager):

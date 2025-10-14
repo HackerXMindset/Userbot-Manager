@@ -52,6 +52,9 @@ class Keyboards:
                 InlineKeyboardButton(text="📝 Templates", callback_data="menu:templates")
             ],
             [
+                InlineKeyboardButton(text="⚙️ Settings", callback_data="menu:settings")
+            ],
+            [
                 InlineKeyboardButton(text="🔻 Collapse", callback_data="menu:close")
             ]
         ])
@@ -903,6 +906,62 @@ class Keyboards:
             keyboard.append(nav_buttons)
 
         keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data="dynamic_reply:menu")])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def settings_menu() -> InlineKeyboardMarkup:
+        """Settings main menu"""
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🌙 Gain Alert Settings", callback_data="settings:gain_alerts")],
+            [InlineKeyboardButton(text="📊 Token Status", callback_data="settings:token_status")],
+            [InlineKeyboardButton(text="🔙 Back", callback_data="menu:main")]
+        ])
+
+    @staticmethod
+    def gain_alert_settings_menu(gain_threshold: float, drop_threshold: float, drop_floor: float) -> InlineKeyboardMarkup:
+        """Gain alert settings menu with current values"""
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"📈 Gain Threshold: {gain_threshold*100:.0f}%",
+                callback_data="settings:edit_gain_threshold"
+            )],
+            [InlineKeyboardButton(
+                text=f"📉 Drop Threshold: {drop_threshold*100:.0f}%",
+                callback_data="settings:edit_drop_threshold"
+            )],
+            [InlineKeyboardButton(
+                text=f"💰 Minimum MC: ${drop_floor:,.0f}",
+                callback_data="settings:edit_drop_floor"
+            )],
+            [InlineKeyboardButton(text="🔙 Back", callback_data="settings:main")]
+        ])
+
+    @staticmethod
+    def token_status_menu() -> InlineKeyboardMarkup:
+        """Token status menu"""
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📊 Scheduler Overview", callback_data="settings:scheduler_overview")],
+            [InlineKeyboardButton(text="🪙 Active Tokens", callback_data="settings:tokens_list:active:1")],
+            [InlineKeyboardButton(text="⛔ Stopped Tokens", callback_data="settings:tokens_list:stopped:1")],
+            [InlineKeyboardButton(text="🔙 Back", callback_data="settings:main")]
+        ])
+
+    @staticmethod
+    def token_list_navigation(status: str, page: int, total_pages: int) -> InlineKeyboardMarkup:
+        """Token list with pagination"""
+        keyboard = []
+
+        # Pagination
+        if total_pages > 1:
+            nav_buttons = []
+            if page > 1:
+                nav_buttons.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"settings:tokens_list:{status}:{page-1}"))
+            nav_buttons.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="noop"))
+            if page < total_pages:
+                nav_buttons.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"settings:tokens_list:{status}:{page+1}"))
+            keyboard.append(nav_buttons)
+
+        keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data="settings:token_status")])
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod

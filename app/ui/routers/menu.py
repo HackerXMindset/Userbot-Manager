@@ -108,6 +108,8 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
             await manager.curate_alpha_handler.show_curate_alpha_menu(query)
         elif action == "templates":
             await manager.templates_handler.show_templates_root(query)
+        elif action == "settings":
+            await manager.settings_handler.show_settings_menu(query)
         elif action == "close":
             await query.message.delete()
 
