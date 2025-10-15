@@ -12,6 +12,7 @@ from app.db import db
 from app.models import BotModel, GroupModel, ScheduleModel, PnlForwardingRuleModel, CommandForwardingRuleModel, CommandTrackedMessageModel, AutoButtonClickRuleModel, CuratedAlphaRuleModel, CuratedAlphaTokenStateModel
 from app.models.source_chat import SourceChatModel
 from app.models.call_queue import CallQueueModel
+from app.models.monitored_source import MonitoredSourceModel
 from .token_monitor import TokenMonitor
 from .call_executor import CallExecutor
 from .source_manager import SourceManager
@@ -45,6 +46,7 @@ class MessageHandler:
         self.call_queue_model = CallQueueModel(db)
         self.curated_alpha_rule_model = CuratedAlphaRuleModel(db)
         self.curated_alpha_token_state_model = CuratedAlphaTokenStateModel(db)
+        self.monitored_source_model = MonitoredSourceModel(db)
 
         # Initialize components
         self.token_monitor = TokenMonitor(userbot_id)
@@ -73,6 +75,9 @@ class MessageHandler:
     async def _process_event(self, event, is_edit=False):
         direction = "outgoing" if event.out else "incoming"
         logger.debug(f"[MessageHandler] Processing {direction} event - Chat: {event.chat_id}, Userbot: {self.userbot_id}, Edit: {is_edit}, Sender: {event.sender_id}")
+
+        if not is_edit and direction == "incoming":
+            await self._handle_monitored_gain_alert(event)
 
         if direction == "incoming":
             is_dm = event.is_private
@@ -198,6 +203,65 @@ class MessageHandler:
         """Handle custom commands in monitored source groups with comprehensive debugging."""
         from app.userbot.command_handler import handle_custom_command
         return await handle_custom_command(self, event)
+
+    async def _handle_monitored_gain_alert(self, event) -> None:
+        """Handle gain alert monitoring for configured chats/people."""
+        chat_id = event.chat_id
+        sender_id = event.sender_id if hasattr(event, "sender_id") else None
+
+        try:
+            monitored = None
+
+            if sender_id is not None:
+                monitored = await self.monitored_source_model.is_monitored(chat_id, sender_id)
+
+            if not monitored:
+                monitored = await self.monitored_source_model.is_monitored(chat_id, None)
+
+            if not monitored:
+                return
+
+            if monitored["chat_type"] == "group" and monitored["user_id"] != sender_id:
+                logger.debug(
+                    f"[MONITOR_DETECT] Skipping chat {chat_id} user {sender_id} – monitored entry expects {monitored['user_id']}"
+                )
+                return
+
+            message = event.message
+            text = self.utils.get_message_text(message)
+
+            if not text:
+                logger.debug(f"[MONITOR_DETECT] Chat {chat_id} message has no text/content, skipping")
+                return
+
+            addresses = self.utils.extract_token_addresses(text)
+            if not addresses:
+                logger.debug(f"[MONITOR_DETECT] Chat {chat_id} message from {sender_id} has no contract addresses")
+                return
+
+            logger.info(
+                "[MONITOR_DETECT] Chat %s matched monitored %s entry %s; found %d address(es)",
+                chat_id,
+                monitored["chat_type"],
+                monitored["id"],
+                len(addresses),
+            )
+
+            for address, blockchain in addresses:
+                await self.token_monitor.process_monitored_token(
+                    address=address,
+                    blockchain=blockchain,
+                    chat_id=chat_id,
+                    message_id=message.id if message else None,
+                    user_id=sender_id,
+                    chat_type=monitored["chat_type"],
+                )
+
+        except Exception as exc:
+            logger.error(
+                f"[MONITOR_DETECT] Error handling monitored source message in chat {chat_id}: {exc}",
+                exc_info=True,
+            )
 
     async def _handle_potential_custom_reply(self, event):
         """Handle potential replies to custom commands in real-time."""

@@ -95,4 +95,9 @@ class ManagementStates(StatesGroup):
     template_edit_text = State()
     template_assign_select_groups = State()
     
+    # Gain Alerts
+    gain_alerts_add_type = State()
+    gain_alerts_add_chat_id = State()
+    gain_alerts_add_user_id = State()
+    gain_alerts_confirm_add = State()
     

@@ -85,6 +85,10 @@ GAIN_THRESHOLD_DEFAULT_PCT = 0.30  # 30% gain triggers alert
 DROP_THRESHOLD_DEFAULT_PCT = 0.70  # 70% of first_seen_mc triggers stop
 DROP_FLOOR_MC_DEFAULT = 8000.0     # $8,000 absolute floor
 
+# Market cap validation bounds
+MIN_VALID_MARKET_CAP = 1000.0       # $1K minimum
+MAX_VALID_MARKET_CAP = 1_000_000_000_000.0  # $1T maximum
+
 async def get_gain_alert_settings():
     """
     Load gain alert settings from database with fallback to defaults.

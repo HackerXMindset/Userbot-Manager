@@ -49,6 +49,7 @@ class DexScreenerService:
         self.running = False
         self._scheduler_task: Optional[asyncio.Task] = None
         self._poll_heap: List[Tuple[datetime, int, str]] = []  # (next_poll_at, token_id, address)
+        self._tokens_in_heap: set[int] = set()  # Track tokens to prevent duplicates
         self._semaphore = asyncio.Semaphore(5)  # Limit concurrent DexScreener requests
 
     # ==================== LIFECYCLE ====================
@@ -110,11 +111,13 @@ class DexScreenerService:
 
             for token in tokens:
                 next_poll = token.get('next_poll_at')
+                token_id = token['id']
                 if next_poll:
                     heapq.heappush(
                         self._poll_heap,
-                        (next_poll, token['id'], token['address'])
+                        (next_poll, token_id, token['address'])
                     )
+                    self._tokens_in_heap.add(token_id)
 
             logger.info(f"Loaded {len(tokens)} tokens into scheduler")
 
@@ -134,6 +137,7 @@ class DexScreenerService:
                 # Pop all tokens whose next_poll_at <= now
                 while self._poll_heap and self._poll_heap[0][0] <= now:
                     next_poll, token_id, address = heapq.heappop(self._poll_heap)
+                    self._tokens_in_heap.discard(token_id)  # Remove from tracking set
                     tokens_to_poll.append((token_id, address))
 
                 if tokens_to_poll:
@@ -229,20 +233,28 @@ class DexScreenerService:
                     # Update tier in DB
                     await self.token_model.update_tier(token_id, tier_name, next_poll)
 
-                    # Re-add to heap
-                    heapq.heappush(self._poll_heap, (next_poll, token_id, address))
+                    # Re-add to heap (only if not already scheduled)
+                    if token_id not in self._tokens_in_heap:
+                        heapq.heappush(self._poll_heap, (next_poll, token_id, address))
+                        self._tokens_in_heap.add(token_id)
 
-                    logger.debug(
-                        f"[POLL] {address[:8]}... ({chain_id}) rescheduled to {tier_name} at {next_poll}"
-                    )
+                        logger.debug(
+                            f"[POLL] {address[:8]}... ({chain_id}) rescheduled to {tier_name} at {next_poll}"
+                        )
+                    else:
+                        logger.debug(
+                            f"[POLL] {address[:8]}... ({chain_id}) already in heap, skipping reschedule"
+                        )
 
             except Exception as e:
                 logger.error(f"[POLL] Error polling token {address[:8]}...: {e}", exc_info=True)
 
-                # Reschedule with backoff on error
+                # Reschedule with backoff on error (only if not already scheduled)
                 try:
-                    next_poll = datetime.now(timezone.utc) + timedelta(seconds=30)
-                    heapq.heappush(self._poll_heap, (next_poll, token_id, address))
+                    if token_id not in self._tokens_in_heap:
+                        next_poll = datetime.now(timezone.utc) + timedelta(seconds=30)
+                        heapq.heappush(self._poll_heap, (next_poll, token_id, address))
+                        self._tokens_in_heap.add(token_id)
                 except Exception:
                     pass
 
@@ -261,9 +273,12 @@ class DexScreenerService:
             settings_dict = await get_gain_alert_settings()
             gain_threshold_pct = Decimal(str(settings_dict['gain_threshold_pct']))
 
-            # If last_alert_mc == 0, treat as baseline (no alert yet)
-            if last_alert_mc <= 0:
-                logger.debug(f"[GAIN_ALERT] Token {address[:8]}... has no baseline alert MC yet (last_alert_mc={last_alert_mc})")
+            # Use first_seen_mc as baseline if no previous alert (last_alert_mc is NULL or 0)
+            baseline_mc = last_alert_mc if last_alert_mc and last_alert_mc > 0 else first_seen_mc
+
+            # Check if baseline is valid
+            if not baseline_mc or baseline_mc <= 0:
+                logger.debug(f"[GAIN_ALERT] Token {address[:8]}... has no valid baseline (first_seen_mc={first_seen_mc}, last_alert_mc={last_alert_mc})")
                 return
 
             # Check if first_seen_mc is valid for multiplier calculation
@@ -271,8 +286,8 @@ class DexScreenerService:
                 logger.debug(f"[GAIN_ALERT] Token {address[:8]}... has invalid first_seen_mc={first_seen_mc}")
                 return
 
-            # Fire alert when: current_mc >= last_alert_mc * (1 + gain_threshold_pct)
-            threshold_mc = last_alert_mc * (Decimal(1) + gain_threshold_pct)
+            # Fire alert when: current_mc >= baseline_mc * (1 + gain_threshold_pct)
+            threshold_mc = baseline_mc * (Decimal(1) + gain_threshold_pct)
 
             if current_mc >= threshold_mc:
                 # Calculate multiplier = current_mc / first_seen_mc
@@ -285,6 +300,7 @@ class DexScreenerService:
                 # 🌙${TICKER} {multiplier:.1f}x | 💹From ${old_mc} ↗️ ${new_mc} within {elapsed}
                 ticker_display = ticker or address[:8]
                 alert_message = (
+                    "⚠️ Gain alerts are in beta and may be inaccurate.\n"
                     f"🌙${ticker_display} {multiplier:.1f}x | "
                     f"💹From {self._format_mc_shorthand(first_seen_mc)} ↗️ {self._format_mc_shorthand(current_mc)} within {elapsed}"
                 )
@@ -292,7 +308,7 @@ class DexScreenerService:
                 logger.info(f"[GAIN_ALERT] Token {address[:8]}... triggered: {alert_message}")
 
                 # Dispatch alert to target groups
-                await self._dispatch_gain_alert(token, alert_message, address)
+                await self._dispatch_gain_alert(token, alert_message, address, current_mc)
 
                 # Post-alert bookkeeping:
                 # 1. Update last_alert_mc = current_mc
@@ -333,7 +349,7 @@ class DexScreenerService:
         else:
             return f"${value:.0f}"
 
-    async def _dispatch_gain_alert(self, token: Dict, alert_message: str, address: str) -> None:
+    async def _dispatch_gain_alert(self, token: Dict, alert_message: str, address: str, current_mc: Decimal) -> None:
         """
         Dispatch gain alert to target groups.
         Sends as reply to original message if available, otherwise standalone.
@@ -345,40 +361,58 @@ class DexScreenerService:
                 logger.warning(f"[GAIN_ALERT] No userbot manager set, cannot dispatch alert for {address[:8]}...")
                 return
 
-            target_chats = await db.fetch(
+            tracking_groups = await db.fetch(
                 """
-                SELECT
-                    target_chat_id,
-                    COALESCE(
-                        MAX(CASE WHEN is_first_message AND forwarded_message_id IS NOT NULL THEN forwarded_message_id END),
-                        MAX(forwarded_message_id)
-                    ) AS reply_message_id,
-                    MAX(called_at) AS last_called_at
-                FROM token_call_history
-                WHERE token_address = $1
-                  AND target_chat_id IS NOT NULL
-                GROUP BY target_chat_id
-                ORDER BY last_called_at DESC
-                LIMIT 10
+                SELECT chat_id, original_message_id, first_seen_mc, last_alert_mc
+                FROM token_group_alerts
+                WHERE token_id = $1
                 """,
-                address,
+                token_id,
             )
 
-            if not target_chats:
-                logger.warning(f"[GAIN_ALERT] No target chats found for token {address[:8]}... (token_id={token_id})")
+            if not tracking_groups:
+                logger.debug(f"[GROUP_ALERT_FIRE] No monitored groups for token {address[:8]}..., skipping")
                 return
 
-            logger.info(f"[GAIN_ALERT] Dispatching to {len(target_chats)} target chat(s) for {address[:8]}...")
+            settings_dict = await get_gain_alert_settings()
+            gain_threshold_pct = Decimal(str(settings_dict['gain_threshold_pct']))
 
-            # Send alert to each target chat
-            for target_chat in target_chats:
-                dest_chat_id = target_chat['target_chat_id']
-                reply_to_msg_id = target_chat.get('reply_message_id')
+            for group in tracking_groups:
+                chat_id = group['chat_id']
+                reply_to_msg_id = group['original_message_id']
+                first_seen_mc = Decimal(str(group['first_seen_mc']))
+                last_alert_mc = group['last_alert_mc']
+
+                baseline_mc = Decimal(str(last_alert_mc)) if last_alert_mc else first_seen_mc
+
+                if baseline_mc <= 0:
+                    logger.debug(
+                        f"[GROUP_ALERT_FIRE] Chat {chat_id} baseline invalid "
+                        f"(first_seen={first_seen_mc}, last_alert={last_alert_mc}), skipping"
+                    )
+                    continue
+
+                threshold_mc = baseline_mc * (Decimal(1) + gain_threshold_pct)
+
+                if current_mc < threshold_mc:
+                    continue
+
+                alert_id = await db.fetchval("""
+                    INSERT INTO alert_queue
+                    (token_id, token_address, alert_message, target_chat_id, reply_to_message_id, status)
+                    VALUES ($1, $2, $3, $4, $5, 'pending')
+                    RETURNING id
+                """, token_id, address, alert_message, chat_id, reply_to_msg_id)
 
                 # Get any active worker to send the message
                 workers = self.userbot_manager.get_all_workers()
                 if not workers:
                     logger.error(f"[GAIN_ALERT] No active workers available to send alert")
+                    await db.execute("""
+                        UPDATE alert_queue
+                        SET status='failed', error='No active workers', attempt_count=1, last_attempt_at=NOW()
+                        WHERE id=$1
+                    """, alert_id)
                     continue
 
                 # Use first available worker
@@ -392,16 +426,37 @@ class DexScreenerService:
 
                 # Send alert message
                 result = await executor.send_call_message(
-                    target_chat_id=dest_chat_id,
+                    target_chat_id=chat_id,
                     message=alert_message,
                     token_address=address,
                     reply_to_message_id=reply_to_msg_id
                 )
 
                 if result['success']:
-                    logger.info(f"[GAIN_ALERT] Sent to chat {dest_chat_id}, msg_id={result.get('message_id')}")
+                    logger.info(f"[GROUP_ALERT_FIRE] Sent to chat {chat_id}, msg_id={result.get('message_id')}")
+                    await db.execute("""
+                        UPDATE alert_queue
+                        SET status='sent', attempt_count=1, last_attempt_at=NOW()
+                        WHERE id=$1
+                    """, alert_id)
+
+                    await db.execute(
+                        """
+                        UPDATE token_group_alerts
+                        SET last_alert_mc = $1
+                        WHERE token_id = $2 AND chat_id = $3
+                        """,
+                        current_mc,
+                        token_id,
+                        chat_id,
+                    )
                 else:
-                    logger.error(f"[GAIN_ALERT] Failed to send to chat {dest_chat_id}: {result.get('error')}")
+                    logger.error(f"[GROUP_ALERT_FIRE] Failed to send to chat {chat_id}: {result.get('error')}")
+                    await db.execute("""
+                        UPDATE alert_queue
+                        SET status='failed', error=$2, attempt_count=1, last_attempt_at=NOW()
+                        WHERE id=$1
+                    """, alert_id, result.get('error'))
 
         except Exception as e:
             logger.error(f"Error dispatching gain alert for {address[:8]}...: {e}", exc_info=True)
@@ -526,9 +581,13 @@ class DexScreenerService:
             # Fetch token info for heap
             token = await db.fetchrow("SELECT * FROM tokens_tracked WHERE id = $1", token_id)
             if token:
-                # Add to heap (will be picked up on next scheduler cycle)
-                heapq.heappush(self._poll_heap, (next_poll, token_id, token['address']))
-                logger.info(f"[TIER_B] Token ID {token_id} promoted to Tier B")
+                # Add to heap only if not already scheduled
+                if token_id not in self._tokens_in_heap:
+                    heapq.heappush(self._poll_heap, (next_poll, token_id, token['address']))
+                    self._tokens_in_heap.add(token_id)
+                    logger.info(f"[TIER_B] Token ID {token_id} promoted to Tier B")
+                else:
+                    logger.debug(f"[TIER_B] Token ID {token_id} already in heap, skipping")
 
         except Exception as e:
             logger.error(f"Error promoting token {token_id} to Tier B: {e}", exc_info=True)
@@ -553,12 +612,16 @@ class DexScreenerService:
                 logger.warning(f"[SCHEDULER] Cannot add token ID {token_id} to scheduler: missing next_poll_at or address")
                 return
 
-            # Add to heap
-            heapq.heappush(self._poll_heap, (next_poll, token_id, address))
-            logger.info(
-                f"[SCHEDULER] Added token {address[:8]}... (ID {token_id}) to scheduler, "
-                f"next poll at {next_poll}"
-            )
+            # Add to heap only if not already scheduled
+            if token_id not in self._tokens_in_heap:
+                heapq.heappush(self._poll_heap, (next_poll, token_id, address))
+                self._tokens_in_heap.add(token_id)
+                logger.info(
+                    f"[SCHEDULER] Added token {address[:8]}... (ID {token_id}) to scheduler, "
+                    f"next poll at {next_poll}"
+                )
+            else:
+                logger.debug(f"[SCHEDULER] Token ID {token_id} already in heap, skipping")
 
         except Exception as e:
             logger.error(f"Error adding token {token_id} to scheduler: {e}", exc_info=True)

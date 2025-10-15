@@ -26,7 +26,7 @@ class SettingsHandler:
         try:
             await query.message.edit_text(
                 "<b>⚙️ System Settings</b>\n\n"
-                "Configure system-wide parameters and thresholds.",
+                "Manage gain alert sources, global thresholds, and scheduler diagnostics.",
                 reply_markup=self.keyboards.settings_menu()
             )
             await query.answer()

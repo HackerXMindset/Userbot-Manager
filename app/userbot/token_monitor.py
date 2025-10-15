@@ -3,9 +3,9 @@ Token Monitor - Handles token detection and tracking from source messages
 """
 
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from app.db import db
 from .utils import UserbotUtils
@@ -74,24 +74,42 @@ class TokenMonitor:
         except Exception as e:
             logger.error(f"Error processing token address {address}: {e}")
     
+    async def _fetch_market_snapshot(self, address: str, blockchain: str) -> Tuple[Optional[Decimal], Optional[Decimal], Optional[str]]:
+        """Fetch current market data for a token."""
+        from app.services.jupiter_api import get_jupiter_service
+
+        jupiter_service = get_jupiter_service()
+        market_cap: Optional[Decimal] = None
+        price: Optional[Decimal] = None
+        ticker: Optional[str] = None
+        token_data = None
+
+        if blockchain.upper() == "SOL":
+            token_data = await jupiter_service.get_token_data(address, use_cache=False)
+
+        okx_info = await self.okx_client.fetch_token_info(address, blockchain)
+        if okx_info:
+            market_cap = self._normalize_decimal(self.okx_client.get_market_cap(okx_info))
+            price = self._normalize_decimal(self.okx_client.get_price(okx_info))
+            ticker = self.okx_client.get_ticker(okx_info)
+
+        if market_cap is None:
+            if token_data is None:
+                token_data = await jupiter_service.get_token_data(address, use_cache=False)
+            if token_data:
+                market_cap = self._normalize_decimal(jupiter_service.get_market_cap(token_data))
+                price = price or self._normalize_decimal(jupiter_service.get_price(token_data))
+                ticker = ticker or jupiter_service.get_ticker(token_data)
+
+        return market_cap, price, ticker
+
     async def _add_token_to_tracking(self, address: str, blockchain: str, target_groups: List[Dict[str, Any]]) -> Optional[int]:
         """Add token to tracking database with Jupiter snapshot"""
         try:
             # Add to DexScreener service for tracking - this creates the initial record
             from app.dex import get_dex_service
-            from app.services.jupiter_api import get_jupiter_service
 
             dex_service = get_dex_service()
-            jupiter_service = get_jupiter_service()
-
-            token_data = None
-            if blockchain == "SOL":
-                token_data = await jupiter_service.get_token_data(address, use_cache=False)
-                if not token_data:
-                    logger.info(
-                        f"[TOKEN_EXTRACT] Skipping {address}: Jupiter has no entry (likely wallet)"
-                    )
-                    return None
 
             result = await dex_service.add_token(address)
 
@@ -99,40 +117,24 @@ class TokenMonitor:
                 logger.info(f"Skipping Dex registration for {address}: {result.get('error', 'no data available')}")
                 return None
 
-            # Fetch Jupiter data for first snapshot (use_cache=False for fresh data)
-            market_cap: Optional[Decimal] = None
-            price: Optional[Decimal] = None
-            ticker: Optional[str] = None
-
-            if blockchain == "SOL":
-                token_data = await jupiter_service.get_token_data(address, use_cache=False)
-                if token_data:
-                    okx_info = await self.okx_client.fetch_token_info(address, blockchain)
-                    if okx_info:
-                        market_cap = self.okx_client.get_market_cap(okx_info)
-                        price = self.okx_client.get_price(okx_info)
-                        ticker = self.okx_client.get_ticker(okx_info)
-                    if market_cap is None:
-                        market_cap = jupiter_service.get_market_cap(token_data)
-                        price = jupiter_service.get_price(token_data)
-                        ticker = jupiter_service.get_ticker(token_data)
-            else:
-                okx_info = await self.okx_client.fetch_token_info(address, blockchain)
-                if okx_info:
-                    market_cap = self.okx_client.get_market_cap(okx_info)
-                    price = self.okx_client.get_price(okx_info)
-                    ticker = self.okx_client.get_ticker(okx_info)
-                if market_cap is None:
-                    token_data = await jupiter_service.get_token_data(address, use_cache=False)
-                    market_cap = jupiter_service.get_market_cap(token_data) if token_data else None
-                    price = jupiter_service.get_price(token_data) if token_data else None
-                    ticker = jupiter_service.get_ticker(token_data) if token_data else None
+            # Fetch market snapshot for baseline configuration
+            market_cap, price, ticker = await self._fetch_market_snapshot(address, blockchain)
 
             # Use first target group as primary source group for routing
             source_group_id = target_groups[0]['id'] if target_groups else None
 
             if market_cap and market_cap > 0:
-                # Successfully got Jupiter data - initialize gain alert fields
+                # Validate market cap bounds
+                from app.config import MIN_VALID_MARKET_CAP, MAX_VALID_MARKET_CAP
+
+                if not (Decimal(MIN_VALID_MARKET_CAP) <= market_cap <= Decimal(MAX_VALID_MARKET_CAP)):
+                    logger.warning(
+                        f"[JUPITER_SNAPSHOT] {address} MC out of valid range: "
+                        f"${float(market_cap):,.2f} (valid: ${MIN_VALID_MARKET_CAP:,} - ${MAX_VALID_MARKET_CAP:,}), skipping"
+                    )
+                    return None
+
+                # Successfully got valid Jupiter data - initialize gain alert fields
                 logger.info(f"[JUPITER_SNAPSHOT] {address} MC: ${float(market_cap):,.2f}, Ticker: {ticker}")
 
                 token_record = await db.fetchrow("""
@@ -140,7 +142,6 @@ class TokenMonitor:
                     SET source_group_id = COALESCE(source_group_id, $2),
                         first_seen_mc = $3,
                         last_mc = $3,
-                        last_alert_mc = $3,
                         ticker = COALESCE($4, ticker),
                         current_tier = 'tier_a',
                         next_poll_at = NOW() + INTERVAL '10 seconds',
@@ -177,6 +178,74 @@ class TokenMonitor:
         except Exception as e:
             logger.error(f"Error adding token to tracking: {e}")
             return None
+
+    async def process_monitored_token(
+        self,
+        address: str,
+        blockchain: str,
+        chat_id: int,
+        message_id: Optional[int],
+        user_id: Optional[int],
+        chat_type: Optional[str] = None,
+    ) -> None:
+        """Create per-chat tracking when a monitored source posts a token."""
+        try:
+            if message_id is None:
+                logger.debug(f"[MONITOR_DETECT] Missing message_id for {address} in chat {chat_id}, skipping")
+                return
+
+            token = await db.fetchrow("SELECT id FROM tokens_tracked WHERE address = $1", address)
+            if token:
+                token_id = token["id"]
+            else:
+                token_id = await self._add_token_to_tracking(address, blockchain, [])
+                if token_id is None:
+                    logger.warning(f"[MONITOR_DETECT] Unable to register {address} for chat {chat_id}")
+                    return
+
+            existing = await db.fetchrow("""
+                SELECT id FROM token_group_alerts
+                WHERE token_id = $1 AND chat_id = $2
+            """, token_id, chat_id)
+
+            if existing:
+                logger.debug(f"[GROUP_ALERT_DUP] Chat {chat_id} already tracking token {address[:8]}..., skipping")
+                return
+
+            market_cap, _, _ = await self._fetch_market_snapshot(address, blockchain)
+
+            if market_cap is None or market_cap <= 0:
+                logger.warning(f"[MONITOR_DETECT] Invalid market cap for {address[:8]}...: {market_cap}, skipping")
+                return
+
+            from app.config import MIN_VALID_MARKET_CAP, MAX_VALID_MARKET_CAP
+
+            min_cap = Decimal(MIN_VALID_MARKET_CAP)
+            max_cap = Decimal(MAX_VALID_MARKET_CAP)
+
+            if not (min_cap <= market_cap <= max_cap):
+                logger.warning(
+                    f"[MONITOR_DETECT] Market cap for {address[:8]}... out of range: "
+                    f"${float(market_cap):,.2f} (valid ${MIN_VALID_MARKET_CAP:,} - ${MAX_VALID_MARKET_CAP:,}), skipping"
+                )
+                return
+
+            await db.execute("""
+                INSERT INTO token_group_alerts
+                (token_id, chat_id, first_seen_mc, original_message_id, original_user_id)
+                VALUES ($1, $2, $3, $4, $5)
+            """, token_id, chat_id, market_cap, message_id, user_id)
+
+            logger.info(
+                f"[GROUP_ALERT_NEW] Token {address[:8]}... monitoring started for chat {chat_id} "
+                f"(type={chat_type or 'unknown'}) at ${float(market_cap):,.2f}"
+            )
+
+        except Exception as exc:
+            logger.error(
+                f"[MONITOR_DETECT] Error processing monitored token {address[:8]}... for chat {chat_id}: {exc}",
+                exc_info=True,
+            )
     
     async def get_token_by_address(self, address: str) -> Optional[Dict[str, Any]]:
         """Get token record by address"""
@@ -258,3 +327,15 @@ class TokenMonitor:
         except Exception as e:
             logger.error(f"Error cleaning up old tokens: {e}")
             return 0
+
+    @staticmethod
+    def _normalize_decimal(value: Optional[Any]) -> Optional[Decimal]:
+        """Best-effort conversion of numeric inputs to Decimal."""
+        if value is None:
+            return None
+        if isinstance(value, Decimal):
+            return value
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return None

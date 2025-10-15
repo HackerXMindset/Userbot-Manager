@@ -56,6 +56,7 @@ def _default_registrars() -> Iterable[RouteRegistrar]:
     from . import sources  # noqa: WPS433
     from . import templates  # noqa: WPS433
     from . import userbots  # noqa: WPS433
+    from . import gain_alerts  # noqa: WPS433
 
     yield core.register
     yield menu.register
@@ -71,3 +72,4 @@ def _default_registrars() -> Iterable[RouteRegistrar]:
     yield templates.register
     yield schedules.register
     yield settings.register
+    yield gain_alerts.register

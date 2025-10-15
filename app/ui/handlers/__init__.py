@@ -13,6 +13,7 @@ from .dynamic_reply import DynamicReplyHandler
 from .curate_alpha import CurateAlphaHandler
 from .templates import TemplatesHandler
 from .settings import SettingsHandler
+from .gain_alerts import GainAlertsHandler
 
 __all__ = [
     "MenuHandler",
@@ -28,4 +29,5 @@ __all__ = [
     "CurateAlphaHandler",
     "TemplatesHandler",
     "SettingsHandler",
+    "GainAlertsHandler",
 ]
