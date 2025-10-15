@@ -12,12 +12,17 @@ from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.config import settings, get_gain_alert_settings
+from app.config import settings, get_gain_alert_settings, get_gain_alert_template_text
 from app.db import db
 from app.models import TokenModel
+from app.models.monitored_source import MonitoredSourceModel
 from app.services.dexscreener_api import get_dexscreener_client
 from app.services.okx_market_api import get_okx_market_client
 from app.utils.tier_calculator import calculate_next_poll_time, get_poll_interval_for_tier
+from app.gain_alert_templates import (
+    DEFAULT_GAIN_ALERT_TEMPLATE,
+    missing_required_placeholders,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +48,11 @@ class DexScreenerService:
 
     def __init__(self) -> None:
         self.token_model = TokenModel(db)
+        self.source_model = MonitoredSourceModel(db)
         self.dex_client = get_dexscreener_client()
         self.okx_client = get_okx_market_client()
         self.userbot_manager = None
+        self.management_bot = None
         self.running = False
         self._scheduler_task: Optional[asyncio.Task] = None
         self._poll_heap: List[Tuple[datetime, int, str]] = []  # (next_poll_at, token_id, address)
@@ -61,6 +68,14 @@ class DexScreenerService:
             logger.info("UserbotManager set on Dex service")
         else:
             logger.info("UserbotManager cleared on Dex service")
+
+    def set_management_bot(self, management_bot) -> None:
+        """Record the management bot wrapper for alert dispatching."""
+        self.management_bot = management_bot
+        if management_bot:
+            logger.info("Management bot set on Dex service")
+        else:
+            logger.info("Management bot cleared on Dex service")
 
     async def start(self) -> None:
         """Start the service and scheduler background task."""
@@ -291,33 +306,39 @@ class DexScreenerService:
 
             if current_mc >= threshold_mc:
                 # Calculate multiplier = current_mc / first_seen_mc
-                multiplier = float(current_mc / first_seen_mc)
+                multiplier_value = float(current_mc / first_seen_mc)
 
                 # Calculate elapsed time
                 elapsed = self._format_elapsed_time(first_seen_at)
 
-                # Format alert message per spec:
-                # 🌙${TICKER} {multiplier:.1f}x | 💹From ${old_mc} ↗️ ${new_mc} within {elapsed}
                 ticker_display = ticker or address[:8]
-                alert_message = (
-                    "⚠️ Gain alerts are in beta and may be inaccurate.\n"
-                    f"🌙${ticker_display} {multiplier:.1f}x | "
-                    f"💹From {self._format_mc_shorthand(first_seen_mc)} ↗️ {self._format_mc_shorthand(current_mc)} within {elapsed}"
-                )
+                template_context = {
+                    "address": address,
+                    "token_symbol": ticker_display,
+                    "multiplier": f"{multiplier_value:.1f}x",
+                    "first_market_cap": self._format_mc_shorthand(first_seen_mc),
+                    "current_market_cap": self._format_mc_shorthand(current_mc),
+                    "elapsed_time": elapsed,
+                    "gain_emoji": self._multiplier_to_emoji(multiplier_value),
+                }
 
-                logger.info(f"[GAIN_ALERT] Token {address[:8]}... triggered: {alert_message}")
+                default_preview = DEFAULT_GAIN_ALERT_TEMPLATE.format(**template_context)
+                logger.info(f"[GAIN_ALERT] Token {address[:8]}... triggered: {default_preview}")
 
-                # Dispatch alert to target groups
-                await self._dispatch_gain_alert(token, alert_message, address, current_mc)
+                # Dispatch alert to target groups (returns True if any deliveries succeeded)
+                dispatched = await self._dispatch_gain_alert(token, template_context, address, current_mc)
 
-                # Post-alert bookkeeping:
-                # 1. Update last_alert_mc = current_mc
-                await self.token_model.update_last_alert_mc(token_id, current_mc)
-
-                # 2. Promote to Tier B
-                await self.promote_to_tier_b(token_id)
-
-                logger.info(f"[GAIN_ALERT] Token {address[:8]}... bookkeeping complete: last_alert_mc updated, promoted to Tier B")
+                if dispatched:
+                    # Post-alert bookkeeping only when at least one destination handled the alert
+                    await self.token_model.update_last_alert_mc(token_id, current_mc)
+                    await self.promote_to_tier_b(token_id)
+                    logger.info(
+                        f"[GAIN_ALERT] Token {address[:8]}... bookkeeping complete: last_alert_mc updated, promoted to Tier B"
+                    )
+                else:
+                    logger.debug(
+                        f"[GAIN_ALERT] Token {address[:8]}... had no eligible destinations; skipping bookkeeping"
+                    )
 
         except Exception as e:
             logger.error(f"Error evaluating gain alert for {address[:8]}...: {e}", exc_info=True)
@@ -349,9 +370,52 @@ class DexScreenerService:
         else:
             return f"${value:.0f}"
 
-    async def _dispatch_gain_alert(self, token: Dict, alert_message: str, address: str, current_mc: Decimal) -> None:
+    async def _send_via_management_bot(
+        self,
+        chat_id: int,
+        message: str,
+        reply_to_message_id: Optional[int],
+    ) -> Dict[str, Any]:
+        """Send alert message using the management bot instance."""
+        if not self.management_bot:
+            return {"success": False, "error": "management_bot_unavailable"}
+
+        try:
+            sent_message = await self.management_bot.bot.send_message(
+                chat_id=chat_id,
+                text=message,
+                reply_to_message_id=reply_to_message_id,
+                disable_web_page_preview=True,
+            )
+            return {"success": True, "message_id": getattr(sent_message, "message_id", None)}
+        except Exception as exc:
+            logger.error(
+                f"[GAIN_ALERT] Management bot failed to send to chat {chat_id}: {exc}",
+                exc_info=True,
+            )
+            return {"success": False, "error": str(exc)}
+
+    def _multiplier_to_emoji(self, multiplier_value: float) -> str:
+        """Return a dynamic emoji based on the gain multiplier."""
+        if multiplier_value >= 100:
+            return "⭐"
+        if multiplier_value >= 50:
+            return "💫"
+        if multiplier_value >= 20:
+            return "🌙"
+        if multiplier_value >= 10:
+            return "🚀"
+        if multiplier_value >= 5:
+            return "🔥"
+        if multiplier_value >= 3:
+            return "🌕"
+        if multiplier_value >= 1.5:
+            return "🎉"
+        return "📈"
+
+    async def _dispatch_gain_alert(self, token: Dict, template_values: Dict[str, str], address: str, current_mc: Decimal) -> bool:
         """
-        Dispatch gain alert to target groups.
+        Dispatch gain alert to target groups using configured templates.
         Sends as reply to original message if available, otherwise standalone.
         """
         try:
@@ -359,29 +423,80 @@ class DexScreenerService:
 
             if not self.userbot_manager:
                 logger.warning(f"[GAIN_ALERT] No userbot manager set, cannot dispatch alert for {address[:8]}...")
-                return
+                return False
 
             tracking_groups = await db.fetch(
                 """
-                SELECT chat_id, original_message_id, first_seen_mc, last_alert_mc
-                FROM token_group_alerts
-                WHERE token_id = $1
+                SELECT
+                    tga.chat_id,
+                    tga.original_message_id,
+                    tga.first_seen_mc,
+                    tga.last_alert_mc,
+                    tga.original_user_id,
+                    ms.id AS source_id,
+                    ms.is_enabled,
+                    ms.sensitivity_pct,
+                    ms.assigned_userbot_id,
+                    ms.template_text,
+                    ms.use_management_bot,
+                    ARRAY_REMOVE(ARRAY_AGG(mst.target_chat_id), NULL) AS extra_targets
+                FROM token_group_alerts tga
+                LEFT JOIN monitored_sources ms
+                    ON ms.chat_id = tga.chat_id
+                   AND (
+                        (ms.user_id IS NULL AND tga.original_user_id IS NULL)
+                        OR ms.user_id = tga.original_user_id
+                   )
+                LEFT JOIN monitored_source_targets mst ON mst.source_id = ms.id
+                WHERE tga.token_id = $1
+                GROUP BY
+                    tga.chat_id,
+                    tga.original_message_id,
+                    tga.first_seen_mc,
+                    tga.last_alert_mc,
+                    tga.original_user_id,
+                    ms.id,
+                    ms.is_enabled,
+                    ms.sensitivity_pct,
+                    ms.assigned_userbot_id,
+                    ms.template_text,
+                    ms.use_management_bot
                 """,
                 token_id,
             )
 
             if not tracking_groups:
                 logger.debug(f"[GROUP_ALERT_FIRE] No monitored groups for token {address[:8]}..., skipping")
-                return
+                return False
 
             settings_dict = await get_gain_alert_settings()
-            gain_threshold_pct = Decimal(str(settings_dict['gain_threshold_pct']))
+            default_gain_threshold_pct = Decimal(str(settings_dict['gain_threshold_pct']))
+            global_template = await get_gain_alert_template_text()
+
+            workers_cache: Dict[int, Any] = {}
+            template_cache: Dict[int, Optional[str]] = {}
+            any_success = False
 
             for group in tracking_groups:
                 chat_id = group['chat_id']
                 reply_to_msg_id = group['original_message_id']
-                first_seen_mc = Decimal(str(group['first_seen_mc']))
+                first_seen_raw = group['first_seen_mc']
                 last_alert_mc = group['last_alert_mc']
+
+                if not first_seen_raw:
+                    logger.debug(f"[GROUP_ALERT_FIRE] Chat {chat_id} missing first_seen market cap, skipping")
+                    continue
+
+                try:
+                    first_seen_mc = Decimal(str(first_seen_raw))
+                except (ValueError, TypeError):
+                    logger.debug(f"[GROUP_ALERT_FIRE] Chat {chat_id} has invalid first_seen_mc={first_seen_raw}, skipping")
+                    continue
+                is_enabled = group['is_enabled'] if group['is_enabled'] is not None else True
+
+                if not is_enabled:
+                    logger.debug(f"[GROUP_ALERT_FIRE] Chat {chat_id} disabled for gain alerts, skipping")
+                    continue
 
                 baseline_mc = Decimal(str(last_alert_mc)) if last_alert_mc else first_seen_mc
 
@@ -392,74 +507,193 @@ class DexScreenerService:
                     )
                     continue
 
+                custom_gain_pct = group['sensitivity_pct']
+                if custom_gain_pct is not None:
+                    gain_threshold_pct = Decimal(str(custom_gain_pct))
+                else:
+                    gain_threshold_pct = default_gain_threshold_pct
+
                 threshold_mc = baseline_mc * (Decimal(1) + gain_threshold_pct)
 
                 if current_mc < threshold_mc:
                     continue
 
-                alert_id = await db.fetchval("""
-                    INSERT INTO alert_queue
-                    (token_id, token_address, alert_message, target_chat_id, reply_to_message_id, status)
-                    VALUES ($1, $2, $3, $4, $5, 'pending')
-                    RETURNING id
-                """, token_id, address, alert_message, chat_id, reply_to_msg_id)
+                use_management_bot = bool(group.get('use_management_bot')) if group.get('use_management_bot') is not None else False
 
-                # Get any active worker to send the message
-                workers = self.userbot_manager.get_all_workers()
-                if not workers:
-                    logger.error(f"[GAIN_ALERT] No active workers available to send alert")
-                    await db.execute("""
-                        UPDATE alert_queue
-                        SET status='failed', error='No active workers', attempt_count=1, last_attempt_at=NOW()
-                        WHERE id=$1
-                    """, alert_id)
+                assigned_userbot_id = group['assigned_userbot_id']
+                worker = None
+                executor = None
+
+                if use_management_bot:
+                    if not self.management_bot:
+                        logger.warning(
+                            f"[GAIN_ALERT] Management bot not available for chat {chat_id}; falling back to userbot."
+                        )
+                        use_management_bot = False
+                    else:
+                        # Ensure we clear any cached worker usage
+                        assigned_userbot_id = None
+
+                if not use_management_bot:
+                    if assigned_userbot_id:
+                        worker = self.userbot_manager.get_worker(assigned_userbot_id)
+                        if not worker:
+                            logger.warning(
+                                f"[GAIN_ALERT] Assigned userbot {assigned_userbot_id} unavailable for chat {chat_id}; falling back"
+                            )
+                    if not worker:
+                        workers = self.userbot_manager.get_all_workers()
+                        if not workers:
+                            logger.error(f"[GAIN_ALERT] No active workers available to send alert")
+                            continue
+                        worker = next(iter(workers.values()))
+
+                    worker_id = getattr(worker, 'userbot_id', None)
+                    if worker_id is None:
+                        logger.error("[GAIN_ALERT] Worker missing userbot_id, skipping send")
+                        continue
+
+                    executor = workers_cache.get(worker_id)
+                    if executor is None:
+                        existing_executor = getattr(worker, 'call_executor', None)
+                        if existing_executor:
+                            executor = existing_executor
+                        else:
+                            from app.userbot.call_executor import CallExecutor
+                            executor = CallExecutor(worker.userbot_id, worker.session_manager)
+                            worker.call_executor = executor
+                        workers_cache[worker_id] = executor
+
+                extra_targets = group.get('extra_targets') or []
+                unique_targets = {chat_id}
+                unique_targets.update(extra_targets)
+
+                sent_success = False
+
+                template_override = group.get('template_text')
+                if (template_override is None or template_override == "") and chat_id not in template_cache:
+                    try:
+                        chat_records = await self.source_model.get_by_chat(chat_id)
+                        template_cache[chat_id] = next(
+                            (record.get('template_text') for record in chat_records if record.get('template_text')),
+                            None,
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            "[GAIN_ALERT] Failed to lookup template for chat %s: %s",
+                            chat_id,
+                            exc,
+                        )
+                        template_cache[chat_id] = None
+                if template_override in (None, ""):
+                    template_override = template_cache.get(chat_id)
+                template_candidate = template_override or global_template
+                if not template_candidate:
+                    template_candidate = DEFAULT_GAIN_ALERT_TEMPLATE
+
+                missing = missing_required_placeholders(template_candidate)
+                if missing:
+                    logger.warning(
+                        "[GAIN_ALERT] Template for chat %s missing placeholders %s. Falling back to global template.",
+                        chat_id,
+                        ", ".join(sorted(missing)),
+                    )
+                    template_candidate = global_template or DEFAULT_GAIN_ALERT_TEMPLATE
+
+                try:
+                    alert_message = template_candidate.format(**template_values)
+                except KeyError as exc:
+                    logger.error(
+                        "[GAIN_ALERT] Template formatting failed for chat %s (missing key: %s). Skipping.",
+                        chat_id,
+                        exc,
+                        exc_info=True,
+                    )
                     continue
 
-                # Use first available worker
-                worker = list(workers.values())[0]
-                executor = worker.call_executor if hasattr(worker, 'call_executor') else None
+                for target_chat in unique_targets:
+                    try:
+                        target_chat_int = int(target_chat)
+                    except (TypeError, ValueError):
+                        logger.debug(f"[GROUP_ALERT_FIRE] Invalid target chat id {target_chat}, skipping")
+                        continue
 
-                if not executor:
-                    # Create executor if needed
-                    from app.userbot.call_executor import CallExecutor
-                    executor = CallExecutor(worker.userbot_id, worker.session_manager)
+                    reply_id = reply_to_msg_id if target_chat_int == chat_id else None
 
-                # Send alert message
-                result = await executor.send_call_message(
-                    target_chat_id=chat_id,
-                    message=alert_message,
-                    token_address=address,
-                    reply_to_message_id=reply_to_msg_id
-                )
+                    alert_id = await db.fetchval(
+                        """
+                            INSERT INTO alert_queue
+                            (token_id, token_address, alert_message, target_chat_id, reply_to_message_id, status)
+                            VALUES ($1, $2, $3, $4, $5, 'pending')
+                            RETURNING id
+                        """,
+                        token_id,
+                        address,
+                        alert_message,
+                        target_chat_int,
+                        reply_id,
+                    )
 
-                if result['success']:
-                    logger.info(f"[GROUP_ALERT_FIRE] Sent to chat {chat_id}, msg_id={result.get('message_id')}")
-                    await db.execute("""
-                        UPDATE alert_queue
-                        SET status='sent', attempt_count=1, last_attempt_at=NOW()
-                        WHERE id=$1
-                    """, alert_id)
+                    if use_management_bot:
+                        result = await self._send_via_management_bot(
+                            target_chat_int,
+                            alert_message,
+                            reply_id,
+                        )
+                    else:
+                        result = await executor.send_call_message(
+                            target_chat_id=target_chat_int,
+                            message=alert_message,
+                            token_address=address,
+                            reply_to_message_id=reply_id,
+                        )
 
+                    if result.get('success'):
+                        sent_success = True
+                        any_success = True
+                        logger.info(
+                            f"[GROUP_ALERT_FIRE] Sent to chat {target_chat_int}, msg_id={result.get('message_id')}"
+                        )
+                        await db.execute(
+                            """
+                                UPDATE alert_queue
+                                SET status='sent', attempt_count=1, last_attempt_at=NOW()
+                                WHERE id=$1
+                            """,
+                            alert_id,
+                        )
+                    else:
+                        error_text = result.get('error') or 'Unknown error'
+                        logger.error(
+                            f"[GROUP_ALERT_FIRE] Failed to send to chat {target_chat_int}: {error_text}"
+                        )
+                        await db.execute(
+                            """
+                                UPDATE alert_queue
+                                SET status='failed', error=$2, attempt_count=1, last_attempt_at=NOW()
+                                WHERE id=$1
+                            """,
+                            alert_id,
+                            error_text,
+                        )
+
+                if sent_success:
                     await db.execute(
                         """
-                        UPDATE token_group_alerts
-                        SET last_alert_mc = $1
-                        WHERE token_id = $2 AND chat_id = $3
+                            UPDATE token_group_alerts
+                            SET last_alert_mc = $1
+                            WHERE token_id = $2 AND chat_id = $3
                         """,
                         current_mc,
                         token_id,
                         chat_id,
                     )
-                else:
-                    logger.error(f"[GROUP_ALERT_FIRE] Failed to send to chat {chat_id}: {result.get('error')}")
-                    await db.execute("""
-                        UPDATE alert_queue
-                        SET status='failed', error=$2, attempt_count=1, last_attempt_at=NOW()
-                        WHERE id=$1
-                    """, alert_id, result.get('error'))
+
+            return any_success
 
         except Exception as e:
             logger.error(f"Error dispatching gain alert for {address[:8]}...: {e}", exc_info=True)
+            return False
 
     async def _evaluate_stop_loss(self, token: Dict, current_mc: Decimal) -> Tuple[bool, Optional[str]]:
         """

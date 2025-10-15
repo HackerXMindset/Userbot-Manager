@@ -86,6 +86,19 @@ class UserbotManager:
         except Exception as e:
             logger.error(f"Error stopping userbot worker {userbot_id}: {e}")
     
+    async def stop(self):
+        """Stop all workers and release shared services."""
+        await self.stop_all_workers()
+
+        try:
+            from app.services.jupiter_api import get_jupiter_service
+
+            jupiter_service = get_jupiter_service()
+            await jupiter_service.stop()
+            logger.info("Jupiter API service stopped")
+        except Exception as exc:
+            logger.error(f"Error stopping Jupiter API service: {exc}")
+    
     async def restart_worker(self, userbot_id: int):
         """Restart a specific userbot worker"""
         try:

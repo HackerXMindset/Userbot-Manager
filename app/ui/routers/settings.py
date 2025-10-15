@@ -32,6 +32,8 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
             await manager.settings_handler.prompt_edit_drop_threshold(query, state)
         elif action == "edit_drop_floor":
             await manager.settings_handler.prompt_edit_drop_floor(query, state)
+        elif action == "edit_gain_template":
+            await manager.settings_handler.prompt_edit_gain_template(query, state)
         elif action == "token_status":
             await manager.settings_handler.show_token_status_menu(query)
         elif action == "scheduler_overview":
@@ -53,6 +55,10 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
     async def handle_drop_floor_input(message: types.Message, state: FSMContext) -> None:
         """Handle drop floor value input"""
         await manager.settings_handler.save_drop_floor(message, state)
+
+    async def handle_gain_template_input(message: types.Message, state: FSMContext) -> None:
+        """Handle global gain template text input"""
+        await manager.settings_handler.save_gain_template(message, state)
 
     # Register callback query handlers
     dispatcher.callback_query.register(
@@ -79,6 +85,12 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
     dispatcher.message.register(
         handle_drop_floor_input,
         StateFilter("awaiting_drop_floor"),
+        F.from_user.id.in_(settings_cfg.admin_telegram_ids_list),
+    )
+
+    dispatcher.message.register(
+        handle_gain_template_input,
+        StateFilter("awaiting_gain_template"),
         F.from_user.id.in_(settings_cfg.admin_telegram_ids_list),
     )
 

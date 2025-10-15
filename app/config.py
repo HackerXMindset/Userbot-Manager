@@ -1,8 +1,17 @@
+import json
+import logging
 import os
 from typing import Optional, List, Dict, Any
+
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
+
+from app.gain_alert_templates import (
+    DEFAULT_GAIN_ALERT_TEMPLATE,
+    normalise_template,
+    missing_required_placeholders,
+)
 import pytz
 from datetime import datetime
 
@@ -85,9 +94,14 @@ GAIN_THRESHOLD_DEFAULT_PCT = 0.30  # 30% gain triggers alert
 DROP_THRESHOLD_DEFAULT_PCT = 0.70  # 70% of first_seen_mc triggers stop
 DROP_FLOOR_MC_DEFAULT = 8000.0     # $8,000 absolute floor
 
+GAIN_ALERT_TEMPLATE_KEY = "gain_alert_template"
+
 # Market cap validation bounds
 MIN_VALID_MARKET_CAP = 1000.0       # $1K minimum
 MAX_VALID_MARKET_CAP = 1_000_000_000_000.0  # $1T maximum
+
+# In-memory cache for global gain alert template
+_GAIN_TEMPLATE_CACHE: Optional[str] = None
 
 async def get_gain_alert_settings():
     """
@@ -118,10 +132,76 @@ async def get_gain_alert_settings():
         }
     except Exception as e:
         # Fallback to defaults if DB unavailable
-        import logging
         logging.warning(f"Failed to load gain alert settings from DB, using defaults: {e}")
         return {
             'gain_threshold_pct': GAIN_THRESHOLD_DEFAULT_PCT,
             'drop_threshold_pct': DROP_THRESHOLD_DEFAULT_PCT,
             'drop_floor_mc': DROP_FLOOR_MC_DEFAULT,
         }
+
+
+async def get_gain_alert_template_text() -> str:
+    """
+    Load the global gain alert template, falling back to the default string
+    when unset, invalid, or on database errors.
+    """
+    global _GAIN_TEMPLATE_CACHE
+
+    if _GAIN_TEMPLATE_CACHE is not None:
+        return _GAIN_TEMPLATE_CACHE
+
+    from app.db import db
+
+    try:
+        template = await db.fetchval(
+            "SELECT value FROM settings WHERE key = $1",
+            GAIN_ALERT_TEMPLATE_KEY,
+        )
+        template = normalise_template(template) if template else ""
+        if not template:
+            return DEFAULT_GAIN_ALERT_TEMPLATE
+
+        _GAIN_TEMPLATE_CACHE = template
+        return template
+    except Exception as exc:
+        logging.warning(
+            "Failed to load gain alert template from DB (%s). Using default.",
+            exc,
+        )
+        _GAIN_TEMPLATE_CACHE = DEFAULT_GAIN_ALERT_TEMPLATE
+        return _GAIN_TEMPLATE_CACHE
+
+
+async def set_gain_alert_template_text(template: str) -> None:
+    """
+    Persist the global gain alert template string.
+
+    Args:
+        template: Template text to store. If blank, the default template is written.
+    """
+    from app.db import db
+
+    cleaned = normalise_template(template)
+    if not cleaned:
+        cleaned = DEFAULT_GAIN_ALERT_TEMPLATE
+
+    json_payload = json.dumps(cleaned)
+
+    await db.execute(
+        """
+        INSERT INTO settings (key, value)
+        VALUES ($1, $2)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        """,
+        GAIN_ALERT_TEMPLATE_KEY,
+        json_payload,
+    )
+
+    global _GAIN_TEMPLATE_CACHE
+    _GAIN_TEMPLATE_CACHE = cleaned
+
+
+def clear_gain_alert_template_cache() -> None:
+    """Clear the in-memory cache for the gain alert template."""
+    global _GAIN_TEMPLATE_CACHE
+    _GAIN_TEMPLATE_CACHE = None

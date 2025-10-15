@@ -934,6 +934,10 @@ class Keyboards:
                 text=f"💰 Minimum MC: ${drop_floor:,.0f}",
                 callback_data="settings:edit_drop_floor"
             )],
+            [InlineKeyboardButton(
+                text="📝 Edit Alert Template",
+                callback_data="settings:edit_gain_template"
+            )],
             [InlineKeyboardButton(text="🔙 Back", callback_data="settings:main")]
         ])
 
@@ -948,12 +952,18 @@ class Keyboards:
         ])
 
     @staticmethod
-    def gain_alerts_main_menu(has_sources: bool) -> InlineKeyboardMarkup:
+    def gain_alerts_main_menu(entries: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
         """Main menu for gain alerts monitored sources."""
-        keyboard = [[InlineKeyboardButton(text="➕ Add Monitored Source", callback_data="gain_alerts:add")]]
+        keyboard: List[List[InlineKeyboardButton]] = [
+            [InlineKeyboardButton(text="➕ Add Monitored Source", callback_data="gain_alerts:add")]
+        ]
 
-        if has_sources:
-            keyboard.append([InlineKeyboardButton(text="🗑️ Remove Monitored Source", callback_data="gain_alerts:remove")])
+        for entry in entries:
+            chat_id = entry.get("chat_id")
+            button_text = entry.get("button_text") or f"{chat_id}"
+            keyboard.append([
+                InlineKeyboardButton(text=button_text, callback_data=f"gain_alerts:view:{chat_id}")
+            ])
 
         keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data="settings:main")])
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -975,38 +985,6 @@ class Keyboards:
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Confirm", callback_data="gain_alerts:add:confirm")],
             [InlineKeyboardButton(text="❌ Cancel", callback_data="gain_alerts:cancel")]
-        ])
-
-    @staticmethod
-    def gain_alerts_remove_menu(sources: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
-        """Keyboard listing monitored sources available for removal."""
-        rows = []
-        for source in sources:
-            chat_type = source["chat_type"]
-            token_count = source.get("token_count", 0)
-            if chat_type == "group":
-                label = f"👥 {source['chat_id']} • User {source['user_id']} ({token_count} tokens)"
-            elif chat_type == "channel":
-                label = f"📢 {source['chat_id']} ({token_count} tokens)"
-            else:
-                label = f"💬 {source['chat_id']} ({token_count} tokens)"
-
-            rows.append([
-                InlineKeyboardButton(
-                    text=label,
-                    callback_data=f"gain_alerts:remove:select:{source['id']}"
-                )
-            ])
-
-        rows.append([InlineKeyboardButton(text="🔙 Back", callback_data="gain_alerts:menu")])
-        return InlineKeyboardMarkup(inline_keyboard=rows)
-
-    @staticmethod
-    def gain_alerts_remove_confirm(source_id: int) -> InlineKeyboardMarkup:
-        """Confirmation keyboard for removing monitored sources."""
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⚠️ Confirm Delete", callback_data=f"gain_alerts:remove:confirm:{source_id}")],
-            [InlineKeyboardButton(text="🔙 Back", callback_data="gain_alerts:remove")]
         ])
 
     @staticmethod

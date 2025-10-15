@@ -100,4 +100,7 @@ class ManagementStates(StatesGroup):
     gain_alerts_add_chat_id = State()
     gain_alerts_add_user_id = State()
     gain_alerts_confirm_add = State()
+    gain_alerts_edit_name = State()
+    gain_alerts_edit_sensitivity = State()
+    gain_alerts_edit_template = State()
     

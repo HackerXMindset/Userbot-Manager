@@ -203,15 +203,6 @@ class TokenMonitor:
                     logger.warning(f"[MONITOR_DETECT] Unable to register {address} for chat {chat_id}")
                     return
 
-            existing = await db.fetchrow("""
-                SELECT id FROM token_group_alerts
-                WHERE token_id = $1 AND chat_id = $2
-            """, token_id, chat_id)
-
-            if existing:
-                logger.debug(f"[GROUP_ALERT_DUP] Chat {chat_id} already tracking token {address[:8]}..., skipping")
-                return
-
             market_cap, _, _ = await self._fetch_market_snapshot(address, blockchain)
 
             if market_cap is None or market_cap <= 0:
@@ -230,16 +221,21 @@ class TokenMonitor:
                 )
                 return
 
-            await db.execute("""
+            result = await db.fetchrow("""
                 INSERT INTO token_group_alerts
                 (token_id, chat_id, first_seen_mc, original_message_id, original_user_id)
                 VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (token_id, chat_id) DO NOTHING
+                RETURNING id
             """, token_id, chat_id, market_cap, message_id, user_id)
 
-            logger.info(
-                f"[GROUP_ALERT_NEW] Token {address[:8]}... monitoring started for chat {chat_id} "
-                f"(type={chat_type or 'unknown'}) at ${float(market_cap):,.2f}"
-            )
+            if result:
+                logger.info(
+                    f"[GROUP_ALERT_NEW] Token {address[:8]}... monitoring started for chat {chat_id} "
+                    f"(type={chat_type or 'unknown'}) at ${float(market_cap):,.2f}"
+                )
+            else:
+                logger.debug(f"[GROUP_ALERT_DUP] Chat {chat_id} already tracking token {address[:8]}..., skipping")
 
         except Exception as exc:
             logger.error(

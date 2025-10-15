@@ -2,13 +2,24 @@
 Settings Handler - Manages gain alert threshold configuration
 """
 
+import logging
+import html
+
 from aiogram import types
 from aiogram.fsm.context import FSMContext
-import logging
-from typing import Dict, Any
 
 from app.ui.keyboards import Keyboards
-from app.config import get_gain_alert_settings
+from app.config import (
+    get_gain_alert_settings,
+    get_gain_alert_template_text,
+    set_gain_alert_template_text,
+)
+from app.gain_alert_templates import (
+    DEFAULT_GAIN_ALERT_TEMPLATE,
+    missing_required_placeholders,
+    normalise_template,
+    REQUIRED_GAIN_TEMPLATE_PLACEHOLDERS,
+)
 from app.db import db
 
 logger = logging.getLogger(__name__)
@@ -20,6 +31,29 @@ class SettingsHandler:
     def __init__(self, db_pool, keyboards: Keyboards):
         self.db = db_pool
         self.keyboards = keyboards
+
+    def _compose_gain_alert_settings_text(
+        self,
+        gain_threshold: float,
+        drop_threshold: float,
+        drop_floor: float,
+        template_text: str,
+    ) -> str:
+        """Render the gain alert settings summary block."""
+        template_preview = html.escape(template_text)
+        return (
+            "<b>🌙 Gain Alert Settings</b>\n\n"
+            "Configure market cap monitoring thresholds:\n\n"
+            f"<b>📈 Gain Threshold:</b> {gain_threshold*100:.0f}%\n"
+            f"  └ Alert when MC rises {gain_threshold*100:.0f}% above last alert\n\n"
+            f"<b>📉 Drop Threshold:</b> {drop_threshold*100:.0f}%\n"
+            f"  └ Stop monitoring when MC drops to {drop_threshold*100:.0f}% of first seen\n\n"
+            f"<b>💰 Minimum Market Cap:</b> ${drop_floor:,.0f}\n"
+            f"  └ Stop monitoring when MC falls below this absolute floor\n\n"
+            "<i>Tap a setting to edit it.</i>\n\n"
+            "<b>Current Alert Template</b>\n"
+            f"<code>{template_preview}</code>"
+        )
 
     async def show_settings_menu(self, query: types.CallbackQuery):
         """Show main settings menu"""
@@ -43,16 +77,12 @@ class SettingsHandler:
             drop_threshold = settings_dict['drop_threshold_pct']
             drop_floor = settings_dict['drop_floor_mc']
 
-            text = (
-                "<b>🌙 Gain Alert Settings</b>\n\n"
-                "Configure market cap monitoring thresholds:\n\n"
-                f"<b>📈 Gain Threshold:</b> {gain_threshold*100:.0f}%\n"
-                f"  └ Alert when MC rises {gain_threshold*100:.0f}% above last alert\n\n"
-                f"<b>📉 Drop Threshold:</b> {drop_threshold*100:.0f}%\n"
-                f"  └ Stop monitoring when MC drops to {drop_threshold*100:.0f}% of first seen\n\n"
-                f"<b>💰 Minimum Market Cap:</b> ${drop_floor:,.0f}\n"
-                f"  └ Stop monitoring when MC falls below this absolute floor\n\n"
-                "<i>Tap a setting to edit it.</i>"
+            global_template = await get_gain_alert_template_text()
+            text = self._compose_gain_alert_settings_text(
+                gain_threshold,
+                drop_threshold,
+                drop_floor,
+                global_template,
             )
 
             await query.message.edit_text(
@@ -126,6 +156,39 @@ class SettingsHandler:
             logger.error(f"Error prompting drop floor edit: {e}")
             await query.answer("❌ Error", show_alert=True)
 
+    async def prompt_edit_gain_template(self, query: types.CallbackQuery, state: FSMContext):
+        """Prompt user to update the global gain alert template."""
+        try:
+            template = await get_gain_alert_template_text()
+            placeholder_list = ", ".join([
+                "{gain_emoji}",
+                "{token_symbol}",
+                "{multiplier}",
+                "{first_market_cap}",
+                "{current_market_cap}",
+                "{elapsed_time}",
+                "{address}",
+            ])
+            preview = html.escape(template)
+
+            await query.message.edit_text(
+                "<b>📝 Edit Global Gain Alert Template</b>\n\n"
+                "Available placeholders:\n"
+                f"<code>{placeholder_list}</code>\n\n"
+                "<i>Placeholders are optional—use any combination or none at all.</i>\n\n"
+                "Send the new template text exactly as it should appear.\n"
+                "Type <code>reset</code> to restore the default template.\n\n"
+                "<b>Current template:</b>\n"
+                f"<code>{preview}</code>",
+                reply_markup=self.keyboards.cancel_button("settings:gain_alerts"),
+                parse_mode="HTML",
+            )
+            await state.set_state("awaiting_gain_template")
+            await query.answer()
+        except Exception as exc:
+            logger.error(f"Error prompting global template edit: {exc}")
+            await query.answer("❌ Error", show_alert=True)
+
     async def save_gain_threshold(self, message: types.Message, state: FSMContext):
         """Save new gain threshold value"""
         try:
@@ -157,16 +220,12 @@ class SettingsHandler:
             drop_threshold = settings_dict['drop_threshold_pct']
             drop_floor = settings_dict['drop_floor_mc']
 
-            text = (
-                "<b>🌙 Gain Alert Settings</b>\n\n"
-                "Configure market cap monitoring thresholds:\n\n"
-                f"<b>📈 Gain Threshold:</b> {gain_threshold*100:.0f}%\n"
-                f"  └ Alert when MC rises {gain_threshold*100:.0f}% above last alert\n\n"
-                f"<b>📉 Drop Threshold:</b> {drop_threshold*100:.0f}%\n"
-                f"  └ Stop monitoring when MC drops to {drop_threshold*100:.0f}% of first seen\n\n"
-                f"<b>💰 Minimum Market Cap:</b> ${drop_floor:,.0f}\n"
-                f"  └ Stop monitoring when MC falls below this absolute floor\n\n"
-                "<i>Tap a setting to edit it.</i>"
+            global_template = await get_gain_alert_template_text()
+            text = self._compose_gain_alert_settings_text(
+                gain_threshold,
+                drop_threshold,
+                drop_floor,
+                global_template,
             )
 
             await message.answer(
@@ -213,16 +272,12 @@ class SettingsHandler:
             drop_threshold = settings_dict['drop_threshold_pct']
             drop_floor = settings_dict['drop_floor_mc']
 
-            text = (
-                "<b>🌙 Gain Alert Settings</b>\n\n"
-                "Configure market cap monitoring thresholds:\n\n"
-                f"<b>📈 Gain Threshold:</b> {gain_threshold*100:.0f}%\n"
-                f"  └ Alert when MC rises {gain_threshold*100:.0f}% above last alert\n\n"
-                f"<b>📉 Drop Threshold:</b> {drop_threshold*100:.0f}%\n"
-                f"  └ Stop monitoring when MC drops to {drop_threshold*100:.0f}% of first seen\n\n"
-                f"<b>💰 Minimum Market Cap:</b> ${drop_floor:,.0f}\n"
-                f"  └ Stop monitoring when MC falls below this absolute floor\n\n"
-                "<i>Tap a setting to edit it.</i>"
+            global_template = await get_gain_alert_template_text()
+            text = self._compose_gain_alert_settings_text(
+                gain_threshold,
+                drop_threshold,
+                drop_floor,
+                global_template,
             )
 
             await message.answer(
@@ -266,16 +321,12 @@ class SettingsHandler:
             drop_threshold = settings_dict['drop_threshold_pct']
             drop_floor = settings_dict['drop_floor_mc']
 
-            text = (
-                "<b>🌙 Gain Alert Settings</b>\n\n"
-                "Configure market cap monitoring thresholds:\n\n"
-                f"<b>📈 Gain Threshold:</b> {gain_threshold*100:.0f}%\n"
-                f"  └ Alert when MC rises {gain_threshold*100:.0f}% above last alert\n\n"
-                f"<b>📉 Drop Threshold:</b> {drop_threshold*100:.0f}%\n"
-                f"  └ Stop monitoring when MC drops to {drop_threshold*100:.0f}% of first seen\n\n"
-                f"<b>💰 Minimum Market Cap:</b> ${drop_floor:,.0f}\n"
-                f"  └ Stop monitoring when MC falls below this absolute floor\n\n"
-                "<i>Tap a setting to edit it.</i>"
+            global_template = await get_gain_alert_template_text()
+            text = self._compose_gain_alert_settings_text(
+                gain_threshold,
+                drop_threshold,
+                drop_floor,
+                global_template,
             )
 
             await message.answer(
@@ -290,6 +341,38 @@ class SettingsHandler:
         except Exception as e:
             logger.error(f"Error saving drop floor: {e}")
             await message.answer("❌ Error saving setting")
+
+    async def save_gain_template(self, message: types.Message, state: FSMContext) -> None:
+        """Persist the updated global gain alert template."""
+        raw_input = message.text or ""
+        stripped = raw_input.strip()
+
+        if not stripped:
+            await message.answer(
+                "❌ Template cannot be empty. Include the required placeholders or type 'reset'."
+            )
+            return
+
+        if stripped.lower() == "reset":
+            template_to_store = DEFAULT_GAIN_ALERT_TEMPLATE
+        else:
+            template_to_store = normalise_template(raw_input)
+
+        try:
+            await set_gain_alert_template_text(template_to_store)
+        except Exception as exc:
+            logger.error(f"Error saving gain alert template: {exc}", exc_info=True)
+            await message.answer("❌ Failed to save template. Please try again.")
+            return
+
+        await state.clear()
+        preview = html.escape(template_to_store)
+        await message.answer(
+            "✅ Global gain alert template updated.\n\n"
+            "Current template:\n"
+            f"<code>{preview}</code>",
+            parse_mode="HTML",
+        )
 
     async def show_token_status_menu(self, query: types.CallbackQuery):
         """Show token status menu"""
