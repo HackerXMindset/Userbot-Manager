@@ -118,7 +118,45 @@ def get_map_value(mapping: Optional[Dict[str, Any]], *keys: str) -> Any:
     for key in keys:
         if key in mapping and mapping[key] is not None:
             return mapping[key]
-    return None
+
+
+def _infer_social_platform(value: str) -> str:
+    lowered = value.lower()
+    platform_map = {
+        "Twitter": ("twitter.com", "x.com"),
+        "Telegram": ("t.me", "telegram"),
+        "Discord": ("discord.gg", "discord.com"),
+        "GitHub": ("github.com",),
+        "Facebook": ("facebook.com",),
+        "Instagram": ("instagram.com",),
+        "LinkedIn": ("linkedin.com",),
+        "Reddit": ("reddit.com",),
+        "YouTube": ("youtube.com", "youtu.be"),
+        "Twitch": ("twitch.tv",),
+        "CoinGecko": ("coingecko.com",),
+        "CoinMarketCap": ("coinmarketcap.com",),
+        "Medium": ("medium.com", "medium"),
+        "Whitepaper": ("whitepaper", ".pdf"),
+        "Email": ("mailto:", "@"),
+    }
+
+    for label, needles in platform_map.items():
+        if any(needle in lowered for needle in needles):
+            return label
+
+    if lowered.startswith("http"):
+        return "Website"
+    if lowered.startswith("@"):
+        return "Handle"
+    return "Social"
+
+
+def _format_social_label(platform: Optional[str], value: str) -> str:
+    if platform:
+        trimmed = platform.strip()
+        if trimmed:
+            return trimmed.title()
+    return _infer_social_platform(value)
 
 def detect_social_platform(url: str) -> str:
     """Detects the social media platform from a given URL."""
@@ -690,14 +728,31 @@ class PlaceholderService:
 
             socials = info.get('socials') or []
             if socials:
-                formatted_socials = []
+                formatted_socials: List[str] = []
                 for idx, entry in enumerate(socials[:5], start=1):
-                    platform = entry.get('platform') or 'N/A'
-                    handle = entry.get('handle') or 'N/A'
-                    placeholders[f'dex_info_social_{idx}_platform'] = platform
-                    placeholders[f'dex_info_social_{idx}_handle'] = handle
-                    formatted_socials.append(f"{platform}: {handle}")
-                placeholders['dex_info_socials'] = '\n'.join(formatted_socials)
+                    raw_value = (
+                        entry.get('handle')
+                        or entry.get('url')
+                        or entry.get('value')
+                        or entry.get('username')
+                    )
+                    if not raw_value:
+                        continue
+
+                    label = _format_social_label(entry.get('platform'), raw_value)
+                    link = entry.get('url') or raw_value
+
+                    placeholders[f'dex_info_social_{idx}_platform'] = label
+                    placeholders[f'dex_info_social_{idx}_handle'] = raw_value
+                    placeholders[f'dex_info_social_{idx}_url'] = link
+
+                    formatted_socials.append(f"{label}: {raw_value}")
+
+                if formatted_socials:
+                    joined = '\n'.join(formatted_socials)
+                    placeholders['dex_info_socials'] = joined
+                    if self.blockchain == 'BNB':
+                        placeholders['dex_bnb_social'] = joined
 
             boosts = pair_data.get('boosts') or {}
             if boosts:

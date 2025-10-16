@@ -50,8 +50,14 @@ CREATE INDEX idx_monitored_sources_chart_bot ON monitored_sources(chart_bot_id) 
 - Post CA to random group with random userbot via Telethon
 - Listen for reply from specific chart bot ID
 - Wait up to 60 seconds for reply
-- Extract first photo from reply message
-- Return photo file_id or None on timeout
+- Download photo from reply message as bytes (in-memory)
+- Return photo bytes or None on timeout
+
+**Photo Handling Strategy:**
+- **In-memory approach:** Telethon downloads photo → returns bytes → aiogram sends bytes
+- **NO temp files:** Avoids disk I/O and cleanup complexity
+- **Concurrent safe:** Each request tracked by unique message_id with separate asyncio.Future
+- Gain alerts are posted as replies, so cannot use message forwarding
 
 **Key Functions:**
 ```python
@@ -59,17 +65,26 @@ class ChartFetcher:
     def __init__(self, db_pool, userbot_manager):
         self.db = db_pool
         self.userbot_manager = userbot_manager
-        self._pending_requests = {}  # {message_id: asyncio.Event}
+        self._pending_requests = {}  # {message_id: asyncio.Future[bytes]}
 
     async def fetch_chart_for_token(
         self,
         contract_address: str,
         chart_bot_id: int,
         timeout: int = 60
-    ) -> Optional[str]:
+    ) -> Optional[bytes]:
         """
         Post CA to random group, wait for chart bot reply.
-        Returns: photo file_id or None
+        Returns: photo bytes or None on timeout/error
+
+        Flow:
+        1. Pick random chart request group
+        2. Pick random available userbot
+        3. Post raw CA text to group via Telethon
+        4. Store (message_id → Future) in _pending_requests
+        5. Wait for chart bot to reply (max 60s)
+        6. Download photo bytes from reply
+        7. Return bytes or None
         """
         pass
 
@@ -81,10 +96,10 @@ class ChartFetcher:
         self,
         chat_id: int,
         contract_address: str
-    ) -> Optional[int]:
+    ) -> Optional[Tuple[int, int]]:
         """
-        Post raw CA using random available userbot.
-        Returns: message_id of posted message
+        Post raw CA using random available userbot via Telethon.
+        Returns: (chat_id, message_id) or None
         """
         pass
 
@@ -95,10 +110,30 @@ class ChartFetcher:
     ):
         """
         Called by userbot message handler when chart bot replies.
-        Extract photo and notify waiting coroutine.
+
+        1. Check if message.reply_to_msg_id exists in _pending_requests
+        2. If yes, download first photo as bytes via message.download_media(file=bytes)
+        3. Resolve the Future with photo bytes
+        4. Clean up _pending_requests entry
         """
         pass
 ```
+
+**Concurrent Request Handling:**
+Multiple gain alerts can trigger simultaneously without collision:
+
+```
+Alert A (Token 0x123) → post CA → message_id=1001 → _pending_requests[1001] = Future_A
+Alert B (Token 0xabc) → post CA → message_id=1002 → _pending_requests[1002] = Future_B
+
+Chart bot replies to 1001 → downloads photo_bytes_A → Future_A.set_result(photo_bytes_A)
+Chart bot replies to 1002 → downloads photo_bytes_B → Future_B.set_result(photo_bytes_B)
+
+Alert A sends with photo_bytes_A
+Alert B sends with photo_bytes_B
+```
+
+Each request is isolated by message_id, so there's no cross-contamination.
 
 **Edge Cases:**
 - No chart request groups configured → return None

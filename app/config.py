@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from decimal import Decimal, InvalidOperation
 from typing import Optional, List, Dict, Any
 
 from pydantic import Field, field_validator
@@ -95,6 +96,9 @@ DROP_THRESHOLD_DEFAULT_PCT = 0.70  # 70% of first_seen_mc triggers stop
 DROP_FLOOR_MC_DEFAULT = 8000.0     # $8,000 absolute floor
 
 GAIN_ALERT_TEMPLATE_KEY = "gain_alert_template"
+GLOBAL_CHART_THRESHOLD_KEY = "chart_global_mc_threshold"
+GLOBAL_CHART_BOT_ID_KEY = "chart_global_bot_id"
+DEFAULT_GLOBAL_CHART_THRESHOLD = Decimal("100000")
 
 # Market cap validation bounds
 MIN_VALID_MARKET_CAP = 1000.0       # $1K minimum
@@ -157,6 +161,13 @@ async def get_gain_alert_template_text() -> str:
             "SELECT value FROM settings WHERE key = $1",
             GAIN_ALERT_TEMPLATE_KEY,
         )
+
+        if isinstance(template, str) and template.startswith("\"") and template.endswith("\""):
+            try:
+                template = json.loads(template)
+            except json.JSONDecodeError:
+                logging.debug("Gain alert template stored with extra quotes; falling back to raw string.")
+
         template = normalise_template(template) if template else ""
         if not template:
             return DEFAULT_GAIN_ALERT_TEMPLATE
@@ -185,20 +196,111 @@ async def set_gain_alert_template_text(template: str) -> None:
     if not cleaned:
         cleaned = DEFAULT_GAIN_ALERT_TEMPLATE
 
-    json_payload = json.dumps(cleaned)
-
     await db.execute(
         """
         INSERT INTO settings (key, value)
-        VALUES ($1, $2)
+        VALUES ($1, to_jsonb($2::text))
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
         """,
         GAIN_ALERT_TEMPLATE_KEY,
-        json_payload,
+        cleaned,
     )
 
     global _GAIN_TEMPLATE_CACHE
     _GAIN_TEMPLATE_CACHE = cleaned
+
+
+async def get_global_chart_settings() -> Dict[str, Any]:
+    """Fetch global chart configuration defaults with safe fallbacks."""
+    from app.db import db
+
+    defaults = {
+        "chart_threshold_override": None,
+        "chart_threshold_default": DEFAULT_GLOBAL_CHART_THRESHOLD,
+        "chart_bot_id": None,
+    }
+
+    try:
+        threshold_raw = await db.fetchval(
+            "SELECT value FROM settings WHERE key = $1",
+            GLOBAL_CHART_THRESHOLD_KEY,
+        )
+        bot_id_raw = await db.fetchval(
+            "SELECT value FROM settings WHERE key = $1",
+            GLOBAL_CHART_BOT_ID_KEY,
+        )
+    except Exception as exc:
+        logging.warning(
+            "Failed to load global chart settings from DB (%s). Using defaults.",
+            exc,
+        )
+        return defaults
+
+    if threshold_raw is not None:
+        try:
+            defaults["chart_threshold_override"] = Decimal(str(threshold_raw))
+        except (InvalidOperation, TypeError, ValueError):
+            logging.warning(
+                "Invalid global chart threshold value %s; ignoring.",
+                threshold_raw,
+            )
+
+    if bot_id_raw is not None:
+        try:
+            defaults["chart_bot_id"] = int(bot_id_raw)
+        except (TypeError, ValueError):
+            logging.warning(
+                "Invalid global chart bot id %s; ignoring.",
+                bot_id_raw,
+            )
+
+    return defaults
+
+
+async def set_global_chart_threshold(value: Optional[Decimal]) -> None:
+    """Persist or clear the global chart market cap threshold override."""
+    from app.db import db
+
+    if value is None:
+        await db.execute(
+            "DELETE FROM settings WHERE key = $1",
+            GLOBAL_CHART_THRESHOLD_KEY,
+        )
+        return
+
+    numeric_str = str(float(value))
+    await db.execute(
+        """
+        INSERT INTO settings (key, value)
+        VALUES ($1, $2)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """,
+        GLOBAL_CHART_THRESHOLD_KEY,
+        numeric_str,
+    )
+
+
+async def set_global_chart_bot_id(bot_id: Optional[int]) -> None:
+    """Persist or clear the global chart bot identifier."""
+    from app.db import db
+
+    if bot_id is None:
+        await db.execute(
+            "DELETE FROM settings WHERE key = $1",
+            GLOBAL_CHART_BOT_ID_KEY,
+        )
+        return
+
+    bot_id_str = str(int(bot_id))
+    await db.execute(
+        """
+        INSERT INTO settings (key, value)
+        VALUES ($1, $2)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """,
+        GLOBAL_CHART_BOT_ID_KEY,
+        bot_id_str,
+    )
 
 
 def clear_gain_alert_template_cache() -> None:

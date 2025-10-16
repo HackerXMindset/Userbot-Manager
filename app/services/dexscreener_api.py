@@ -235,16 +235,6 @@ class DexScreenerAPIClient:
                 return None
 
         if combined_empty_payloads:
-            payload_snippets = []
-            for name, payload in combined_empty_payloads.items():
-                try:
-                    payload_snippets.append(f"{name}:{json.dumps(payload, separators=(',', ':'))}")
-                except (TypeError, ValueError):
-                    payload_snippets.append(f"{name}:<unserializable>")
-            payload_text = "; ".join(payload_snippets) or "none"
-            logger.info(
-                f"[DEXSCREENER] No pools found for {chain_id}:{address} (payloads: {payload_text})"
-            )
             self._cache[cache_key] = []
             self._cache_timestamps[cache_key] = datetime.utcnow()
             return []

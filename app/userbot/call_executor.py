@@ -3,10 +3,11 @@ Call Executor - Handles sending call messages to target chats
 """
 
 import logging
+from io import BytesIO
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from telethon.errors import RPCError, FloodWaitError
-from telethon.tl.types import PeerChannel, PeerChat, PeerUser
+from telethon.tl.types import PeerChat, PeerUser
 
 from app.db import db
 from .utils import MessageTracker, RateLimiter
@@ -25,34 +26,25 @@ class CallExecutor:
     
     async def _resolve_entity_safely(self, client, target_chat_id: int):
         """Safely resolve entity with fallback strategies"""
+        from app.userbot.entity_utils import resolve_entity_safely as shared_resolver
+
         try:
-            # First try: Direct entity resolution
-            entity = await client.get_entity(target_chat_id)
-            return entity
+            return await shared_resolver(None, client, target_chat_id)
         except Exception as resolve_error:
-            # Log as debug since this isn't a real error if sending still works
-            logger.debug(f"Entity resolution failed for {target_chat_id}: {resolve_error}")
-            
-            # Fallback: Construct peer directly based on chat ID pattern
-            try:
-                if target_chat_id < 0:
-                    # Supergroup/channel (starts with -100)
-                    if str(target_chat_id).startswith('-100'):
-                        channel_id = abs(target_chat_id) - 1000000000000
-                        return PeerChannel(channel_id)
-                    # Regular group (negative but not starting with -100)
-                    else:
-                        chat_id = abs(target_chat_id)
-                        return PeerChat(chat_id)
-                else:
-                    # User
-                    return PeerUser(target_chat_id)
-            except Exception as peer_error:
-                logger.debug(f"Peer construction failed for {target_chat_id}: {peer_error}")
-                # Return original ID as final fallback
-                return target_chat_id
+            logger.debug(f"[CallExecutor] Shared resolver failed for {target_chat_id}: {resolve_error}")
+            # As a final fallback, preserve legacy behaviour of returning raw IDs for users
+            if target_chat_id >= 0:
+                return PeerUser(target_chat_id)
+            return target_chat_id
     
-    async def send_call_message(self, target_chat_id: int, message: str, token_address: str, reply_to_message_id: Optional[int] = None) -> Dict[str, Any]:
+    async def send_call_message(
+        self,
+        target_chat_id: int,
+        message: str,
+        token_address: str,
+        reply_to_message_id: Optional[int] = None,
+        photo_bytes: Optional[bytes] = None,
+    ) -> Dict[str, Any]:
         """Send a call message to a target chat"""
         try:
             client = self.session_manager.get_client()
@@ -69,18 +61,45 @@ class CallExecutor:
             
             # Send message with resolved entity
             try:
-                sent_message = await client.send_message(
-                    resolved_entity,
-                    message,
-                    parse_mode='md',
-                    link_preview=False,
-                    reply_to=reply_to_message_id
-                )
+                if photo_bytes:
+                    # Build a fresh BytesIO buffer per send to avoid closed streams on retries
+                    file_obj = BytesIO(photo_bytes)
+                    file_obj.name = "chart.jpg"
+                    sent_message = await client.send_file(
+                        resolved_entity,
+                        file=file_obj,
+                        caption=message,
+                        parse_mode='md',
+                        reply_to=reply_to_message_id,
+                    )
+                else:
+                    sent_message = await client.send_message(
+                        resolved_entity,
+                        message,
+                        parse_mode='md',
+                        link_preview=False,
+                        reply_to=reply_to_message_id
+                    )
             except Exception as e:
                 # If reply fails (MessageIdInvalidError), retry without reply
                 if reply_to_message_id and "message_id_invalid" in str(e).lower():
                     logger.warning(f"Reply to message {reply_to_message_id} failed, sending standalone message")
-                    sent_message = await client.send_message(resolved_entity, message, parse_mode='md', link_preview=False)
+                    if photo_bytes:
+                        file_obj = BytesIO(photo_bytes)
+                        file_obj.name = "chart.jpg"
+                        sent_message = await client.send_file(
+                            resolved_entity,
+                            file=file_obj,
+                            caption=message,
+                            parse_mode='md',
+                        )
+                    else:
+                        sent_message = await client.send_message(
+                            resolved_entity,
+                            message,
+                            parse_mode='md',
+                            link_preview=False
+                        )
                     # Note: first_message_id cleanup handled in call_dispatcher.py:278-288
                 else:
                     raise e

@@ -235,7 +235,48 @@ class TokenMonitor:
                     f"(type={chat_type or 'unknown'}) at ${float(market_cap):,.2f}"
                 )
             else:
-                logger.debug(f"[GROUP_ALERT_DUP] Chat {chat_id} already tracking token {address[:8]}..., skipping")
+                desired_user_id = user_id
+
+                if desired_user_id is None:
+                    updated = await db.execute(
+                        """
+                        UPDATE token_group_alerts
+                        SET original_user_id = NULL
+                        WHERE token_id = $1
+                          AND chat_id = $2
+                          AND original_user_id IS NOT NULL
+                        """,
+                        token_id,
+                        chat_id,
+                    )
+                    if updated != "UPDATE 0":
+                        logger.info(
+                            "[GROUP_ALERT_FIX] Cleared original_user_id for token %s chat %s to keep alerts aligned with monitored source",
+                            address[:8],
+                            chat_id,
+                        )
+                else:
+                    updated = await db.execute(
+                        """
+                        UPDATE token_group_alerts
+                        SET original_user_id = $3
+                        WHERE token_id = $1
+                          AND chat_id = $2
+                          AND original_user_id IS DISTINCT FROM $3
+                        """,
+                        token_id,
+                        chat_id,
+                        desired_user_id,
+                    )
+                    if updated != "UPDATE 0":
+                        logger.info(
+                            "[GROUP_ALERT_FIX] Updated original_user_id for token %s chat %s to %s",
+                            address[:8],
+                            chat_id,
+                            desired_user_id,
+                        )
+
+                logger.debug(f"[GROUP_ALERT_DUP] Chat {chat_id} already tracking token {address[:8]}..., ensured metadata is current")
 
         except Exception as exc:
             logger.error(

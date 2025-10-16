@@ -103,4 +103,6 @@ class ManagementStates(StatesGroup):
     gain_alerts_edit_name = State()
     gain_alerts_edit_sensitivity = State()
     gain_alerts_edit_template = State()
-    
+    gain_alerts_edit_chart_threshold = State()
+    gain_alerts_edit_chart_bot = State()
+    chart_groups_add_chat_id = State()

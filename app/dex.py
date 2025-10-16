@@ -8,11 +8,18 @@ polling intervals. Handles gain alert triggers and stop-loss conditions.
 import asyncio
 import heapq
 import logging
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.config import settings, get_gain_alert_settings, get_gain_alert_template_text
+from aiogram.types import BufferedInputFile
+
+from app.config import (
+    settings,
+    get_gain_alert_settings,
+    get_gain_alert_template_text,
+    get_global_chart_settings,
+)
 from app.db import db
 from app.models import TokenModel
 from app.models.monitored_source import MonitoredSourceModel
@@ -23,11 +30,14 @@ from app.gain_alert_templates import (
     DEFAULT_GAIN_ALERT_TEMPLATE,
     missing_required_placeholders,
 )
+from app.chart_fetcher import ChartFetcher
 
 logger = logging.getLogger(__name__)
 
 # Singleton instance for global access
 _dex_service_instance: Optional["DexScreenerService"] = None
+
+DEFAULT_CHART_THRESHOLD = Decimal("100000")
 
 
 def get_dex_service() -> "DexScreenerService":
@@ -52,6 +62,7 @@ class DexScreenerService:
         self.dex_client = get_dexscreener_client()
         self.okx_client = get_okx_market_client()
         self.userbot_manager = None
+        self.chart_fetcher: Optional[ChartFetcher] = None
         self.management_bot = None
         self.running = False
         self._scheduler_task: Optional[asyncio.Task] = None
@@ -66,8 +77,10 @@ class DexScreenerService:
         self.userbot_manager = manager
         if manager:
             logger.info("UserbotManager set on Dex service")
+            self.chart_fetcher = ChartFetcher(db, manager)
         else:
             logger.info("UserbotManager cleared on Dex service")
+            self.chart_fetcher = None
 
     def set_management_bot(self, management_bot) -> None:
         """Record the management bot wrapper for alert dispatching."""
@@ -204,11 +217,22 @@ class DexScreenerService:
                         )
 
                 if market_cap is None:
-                    pair_data = await self.dex_client.fetch_token(
+                    pairs = await self.dex_client.fetch_token_pairs(
                         address,
                         chain_id=chain_id,
                         use_cache=False,
                     )
+
+                    if pairs is None:
+                        pair_data = None
+                    elif not pairs:
+                        logger.info(
+                            f"[POLL] {address[:8]}... ({chain_id}) has no DexScreener pools; stopping token."
+                        )
+                        await self._stop_token(token_id, address, "dex_no_pools")
+                        return
+                    else:
+                        pair_data = self.dex_client._select_preferred_pair(pairs)
 
                     if pair_data:
                         market_cap = self.dex_client.get_market_cap(pair_data)
@@ -375,18 +399,28 @@ class DexScreenerService:
         chat_id: int,
         message: str,
         reply_to_message_id: Optional[int],
+        photo_bytes: Optional[bytes] = None,
     ) -> Dict[str, Any]:
         """Send alert message using the management bot instance."""
         if not self.management_bot:
             return {"success": False, "error": "management_bot_unavailable"}
 
         try:
-            sent_message = await self.management_bot.bot.send_message(
-                chat_id=chat_id,
-                text=message,
-                reply_to_message_id=reply_to_message_id,
-                disable_web_page_preview=True,
-            )
+            if photo_bytes:
+                input_file = BufferedInputFile(photo_bytes, filename="chart.jpg")
+                sent_message = await self.management_bot.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=input_file,
+                    caption=message,
+                    reply_to_message_id=reply_to_message_id,
+                )
+            else:
+                sent_message = await self.management_bot.bot.send_message(
+                    chat_id=chat_id,
+                    text=message,
+                    reply_to_message_id=reply_to_message_id,
+                    disable_web_page_preview=True,
+                )
             return {"success": True, "message_id": getattr(sent_message, "message_id", None)}
         except Exception as exc:
             logger.error(
@@ -439,13 +473,16 @@ class DexScreenerService:
                     ms.assigned_userbot_id,
                     ms.template_text,
                     ms.use_management_bot,
+                    ms.chart_enabled,
+                    ms.chart_bot_id,
+                    ms.chart_mc_threshold,
                     ARRAY_REMOVE(ARRAY_AGG(mst.target_chat_id), NULL) AS extra_targets
                 FROM token_group_alerts tga
                 LEFT JOIN monitored_sources ms
                     ON ms.chat_id = tga.chat_id
                    AND (
-                        (ms.user_id IS NULL AND tga.original_user_id IS NULL)
-                        OR ms.user_id = tga.original_user_id
+                        ms.user_id = tga.original_user_id
+                        OR ms.user_id IS NULL
                    )
                 LEFT JOIN monitored_source_targets mst ON mst.source_id = ms.id
                 WHERE tga.token_id = $1
@@ -460,7 +497,10 @@ class DexScreenerService:
                     ms.sensitivity_pct,
                     ms.assigned_userbot_id,
                     ms.template_text,
-                    ms.use_management_bot
+                    ms.use_management_bot,
+                    ms.chart_enabled,
+                    ms.chart_bot_id,
+                    ms.chart_mc_threshold
                 """,
                 token_id,
             )
@@ -472,6 +512,34 @@ class DexScreenerService:
             settings_dict = await get_gain_alert_settings()
             default_gain_threshold_pct = Decimal(str(settings_dict['gain_threshold_pct']))
             global_template = await get_gain_alert_template_text()
+            chart_config = await get_global_chart_settings()
+            chart_threshold_override = chart_config.get('chart_threshold_override')
+            chart_threshold_default = chart_config['chart_threshold_default']
+            global_chart_threshold: Decimal
+
+            candidate_threshold = chart_threshold_override or chart_threshold_default
+            if not isinstance(candidate_threshold, Decimal):
+                try:
+                    candidate_threshold = Decimal(str(candidate_threshold))
+                except (InvalidOperation, TypeError, ValueError):
+                    logger.warning(
+                        "[CHART_ALERT] Invalid global chart threshold %s; falling back to %s",
+                        candidate_threshold,
+                        self.DEFAULT_CHART_THRESHOLD,
+                    )
+                    candidate_threshold = self.DEFAULT_CHART_THRESHOLD
+
+            if candidate_threshold <= 0:
+                logger.warning(
+                    "[CHART_ALERT] Non-positive global chart threshold %s detected; falling back to %s",
+                    candidate_threshold,
+                    self.DEFAULT_CHART_THRESHOLD,
+                )
+                global_chart_threshold = self.DEFAULT_CHART_THRESHOLD
+            else:
+                global_chart_threshold = candidate_threshold
+
+            global_chart_bot_id = chart_config.get('chart_bot_id')
 
             workers_cache: Dict[int, Any] = {}
             template_cache: Dict[int, Optional[str]] = {}
@@ -564,6 +632,83 @@ class DexScreenerService:
                             worker.call_executor = executor
                         workers_cache[worker_id] = executor
 
+                chart_enabled_flag = bool(group.get('chart_enabled')) if group.get('chart_enabled') is not None else False
+                chart_bot_id_value = group.get('chart_bot_id')
+                if chart_bot_id_value is None:
+                    chart_bot_id_value = global_chart_bot_id
+
+                chart_threshold_raw = group.get('chart_mc_threshold')
+                chart_threshold = global_chart_threshold
+                if chart_threshold_raw is not None:
+                    try:
+                        chart_threshold = Decimal(str(chart_threshold_raw))
+                    except (InvalidOperation, ValueError, TypeError):
+                        logger.warning(
+                            "[CHART_ALERT] Invalid chart threshold %s for chat %s; using global %s",
+                            chart_threshold_raw,
+                            chat_id,
+                            global_chart_threshold,
+                        )
+                        chart_threshold = global_chart_threshold
+                elif chart_threshold is None:
+                    chart_threshold = self.DEFAULT_CHART_THRESHOLD
+
+                chart_bytes: Optional[bytes] = None
+                if chart_enabled_flag and chart_bot_id_value:
+                    if current_mc >= chart_threshold:
+                        if self.chart_fetcher:
+                            try:
+                                logger.info(
+                                    "[CHART_ALERT] Fetching chart for %s (chat %s, threshold=%s, current_mc=%s)",
+                                    address[:8],
+                                    chat_id,
+                                    chart_threshold,
+                                    current_mc,
+                                )
+                                chart_bytes = await self.chart_fetcher.fetch_chart_for_token(
+                                    contract_address=address,
+                                    chart_bot_id=int(chart_bot_id_value),
+                                )
+                                if chart_bytes:
+                                    logger.info(
+                                        "[CHART_ALERT] Chart fetched for %s (chat %s, bytes=%d)",
+                                        address[:8],
+                                        chat_id,
+                                        len(chart_bytes),
+                                    )
+                                else:
+                                    logger.warning(
+                                        "[CHART_ALERT] Chart fetch returned no image for %s (chat %s)",
+                                        address[:8],
+                                        chat_id,
+                                    )
+                            except Exception as exc:
+                                logger.error(
+                                    "[CHART_ALERT] Error fetching chart for %s (chat %s): %s",
+                                    address[:8],
+                                    chat_id,
+                                    exc,
+                                    exc_info=True,
+                                )
+                                chart_bytes = None
+                        else:
+                            logger.warning(
+                                "[CHART_ALERT] ChartFetcher unavailable; cannot fetch chart for chat %s",
+                                chat_id,
+                            )
+                    else:
+                        logger.debug(
+                            "[CHART_ALERT] Current MC %s below chart threshold %s for chat %s; skipping chart fetch",
+                            current_mc,
+                            chart_threshold,
+                            chat_id,
+                        )
+                elif chart_enabled_flag:
+                    logger.warning(
+                        "[CHART_ALERT] Chart bot not configured for chat %s and no global default; skipping chart fetch",
+                        chat_id,
+                    )
+
                 extra_targets = group.get('extra_targets') or []
                 unique_targets = {chat_id}
                 unique_targets.update(extra_targets)
@@ -587,9 +732,7 @@ class DexScreenerService:
                         template_cache[chat_id] = None
                 if template_override in (None, ""):
                     template_override = template_cache.get(chat_id)
-                template_candidate = template_override or global_template
-                if not template_candidate:
-                    template_candidate = DEFAULT_GAIN_ALERT_TEMPLATE
+                template_candidate = template_override or global_template or DEFAULT_GAIN_ALERT_TEMPLATE
 
                 missing = missing_required_placeholders(template_candidate)
                 if missing:
@@ -600,8 +743,17 @@ class DexScreenerService:
                     )
                     template_candidate = global_template or DEFAULT_GAIN_ALERT_TEMPLATE
 
+                group_template_values = dict(template_values)
+                group_template_values["first_market_cap"] = self._format_mc_shorthand(first_seen_mc)
                 try:
-                    alert_message = template_candidate.format(**template_values)
+                    multiplier_value = float(current_mc / first_seen_mc) if first_seen_mc > 0 else None
+                except (ValueError, ZeroDivisionError):
+                    multiplier_value = None
+                if multiplier_value is not None:
+                    group_template_values["multiplier"] = f"{multiplier_value:.1f}x"
+
+                try:
+                    alert_message = template_candidate.format(**group_template_values)
                 except KeyError as exc:
                     logger.error(
                         "[GAIN_ALERT] Template formatting failed for chat %s (missing key: %s). Skipping.",
@@ -639,6 +791,7 @@ class DexScreenerService:
                             target_chat_int,
                             alert_message,
                             reply_id,
+                            photo_bytes=chart_bytes,
                         )
                     else:
                         result = await executor.send_call_message(
@@ -646,6 +799,7 @@ class DexScreenerService:
                             message=alert_message,
                             token_address=address,
                             reply_to_message_id=reply_id,
+                            photo_bytes=chart_bytes,
                         )
 
                     if result.get('success'):

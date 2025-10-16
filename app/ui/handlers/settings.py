@@ -4,6 +4,8 @@ Settings Handler - Manages gain alert threshold configuration
 
 import logging
 import html
+from decimal import Decimal, InvalidOperation
+from typing import Optional, Tuple
 
 from aiogram import types
 from aiogram.fsm.context import FSMContext
@@ -12,7 +14,10 @@ from app.ui.keyboards import Keyboards
 from app.config import (
     get_gain_alert_settings,
     get_gain_alert_template_text,
+    get_global_chart_settings,
     set_gain_alert_template_text,
+    set_global_chart_threshold,
+    set_global_chart_bot_id,
 )
 from app.gain_alert_templates import (
     DEFAULT_GAIN_ALERT_TEMPLATE,
@@ -21,6 +26,7 @@ from app.gain_alert_templates import (
     REQUIRED_GAIN_TEMPLATE_PLACEHOLDERS,
 )
 from app.db import db
+from app.models.chart_request_group import ChartRequestGroupModel
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +37,7 @@ class SettingsHandler:
     def __init__(self, db_pool, keyboards: Keyboards):
         self.db = db_pool
         self.keyboards = keyboards
+        self.chart_group_model = ChartRequestGroupModel(db_pool)
 
     def _compose_gain_alert_settings_text(
         self,
@@ -38,9 +45,21 @@ class SettingsHandler:
         drop_threshold: float,
         drop_floor: float,
         template_text: str,
+        chart_threshold: Decimal,
+        chart_threshold_override: bool,
+        chart_bot_id: Optional[int],
     ) -> str:
         """Render the gain alert settings summary block."""
         template_preview = html.escape(template_text)
+        threshold_display = self._format_currency(chart_threshold)
+        if not chart_threshold_override:
+            threshold_display = f"{threshold_display} (default)"
+
+        if chart_bot_id is not None:
+            chart_bot_display = f"ID {chart_bot_id}"
+        else:
+            chart_bot_display = "Not configured"
+
         return (
             "<b>🌙 Gain Alert Settings</b>\n\n"
             "Configure market cap monitoring thresholds:\n\n"
@@ -50,10 +69,66 @@ class SettingsHandler:
             f"  └ Stop monitoring when MC drops to {drop_threshold*100:.0f}% of first seen\n\n"
             f"<b>💰 Minimum Market Cap:</b> ${drop_floor:,.0f}\n"
             f"  └ Stop monitoring when MC falls below this absolute floor\n\n"
+            f"<b>💰 Chart MC Threshold:</b> {threshold_display}\n"
+            f"  └ Charts trigger when current MC meets or exceeds this value\n\n"
+            f"<b>🤖 Chart Bot ID:</b> {chart_bot_display}\n"
+            "  └ Defaults used when monitored sources do not override it\n\n"
             "<i>Tap a setting to edit it.</i>\n\n"
             "<b>Current Alert Template</b>\n"
             f"<code>{template_preview}</code>"
         )
+
+    @staticmethod
+    def _format_currency(value: Decimal) -> str:
+        """Return USD currency string for the provided decimal value."""
+        quantised = value.quantize(Decimal("0.01"))
+        formatted = format(quantised, ",.2f")
+        if formatted.endswith(".00"):
+            formatted = formatted[:-3]
+        return f"${formatted}"
+
+    async def _build_gain_alert_settings_view(self) -> Tuple[str, types.InlineKeyboardMarkup]:
+        """Compose the gain alert settings overview text and keyboard."""
+        settings_dict = await get_gain_alert_settings()
+        gain_threshold = settings_dict['gain_threshold_pct']
+        drop_threshold = settings_dict['drop_threshold_pct']
+        drop_floor = settings_dict['drop_floor_mc']
+
+        global_template = await get_gain_alert_template_text()
+        chart_group_count = await self.chart_group_model.count_groups()
+        chart_settings = await get_global_chart_settings()
+
+        chart_override: Optional[Decimal] = chart_settings.get('chart_threshold_override')
+        chart_default: Decimal = chart_settings['chart_threshold_default']
+        chart_bot_id: Optional[int] = chart_settings.get('chart_bot_id')
+
+        effective_chart_threshold = chart_override or chart_default
+        threshold_label = self._format_currency(effective_chart_threshold)
+        if chart_override is None:
+            threshold_label = f"{threshold_label} (default)"
+
+        chart_bot_label = str(chart_bot_id) if chart_bot_id is not None else "Not set"
+
+        text = self._compose_gain_alert_settings_text(
+            gain_threshold,
+            drop_threshold,
+            drop_floor,
+            global_template,
+            effective_chart_threshold,
+            chart_override is not None,
+            chart_bot_id,
+        )
+
+        keyboard = self.keyboards.gain_alert_settings_menu(
+            gain_threshold,
+            drop_threshold,
+            drop_floor,
+            chart_group_count,
+            threshold_label,
+            chart_bot_label,
+        )
+
+        return text, keyboard
 
     async def show_settings_menu(self, query: types.CallbackQuery):
         """Show main settings menu"""
@@ -71,25 +146,10 @@ class SettingsHandler:
     async def show_gain_alert_settings(self, query: types.CallbackQuery):
         """Show gain alert threshold settings"""
         try:
-            # Load current settings
-            settings_dict = await get_gain_alert_settings()
-            gain_threshold = settings_dict['gain_threshold_pct']
-            drop_threshold = settings_dict['drop_threshold_pct']
-            drop_floor = settings_dict['drop_floor_mc']
-
-            global_template = await get_gain_alert_template_text()
-            text = self._compose_gain_alert_settings_text(
-                gain_threshold,
-                drop_threshold,
-                drop_floor,
-                global_template,
-            )
-
+            text, keyboard = await self._build_gain_alert_settings_view()
             await query.message.edit_text(
                 text,
-                reply_markup=self.keyboards.gain_alert_settings_menu(
-                    gain_threshold, drop_threshold, drop_floor
-                )
+                reply_markup=keyboard,
             )
             await query.answer()
         except Exception as e:
@@ -189,6 +249,55 @@ class SettingsHandler:
             logger.error(f"Error prompting global template edit: {exc}")
             await query.answer("❌ Error", show_alert=True)
 
+    async def prompt_edit_chart_threshold(self, query: types.CallbackQuery, state: FSMContext) -> None:
+        """Prompt admin to enter a new global chart market cap threshold."""
+        try:
+            chart_settings = await get_global_chart_settings()
+            chart_override: Optional[Decimal] = chart_settings.get('chart_threshold_override')
+            chart_default: Decimal = chart_settings['chart_threshold_default']
+
+            current_value = chart_override or chart_default
+            current_display = self._format_currency(current_value)
+            if chart_override is None:
+                current_display = f"{current_display} (default)"
+
+            await query.message.edit_text(
+                "<b>💰 Set Global MC Threshold</b>\n\n"
+                f"Current: {current_display}\n\n"
+                "Send the minimum market cap (USD) required to request charts.\n"
+                "Type <code>reset</code> to restore the default value.\n\n"
+                "<i>This applies when monitored sources have charts enabled but no per-source override.</i>",
+                reply_markup=self.keyboards.cancel_button("settings:gain_alerts"),
+                parse_mode="HTML",
+            )
+            await state.set_state("awaiting_global_chart_threshold")
+            await query.answer()
+        except Exception as exc:
+            logger.error("Error prompting global chart threshold edit: %s", exc)
+            await query.answer("❌ Error", show_alert=True)
+
+    async def prompt_edit_chart_bot(self, query: types.CallbackQuery, state: FSMContext) -> None:
+        """Prompt admin to configure the global chart bot ID."""
+        try:
+            chart_settings = await get_global_chart_settings()
+            chart_bot_id = chart_settings.get('chart_bot_id')
+            current_display = str(chart_bot_id) if chart_bot_id is not None else "Not configured"
+
+            await query.message.edit_text(
+                "<b>🤖 Set Global Chart Bot ID</b>\n\n"
+                f"Current: {current_display}\n\n"
+                "Send the Telegram user ID of the bot that replies with chart images.\n"
+                "Type <code>reset</code> to clear the global default.\n\n"
+                "<i>Sources inherit this ID when chart alerts are enabled without overrides.</i>",
+                reply_markup=self.keyboards.cancel_button("settings:gain_alerts"),
+                parse_mode="HTML",
+            )
+            await state.set_state("awaiting_global_chart_bot")
+            await query.answer()
+        except Exception as exc:
+            logger.error("Error prompting global chart bot edit: %s", exc)
+            await query.answer("❌ Error", show_alert=True)
+
     async def save_gain_threshold(self, message: types.Message, state: FSMContext):
         """Save new gain threshold value"""
         try:
@@ -214,26 +323,8 @@ class SettingsHandler:
 
             await state.clear()
 
-            # Show updated settings menu
-            settings_dict = await get_gain_alert_settings()
-            gain_threshold = settings_dict['gain_threshold_pct']
-            drop_threshold = settings_dict['drop_threshold_pct']
-            drop_floor = settings_dict['drop_floor_mc']
-
-            global_template = await get_gain_alert_template_text()
-            text = self._compose_gain_alert_settings_text(
-                gain_threshold,
-                drop_threshold,
-                drop_floor,
-                global_template,
-            )
-
-            await message.answer(
-                text,
-                reply_markup=self.keyboards.gain_alert_settings_menu(
-                    gain_threshold, drop_threshold, drop_floor
-                )
-            )
+            text, keyboard = await self._build_gain_alert_settings_view()
+            await message.answer(text, reply_markup=keyboard)
 
         except ValueError:
             await message.answer("❌ Invalid input. Please enter a valid number.")
@@ -266,26 +357,8 @@ class SettingsHandler:
 
             await state.clear()
 
-            # Show updated settings menu
-            settings_dict = await get_gain_alert_settings()
-            gain_threshold = settings_dict['gain_threshold_pct']
-            drop_threshold = settings_dict['drop_threshold_pct']
-            drop_floor = settings_dict['drop_floor_mc']
-
-            global_template = await get_gain_alert_template_text()
-            text = self._compose_gain_alert_settings_text(
-                gain_threshold,
-                drop_threshold,
-                drop_floor,
-                global_template,
-            )
-
-            await message.answer(
-                text,
-                reply_markup=self.keyboards.gain_alert_settings_menu(
-                    gain_threshold, drop_threshold, drop_floor
-                )
-            )
+            text, keyboard = await self._build_gain_alert_settings_view()
+            await message.answer(text, reply_markup=keyboard)
 
         except ValueError:
             await message.answer("❌ Invalid input. Please enter a valid number.")
@@ -315,32 +388,76 @@ class SettingsHandler:
 
             await state.clear()
 
-            # Show updated settings menu
-            settings_dict = await get_gain_alert_settings()
-            gain_threshold = settings_dict['gain_threshold_pct']
-            drop_threshold = settings_dict['drop_threshold_pct']
-            drop_floor = settings_dict['drop_floor_mc']
-
-            global_template = await get_gain_alert_template_text()
-            text = self._compose_gain_alert_settings_text(
-                gain_threshold,
-                drop_threshold,
-                drop_floor,
-                global_template,
-            )
-
-            await message.answer(
-                text,
-                reply_markup=self.keyboards.gain_alert_settings_menu(
-                    gain_threshold, drop_threshold, drop_floor
-                )
-            )
+            text, keyboard = await self._build_gain_alert_settings_view()
+            await message.answer(text, reply_markup=keyboard)
 
         except ValueError:
             await message.answer("❌ Invalid input. Please enter a valid number.")
         except Exception as e:
             logger.error(f"Error saving drop floor: {e}")
             await message.answer("❌ Error saving setting")
+
+    async def save_chart_threshold(self, message: types.Message, state: FSMContext) -> None:
+        """Persist a new global chart market cap threshold."""
+        raw_input = (message.text or "").strip()
+        lowered = raw_input.lower()
+
+        try:
+            if lowered in {"reset", "default"}:
+                await set_global_chart_threshold(None)
+                await message.answer(
+                    "✅ Global chart MC threshold reset to default ($100,000)."
+                )
+            else:
+                numeric_text = raw_input.replace(",", "").replace("$", "")
+                value = Decimal(numeric_text)
+                if value <= 0:
+                    await message.answer("❌ Value must be greater than zero.")
+                    return
+                if value > Decimal("1000000000"):
+                    await message.answer("❌ Please choose a value below $1,000,000,000.")
+                    return
+
+                await set_global_chart_threshold(value)
+                await message.answer(
+                    f"✅ Global chart MC threshold set to {self._format_currency(value)}."
+                )
+
+            await state.clear()
+            text, keyboard = await self._build_gain_alert_settings_view()
+            await message.answer(text, reply_markup=keyboard)
+        except (InvalidOperation, ValueError):
+            await message.answer("❌ Invalid number. Example: 125000 or 125000.50")
+        except Exception as exc:
+            logger.error("Error saving global chart threshold: %s", exc)
+            await message.answer("❌ Error saving chart threshold")
+
+    async def save_chart_bot(self, message: types.Message, state: FSMContext) -> None:
+        """Persist or clear the global chart bot identifier."""
+        raw_input = (message.text or "").strip()
+        lowered = raw_input.lower()
+
+        try:
+            if lowered in {"reset", "clear", "none"}:
+                await set_global_chart_bot_id(None)
+                await message.answer("✅ Global chart bot ID cleared.")
+            else:
+                bot_id = int(raw_input)
+                if bot_id <= 0:
+                    await message.answer("❌ Bot ID must be a positive integer.")
+                    return
+
+                await set_global_chart_bot_id(bot_id)
+                await message.answer(f"✅ Global chart bot ID set to {bot_id}.")
+
+            await state.clear()
+            text, keyboard = await self._build_gain_alert_settings_view()
+            await message.answer(text, reply_markup=keyboard)
+        except ValueError:
+            await message.answer("❌ Invalid ID. Provide the numeric Telegram user ID.")
+        except Exception as exc:
+            logger.error("Error saving global chart bot ID: %s", exc)
+            await message.answer("❌ Error saving chart bot ID")
 
     async def save_gain_template(self, message: types.Message, state: FSMContext) -> None:
         """Persist the updated global gain alert template."""

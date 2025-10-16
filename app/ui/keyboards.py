@@ -919,7 +919,14 @@ class Keyboards:
         ])
 
     @staticmethod
-    def gain_alert_settings_menu(gain_threshold: float, drop_threshold: float, drop_floor: float) -> InlineKeyboardMarkup:
+    def gain_alert_settings_menu(
+        gain_threshold: float,
+        drop_threshold: float,
+        drop_floor: float,
+        chart_group_count: int,
+        chart_threshold_label: str,
+        chart_bot_label: str,
+    ) -> InlineKeyboardMarkup:
         """Gain alert settings menu with current values"""
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(
@@ -935,8 +942,20 @@ class Keyboards:
                 callback_data="settings:edit_drop_floor"
             )],
             [InlineKeyboardButton(
+                text=f"💰 Set MC Threshold ({chart_threshold_label})",
+                callback_data="settings:edit_chart_threshold"
+            )],
+            [InlineKeyboardButton(
+                text=f"🤖 Set Chart Bot ID ({chart_bot_label})",
+                callback_data="settings:edit_chart_bot"
+            )],
+            [InlineKeyboardButton(
                 text="📝 Edit Alert Template",
                 callback_data="settings:edit_gain_template"
+            )],
+            [InlineKeyboardButton(
+                text=f"⚙️ Chart Request Groups ({chart_group_count})",
+                callback_data="gain_alerts:chart_groups:menu"
             )],
             [InlineKeyboardButton(text="🔙 Back", callback_data="settings:main")]
         ])
@@ -986,6 +1005,28 @@ class Keyboards:
             [InlineKeyboardButton(text="✅ Confirm", callback_data="gain_alerts:add:confirm")],
             [InlineKeyboardButton(text="❌ Cancel", callback_data="gain_alerts:cancel")]
         ])
+
+    @staticmethod
+    def chart_groups_menu(groups: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
+        """Chart request groups menu."""
+        keyboard: List[List[InlineKeyboardButton]] = [
+            [InlineKeyboardButton(text="➕ Add Group", callback_data="gain_alerts:chart_groups:add")]
+        ]
+
+        for group in groups:
+            chat_id = group.get("chat_id")
+            label = group.get("label")
+            if label:
+                button_text = f"🗑️ Remove {chat_id} ({label})"
+            else:
+                button_text = f"🗑️ Remove {chat_id}"
+
+            keyboard.append([
+                InlineKeyboardButton(text=button_text, callback_data=f"gain_alerts:chart_groups:remove:{chat_id}")
+            ])
+
+        keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data="gain_alerts:menu")])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
     def token_list_navigation(status: str, page: int, total_pages: int) -> InlineKeyboardMarkup:

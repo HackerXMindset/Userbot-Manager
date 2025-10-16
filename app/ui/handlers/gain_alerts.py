@@ -26,6 +26,7 @@ from app.gain_alert_templates import (
     REQUIRED_GAIN_TEMPLATE_PLACEHOLDERS,
 )
 from app.models.monitored_source import MonitoredSourceModel
+from app.models.chart_request_group import ChartRequestGroupModel
 from app.ui.keyboards import Keyboards
 from app.ui.states import ManagementStates
 
@@ -35,11 +36,15 @@ logger = logging.getLogger(__name__)
 class GainAlertsHandler:
     """Handler for managing monitored sources used by the gain alert system."""
 
+    DEFAULT_CHART_THRESHOLD: Decimal = Decimal("100000")
+
     def __init__(self, db_pool, keyboards: Keyboards):
         self.db = db_pool
         self.keyboards = keyboards
         self.model = MonitoredSourceModel(db_pool)
+        self.chart_group_model = ChartRequestGroupModel(db_pool)
         self._member_display_cache: Dict[Tuple[int, int], str] = {}
+        self._chart_bot_cache: Dict[int, str] = {}
 
     async def show_main_menu(self, query: types.CallbackQuery, state: Optional[FSMContext] = None) -> None:
         """Display the monitored source overview."""
@@ -89,6 +94,44 @@ class GainAlertsHandler:
         except Exception as exc:
             logger.error("Error showing gain alert source detail for %s: %s", chat_id, exc, exc_info=True)
             await query.answer("❌ Failed to load source detail", show_alert=True)
+
+    async def cancel(self, query: types.CallbackQuery, state: FSMContext) -> None:
+        """Handle generic cancel actions from gain alerts flows."""
+        try:
+            data = await state.get_data()
+            await state.clear()
+
+            return_chat_id = data.get("return_to_chat_id")
+            detail_chat_id = data.get("detail_chat_id") or data.get("chart_settings_chat_id")
+            detail_message_id = data.get("detail_message_id") or data.get("chart_settings_message_id")
+            return_view = data.get("return_view")
+
+            if return_chat_id:
+                if return_view == "tracked":
+                    view = await self._build_tracked_users_view(query.bot, int(return_chat_id))
+                    if view is not None and detail_chat_id is not None and detail_message_id is not None:
+                        text, keyboard = view
+                        try:
+                            await query.bot.edit_message_text(
+                                text=text,
+                                chat_id=detail_chat_id,
+                                message_id=detail_message_id,
+                                reply_markup=keyboard,
+                                parse_mode="HTML",
+                            )
+                        except TelegramBadRequest as exc:
+                            if "message to edit not found" not in str(exc).lower():
+                                logger.warning("Unable to refresh tracked users view for chat %s: %s", return_chat_id, exc)
+                    await query.message.edit_text("❎ Action cancelled.", parse_mode="HTML")
+                else:
+                    await self.show_source_detail(query, int(return_chat_id))
+            else:
+                await self.show_main_menu(query, state=None)
+
+            await query.answer("Cancelled.")
+        except Exception as exc:
+            logger.error("Error cancelling gain alerts flow: %s", exc, exc_info=True)
+            await query.answer("❌ Failed to cancel. Please return to the main menu manually.", show_alert=True)
 
     async def start_edit_name(self, query: types.CallbackQuery, state: FSMContext, chat_id: int) -> None:
         """Prompt admin to set or clear a display name for the monitored source."""
@@ -1017,23 +1060,421 @@ class GainAlertsHandler:
                 await self.show_source_detail(query, int(return_chat_id))
         else:
             await self.show_main_menu(query, state=None)
+        await query.answer()
 
-    async def cancel(self, query: types.CallbackQuery, state: FSMContext) -> None:
-        """Cancel any in-progress workflow."""
+    # --------------------------------------------------------------------- #
+    # Chart Settings Management
+    # --------------------------------------------------------------------- #
+
+    async def show_chart_settings_menu(self, query: types.CallbackQuery, chat_id: int, *, answer: bool = True) -> None:
+        """Display per-source chart configuration."""
+        try:
+            context = await self._build_detail_context(chat_id, query.bot)
+            if context is None:
+                await query.answer("Monitored source not found.", show_alert=True)
+                return
+
+            text, keyboard = self._build_chart_settings_view(
+                context["entry"],
+                context.get("chart_bot_display"),
+            )
+            await query.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+            if answer:
+                await query.answer()
+        except Exception as exc:
+            logger.error("Error showing chart settings for %s: %s", chat_id, exc, exc_info=True)
+            await query.answer("❌ Failed to load chart settings", show_alert=True)
+
+    async def toggle_chart_enabled(self, query: types.CallbackQuery, chat_id: int) -> None:
+        """Flip chart_enabled flag for all monitored entries tied to the chat."""
+        try:
+            context = await self._build_detail_context(chat_id, query.bot)
+            if context is None:
+                await query.answer("Monitored source not found.", show_alert=True)
+                return
+
+            entry = context["entry"]
+            record_ids = sorted(
+                {int(record["id"]) for record in entry.get("records", []) if record.get("id") is not None}
+            )
+            if not record_ids:
+                await query.answer("Monitored source not found.", show_alert=True)
+                return
+
+            new_status = not bool(entry.get("chart_enabled"))
+            for source_id in record_ids:
+                await self.model.set_chart_enabled(source_id, new_status)
+
+            await self.show_chart_settings_menu(query, chat_id, answer=False)
+            await query.answer("Chart alerts enabled." if new_status else "Chart alerts disabled.")
+        except Exception as exc:
+            logger.error("Error toggling chart alerts for %s: %s", chat_id, exc, exc_info=True)
+            await query.answer("❌ Failed to toggle chart alerts", show_alert=True)
+
+    async def start_edit_chart_threshold(self, query: types.CallbackQuery, state: FSMContext, chat_id: int) -> None:
+        """Prompt for MC threshold input."""
+        try:
+            context = await self._build_detail_context(chat_id, query.bot)
+            if context is None:
+                await query.answer("Monitored source not found.", show_alert=True)
+                return
+
+            entry = context["entry"]
+            record_ids = sorted(
+                {int(record["id"]) for record in entry.get("records", []) if record.get("id") is not None}
+            )
+            if not record_ids:
+                await query.answer("Monitored source not found.", show_alert=True)
+                return
+
+            current_threshold = entry.get("chart_mc_threshold")
+            if current_threshold is None:
+                current_display = f"Current: {self._format_chart_threshold(self.DEFAULT_CHART_THRESHOLD)} (default)"
+            else:
+                current_display = f"Current: {self._format_chart_threshold(current_threshold)}"
+
+            await state.clear()
+            await state.set_state(ManagementStates.gain_alerts_edit_chart_threshold)
+            await state.update_data(
+                chat_id=chat_id,
+                record_ids=record_ids,
+                chart_settings_chat_id=query.message.chat.id,
+                chart_settings_message_id=query.message.message_id,
+            )
+
+            prompt = (
+                "<b>💰 Set Chart MC Threshold</b>\n\n"
+                f"{current_display}\n\n"
+                "Enter the minimum market cap required to request a chart.\n"
+                "Accepted formats: <code>100000</code>, <code>100k</code>, <code>1.5m</code>, or <code>default</code>."
+            )
+
+            await query.message.edit_text(
+                prompt,
+                reply_markup=self.keyboards.cancel_button(f"gain_alerts:chart_settings:cancel:{chat_id}"),
+                parse_mode="HTML",
+            )
+            await query.answer()
+        except Exception as exc:
+            logger.error("Error starting chart threshold editor for %s: %s", chat_id, exc, exc_info=True)
+            await query.answer("❌ Failed to start threshold editor", show_alert=True)
+
+    async def handle_chart_threshold_input(self, message: types.Message, state: FSMContext) -> None:
+        """Validate and persist MC threshold input."""
         data = await state.get_data()
-        return_chat_id = data.get("return_to_chat_id")
-        return_view = data.get("return_view")
+        chat_id = data.get("chat_id")
+        record_ids = data.get("record_ids") or []
+        detail_chat_id = data.get("chart_settings_chat_id")
+        detail_message_id = data.get("chart_settings_message_id")
+
+        if chat_id is None or not record_ids or detail_chat_id is None or detail_message_id is None:
+            await message.answer("❌ Threshold editor expired. Please reopen chart settings.")
+            await state.clear()
+            return
+
+        raw_text = (message.text or "").strip()
+        if not raw_text:
+            await message.answer("❌ Please enter a threshold value.")
+            return
+
+        normalized = raw_text.lower().strip()
+        threshold_value: Optional[float]
+        threshold_display: str
+
+        if normalized in {"default", "reset"}:
+            threshold_value = None
+            threshold_display = f"{self._format_chart_threshold(self.DEFAULT_CHART_THRESHOLD)} (default)"
+        else:
+            cleaned = normalized.replace(",", "").replace("_", "")
+            multiplier = Decimal("1")
+            if cleaned.endswith("k"):
+                multiplier = Decimal("1000")
+                cleaned = cleaned[:-1]
+            elif cleaned.endswith("m"):
+                multiplier = Decimal("1000000")
+                cleaned = cleaned[:-1]
+            elif cleaned.endswith("b"):
+                multiplier = Decimal("1000000000")
+                cleaned = cleaned[:-1]
+
+            cleaned = cleaned.strip()
+            if cleaned.startswith("$"):
+                cleaned = cleaned[1:]
+
+            try:
+                decimal_value = Decimal(cleaned)
+            except (InvalidOperation, ValueError):
+                await message.answer("❌ Couldn't parse that amount. Try values like 100000, 100k, or 1.5m.")
+                return
+
+            decimal_value = (decimal_value * multiplier).quantize(Decimal("0.01"))
+            if decimal_value <= 0:
+                await message.answer("❌ Threshold must be greater than zero.")
+                return
+
+            threshold_value = float(decimal_value)
+            threshold_display = self._format_chart_threshold(decimal_value)
+
+        try:
+            for source_id in record_ids:
+                await self.model.set_chart_mc_threshold(int(source_id), threshold_value)
+        except Exception as exc:
+            logger.error("Failed to update chart threshold for chat %s: %s", chat_id, exc, exc_info=True)
+            await message.answer("❌ Failed to update threshold. Please try again.")
+            return
 
         await state.clear()
-
-        if return_chat_id:
-            if return_view == "tracked":
-                await self.show_tracked_users_menu(query, int(return_chat_id), answer=False)
-            else:
-                await self.show_source_detail(query, int(return_chat_id))
+        if threshold_value is None:
+            await message.answer("✅ Chart threshold reset to default.")
         else:
-            await self.show_main_menu(query, state=None)
-        await query.answer()
+            await message.answer(f"✅ Chart threshold set to {threshold_display}.")
+
+        await self._render_chart_settings_view(
+            message.bot,
+            source_chat_id=int(chat_id),
+            detail_chat_id=int(detail_chat_id),
+            detail_message_id=int(detail_message_id),
+        )
+
+    async def start_edit_chart_bot(self, query: types.CallbackQuery, state: FSMContext, chat_id: int) -> None:
+        """Prompt for chart bot ID input."""
+        try:
+            context = await self._build_detail_context(chat_id, query.bot)
+            if context is None:
+                await query.answer("Monitored source not found.", show_alert=True)
+                return
+
+            entry = context["entry"]
+            record_ids = sorted(
+                {int(record["id"]) for record in entry.get("records", []) if record.get("id") is not None}
+            )
+            if not record_ids:
+                await query.answer("Monitored source not found.", show_alert=True)
+                return
+
+            chart_bot_id = entry.get("chart_bot_id")
+            chart_bot_display = context.get("chart_bot_display")
+
+            if chart_bot_id:
+                current_display = f"Current: {chart_bot_display or f'ID {int(chart_bot_id)}'}"
+            else:
+                current_display = "Current: Not configured"
+
+            await state.clear()
+            await state.set_state(ManagementStates.gain_alerts_edit_chart_bot)
+            await state.update_data(
+                chat_id=chat_id,
+                record_ids=record_ids,
+                chart_settings_chat_id=query.message.chat.id,
+                chart_settings_message_id=query.message.message_id,
+            )
+
+            prompt = (
+                "<b>🤖 Set Chart Bot</b>\n\n"
+                f"{current_display}\n\n"
+                "Enter the Telegram user ID of the chart bot (positive integer).\n"
+                "Type <code>clear</code> to remove the configured bot."
+            )
+
+            await query.message.edit_text(
+                prompt,
+                reply_markup=self.keyboards.cancel_button(f"gain_alerts:chart_settings:cancel:{chat_id}"),
+                parse_mode="HTML",
+            )
+            await query.answer()
+        except Exception as exc:
+            logger.error("Error starting chart bot editor for %s: %s", chat_id, exc, exc_info=True)
+            await query.answer("❌ Failed to start chart bot editor", show_alert=True)
+
+    async def handle_chart_bot_input(self, message: types.Message, state: FSMContext) -> None:
+        """Validate and persist chart bot ID input."""
+        data = await state.get_data()
+        chat_id = data.get("chat_id")
+        record_ids = data.get("record_ids") or []
+        detail_chat_id = data.get("chart_settings_chat_id")
+        detail_message_id = data.get("chart_settings_message_id")
+
+        if chat_id is None or not record_ids or detail_chat_id is None or detail_message_id is None:
+            await message.answer("❌ Chart bot editor expired. Please reopen chart settings.")
+            await state.clear()
+            return
+
+        raw_text = (message.text or "").strip()
+        if not raw_text:
+            await message.answer("❌ Please enter a bot ID or type 'clear'.")
+            return
+
+        normalized = raw_text.lower()
+        bot_id_value: Optional[int]
+
+        if normalized in {"clear", "reset", "none"}:
+            bot_id_value = None
+        else:
+            try:
+                bot_id_value = int(raw_text)
+            except ValueError:
+                await message.answer("❌ Invalid ID. Provide a numeric Telegram user ID or type 'clear'.")
+                return
+
+            if bot_id_value <= 0:
+                await message.answer("❌ Bot ID must be a positive integer.")
+                return
+
+        if bot_id_value is not None:
+            self._chart_bot_cache.pop(bot_id_value, None)
+
+        try:
+            for source_id in record_ids:
+                await self.model.set_chart_bot_id(int(source_id), bot_id_value)
+        except Exception as exc:
+            logger.error("Failed to update chart bot for chat %s: %s", chat_id, exc, exc_info=True)
+            await message.answer("❌ Failed to update chart bot. Please try again.")
+            return
+
+        if bot_id_value is None:
+            await message.answer("✅ Chart bot cleared.")
+        else:
+            await message.answer(f"✅ Chart bot set to ID {bot_id_value}.")
+
+        await state.clear()
+        await self._render_chart_settings_view(
+            message.bot,
+            source_chat_id=int(chat_id),
+            detail_chat_id=int(detail_chat_id),
+            detail_message_id=int(detail_message_id),
+        )
+
+    async def cancel_chart_settings(self, query: types.CallbackQuery, state: FSMContext, chat_id: int) -> None:
+        """Abort chart settings edit flow and return to the chart settings menu."""
+        await state.clear()
+        await self.show_chart_settings_menu(query, chat_id)
+
+    # --------------------------------------------------------------------- #
+    # Chart Request Groups Management
+    # --------------------------------------------------------------------- #
+
+    async def show_chart_groups_menu(self, query: types.CallbackQuery) -> None:
+        """Display list of chart request groups with add/remove options."""
+        try:
+            groups = await self.chart_group_model.list_all()
+
+            lines = [
+                "<b>📊 Chart Request Groups</b>",
+                "",
+                "Groups where bot can post CA to fetch charts:",
+                "",
+            ]
+
+            if groups:
+                for group in groups:
+                    chat_id = group['chat_id']
+                    label = group.get('label')
+                    if label:
+                        lines.append(f"• Group <code>{chat_id}</code> ({label})")
+                    else:
+                        lines.append(f"• Group <code>{chat_id}</code>")
+            else:
+                lines.append("No chart request groups configured yet.")
+
+            text = "\n".join(lines)
+            keyboard = self.keyboards.chart_groups_menu(groups)
+
+            await query.message.edit_text(
+                text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+            await query.answer()
+        except Exception as exc:
+            logger.error("Error showing chart groups menu: %s", exc, exc_info=True)
+            await query.answer("❌ Failed to load chart groups menu", show_alert=True)
+
+    async def start_add_chart_group(self, query: types.CallbackQuery, state: FSMContext) -> None:
+        """Prompt for chat_id input."""
+        try:
+            await state.clear()
+            await state.set_state(ManagementStates.chart_groups_add_chat_id)
+
+            prompt = (
+                "<b>➕ Add Chart Request Group</b>\n\n"
+                "Enter the Telegram group chat ID where the bot can post contract addresses "
+                "to request charts.\n\n"
+                "Chat ID must be a negative integer (e.g., <code>-1001234567890</code>).\n\n"
+                "Use the cancel button to abort."
+            )
+
+            await query.message.edit_text(
+                prompt,
+                reply_markup=self.keyboards.cancel_button("gain_alerts:chart_groups:cancel"),
+                parse_mode="HTML",
+            )
+            await query.answer()
+        except Exception as exc:
+            logger.error("Error starting add chart group flow: %s", exc, exc_info=True)
+            await query.answer("❌ Failed to start add chart group flow", show_alert=True)
+
+    async def handle_chart_group_input(self, message: types.Message, state: FSMContext) -> None:
+        """Validate and add chat_id."""
+        try:
+            raw_input = (message.text or "").strip()
+            if not raw_input:
+                await message.answer("❌ Please enter a valid chat ID.")
+                return
+
+            try:
+                chat_id = int(raw_input)
+            except ValueError:
+                await message.answer("❌ Invalid chat ID. Please enter a numeric value.")
+                return
+
+            if chat_id >= 0:
+                await message.answer("❌ Chat ID must be negative (e.g., -1001234567890).")
+                return
+
+            # Check if already exists
+            existing = await self.chart_group_model.get_by_chat_id(chat_id)
+            if existing:
+                await message.answer("⚠️ This chat is already configured as a chart request group.")
+                await state.clear()
+                return
+
+            # Add the group
+            from asyncpg import UniqueViolationError
+            try:
+                await self.chart_group_model.add_group(chat_id, label=None)
+                await message.answer(
+                    f"✅ Chart request group added: <code>{chat_id}</code>",
+                    parse_mode="HTML"
+                )
+            except UniqueViolationError:
+                await message.answer("⚠️ This chat is already configured as a chart request group.")
+
+            await state.clear()
+        except Exception as exc:
+            logger.error("Error handling chart group input: %s", exc, exc_info=True)
+            await message.answer("❌ Failed to add chart request group. Please try again.")
+            await state.clear()
+
+    async def remove_chart_group(self, query: types.CallbackQuery, chat_id: int) -> None:
+        """Remove group with confirmation."""
+        try:
+            removed = await self.chart_group_model.remove_group(chat_id)
+
+            if removed:
+                await query.answer("✅ Chart request group removed.", show_alert=False)
+            else:
+                await query.answer("⚠️ Chart request group not found.", show_alert=True)
+
+            # Refresh the menu
+            await self.show_chart_groups_menu(query)
+        except Exception as exc:
+            logger.error("Error removing chart group %s: %s", chat_id, exc, exc_info=True)
+            await query.answer("❌ Failed to remove chart request group", show_alert=True)
+
+    async def cancel_chart_groups(self, query: types.CallbackQuery, state: FSMContext) -> None:
+        """Cancel chart groups workflow and return to menu."""
+        await state.clear()
+        await self.show_chart_groups_menu(query)
 
     # --------------------------------------------------------------------- #
     # Helper utilities
@@ -1059,6 +1500,9 @@ class GainAlertsHandler:
                 "created_at": row.get("created_at"),
                 "template_text": row.get("template_text"),
                 "use_management_bot": bool(row.get("use_management_bot")) if row.get("use_management_bot") is not None else False,
+                "chart_enabled": bool(row.get("chart_enabled")) if row.get("chart_enabled") is not None else False,
+                "chart_bot_id": row.get("chart_bot_id"),
+                "chart_mc_threshold": row.get("chart_mc_threshold"),
             })
             entry["records"].append(row)
             entry["token_sum"] += int(row.get("token_count") or 0)
@@ -1077,6 +1521,12 @@ class GainAlertsHandler:
                 entry["template_text"] = row.get("template_text")
             if row.get("use_management_bot") is not None:
                 entry["use_management_bot"] = bool(row.get("use_management_bot"))
+            if row.get("chart_enabled") is not None:
+                entry["chart_enabled"] = bool(row.get("chart_enabled"))
+            if "chart_bot_id" in row:
+                entry["chart_bot_id"] = row.get("chart_bot_id")
+            if "chart_mc_threshold" in row:
+                entry["chart_mc_threshold"] = row.get("chart_mc_threshold")
 
             if row.get("target_count") is not None:
                 entry["target_count"] = int(row.get("target_count") or 0)
@@ -1114,7 +1564,18 @@ class GainAlertsHandler:
             user_ids = [int(record["user_id"]) for record in entry.get("records", []) if record.get("user_id") is not None]
             user_display_map = await self._resolve_user_display_names(bot, source_chat_id, user_ids)
 
-        text = self._format_source_detail(entry, userbot_lookup, target_lookup, user_display_map)
+        chart_bot_display = None
+        chart_bot_id = entry.get("chart_bot_id")
+        if bot and chart_bot_id:
+            chart_bot_display = await self._resolve_chart_bot_display(bot, int(chart_bot_id))
+
+        text = self._format_source_detail(
+            entry,
+            userbot_lookup,
+            target_lookup,
+            user_display_map,
+            chart_bot_display,
+        )
         keyboard = self._build_source_detail_keyboard(entry, userbot_lookup)
 
         return {
@@ -1124,6 +1585,7 @@ class GainAlertsHandler:
             "userbot_lookup": userbot_lookup,
             "target_lookup": target_lookup,
             "user_display_map": user_display_map,
+            "chart_bot_display": chart_bot_display,
         }
 
     async def _resolve_user_display_names(self, bot: Bot, chat_id: int, user_ids: List[int]) -> Dict[int, str]:
@@ -1181,6 +1643,31 @@ class GainAlertsHandler:
             return display_name
         except TelegramBadRequest:
             return str(user_id)
+
+    async def _resolve_chart_bot_display(self, bot: Bot, user_id: int) -> Optional[str]:
+        """Resolve a readable label for the configured chart bot."""
+        cached = self._chart_bot_cache.get(user_id)
+        if cached is not None:
+            return cached
+
+        try:
+            chat = await bot.get_chat(user_id)
+        except TelegramBadRequest as exc:
+            logger.debug("Unable to resolve chart bot %s: %s", user_id, exc)
+            self._chart_bot_cache[user_id] = None  # cache miss to avoid repeated calls
+            return None
+
+        username = getattr(chat, "username", None)
+        full_name = getattr(chat, "full_name", None)
+        if username:
+            display = f"@{username}"
+        elif full_name:
+            display = full_name
+        else:
+            display = str(user_id)
+
+        self._chart_bot_cache[user_id] = display
+        return display
 
     def _summaries_for_menu(self, grouped: OrderedDict[int, Dict[str, Any]], userbot_lookup: Dict[int, str]) -> List[Dict[str, Any]]:
         """Prepare condensed entries for the main menu keyboard."""
@@ -1323,6 +1810,7 @@ class GainAlertsHandler:
         userbot_lookup: Dict[int, str],
         target_lookup: Dict[int, str],
         user_display_map: Optional[Dict[int, str]] = None,
+        chart_bot_display: Optional[str] = None,
     ) -> str:
         """Render detailed information for a single monitored chat."""
         _ = target_lookup  # maintained for backward compatibility
@@ -1376,6 +1864,27 @@ class GainAlertsHandler:
             lines.append("• Pooled userbot (first available)")
         lines.append("")
 
+        chart_enabled = bool(entry.get("chart_enabled"))
+        chart_bot_id = entry.get("chart_bot_id")
+        chart_threshold = entry.get("chart_mc_threshold")
+
+        lines.append("<b>Chart Alerts</b>")
+        lines.append(f"• Status: {'✅ Enabled' if chart_enabled else '⛔️ Disabled'}")
+        if chart_threshold is None:
+            lines.append(f"• MC Threshold: {self._format_chart_threshold(self.DEFAULT_CHART_THRESHOLD)} (default)")
+        else:
+            lines.append(f"• MC Threshold: {self._format_chart_threshold(chart_threshold)}")
+
+        if chart_bot_id:
+            bot_id_int = int(chart_bot_id)
+            if chart_bot_display:
+                lines.append(f"• Chart Bot: {chart_bot_display} (ID: {bot_id_int})")
+            else:
+                lines.append(f"• Chart Bot ID: {bot_id_int}")
+        else:
+            lines.append("• Chart Bot: Not configured")
+        lines.append("")
+
         template_text = entry.get("template_text")
         preview = html.escape(template_text) if template_text else None
         lines.append("<b>Alert Template</b>")
@@ -1414,6 +1923,80 @@ class GainAlertsHandler:
 
         return "\n".join(lines)
 
+    def _format_chart_threshold(self, raw_value: Any) -> str:
+        """Format a market-cap threshold with thousands separators."""
+        try:
+            decimal_value = Decimal(str(raw_value))
+        except (InvalidOperation, TypeError, ValueError):
+            return f"${raw_value}"
+
+        decimal_value = decimal_value.quantize(Decimal("0.01"))
+        formatted = format(decimal_value, ",.2f")
+        if formatted.endswith(".00"):
+            formatted = formatted[:-3]
+        return f"${formatted}"
+
+    def _build_chart_settings_view(
+        self,
+        entry: Dict[str, Any],
+        chart_bot_display: Optional[str],
+    ) -> Tuple[str, InlineKeyboardMarkup]:
+        """Construct text and keyboard for the chart settings menu."""
+        chat_id = entry["chat_id"]
+        chart_enabled = bool(entry.get("chart_enabled"))
+        threshold = entry.get("chart_mc_threshold")
+        chart_bot_id = entry.get("chart_bot_id")
+
+        threshold_text = (
+            f"{self._format_chart_threshold(self.DEFAULT_CHART_THRESHOLD)} (default)"
+            if threshold is None
+            else self._format_chart_threshold(threshold)
+        )
+
+        lines = [
+            "<b>📊 Chart Alert Settings</b>",
+            "",
+            f"Current Status: {'✅ Enabled' if chart_enabled else '⛔️ Disabled'}",
+            f"MC Threshold: {threshold_text}",
+        ]
+
+        if chart_bot_id:
+            bot_id_int = int(chart_bot_id)
+            if chart_bot_display:
+                lines.append(f"Chart Bot: {chart_bot_display} (ID: {bot_id_int})")
+            else:
+                lines.append(f"Chart Bot ID: {bot_id_int}")
+        else:
+            lines.append("Chart Bot: Not configured")
+
+        lines.append("")
+        lines.append("Adjust chart behaviour using the buttons below.")
+
+        keyboard = self._build_chart_settings_keyboard(chat_id, chart_enabled)
+        return "\n".join(lines), keyboard
+
+    def _build_chart_settings_keyboard(self, chat_id: int, enabled: bool) -> InlineKeyboardMarkup:
+        """Inline keyboard for chart settings menu."""
+        toggle_text = "⛔️ Disable Chart Alerts" if enabled else "✅ Enable Chart Alerts"
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=toggle_text,
+                callback_data=f"gain_alerts:view:chart_toggle:{chat_id}"
+            )],
+            [InlineKeyboardButton(
+                text="💰 Set MC Threshold",
+                callback_data=f"gain_alerts:view:chart_threshold:{chat_id}"
+            )],
+            [InlineKeyboardButton(
+                text="🤖 Set Chart Bot ID",
+                callback_data=f"gain_alerts:view:chart_bot:{chat_id}"
+            )],
+            [InlineKeyboardButton(
+                text="🔙 Back to Detail",
+                callback_data=f"gain_alerts:view:{chat_id}"
+            )],
+        ])
+
     def _build_source_detail_keyboard(self, entry: Dict[str, Any], userbot_lookup: Dict[int, str]) -> InlineKeyboardMarkup:
         """Construct inline keyboard for source detail view."""
         rows: List[List[InlineKeyboardButton]] = []
@@ -1445,6 +2028,13 @@ class GainAlertsHandler:
             InlineKeyboardButton(
                 text="📝 Edit Template",
                 callback_data=f"gain_alerts:view:template:{chat_id}"
+            )
+        ])
+
+        rows.append([
+            InlineKeyboardButton(
+                text="📊 Chart Settings",
+                callback_data=f"gain_alerts:view:chart_settings:{chat_id}"
             )
         ])
 
@@ -1689,6 +2279,58 @@ class GainAlertsHandler:
         text = "\n".join(lines)
         keyboard = self._build_tracked_users_keyboard(chat_id, records, user_map)
         return text, keyboard
+
+    async def _render_chart_settings_view(
+        self,
+        bot: Bot,
+        source_chat_id: int,
+        detail_chat_id: int,
+        detail_message_id: int,
+    ) -> None:
+        """Re-render the chart settings menu after inline edits."""
+        context = await self._build_detail_context(source_chat_id, bot)
+        if context is None:
+            await bot.edit_message_text(
+                text="<b>📊 Chart Alert Settings</b>\n\nMonitored source not found.",
+                chat_id=detail_chat_id,
+                message_id=detail_message_id,
+                parse_mode="HTML",
+            )
+            return
+
+        text, keyboard = self._build_chart_settings_view(
+            context["entry"],
+            context.get("chart_bot_display"),
+        )
+
+        try:
+            await bot.edit_message_text(
+                text=text,
+                chat_id=detail_chat_id,
+                message_id=detail_message_id,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+        except TelegramBadRequest as exc:
+            message = str(exc).lower()
+            if "message is not modified" in message:
+                logger.debug(
+                    "Chart settings for chat %s unchanged; suppressing TelegramBadRequest.",
+                    source_chat_id,
+                )
+                return
+            if "message to edit not found" in message:
+                logger.debug(
+                    "Chart settings message for chat %s no longer exists; treating as refreshed.",
+                    source_chat_id,
+                )
+                return
+            logger.warning(
+                "Failed to refresh chart settings message for chat %s: %s",
+                source_chat_id,
+                exc,
+            )
+            raise
 
     async def _refresh_detail_message(self, bot, detail_chat_id: int, detail_message_id: int, source_chat_id: int) -> None:
         """Re-render the detail view message after inline edits."""

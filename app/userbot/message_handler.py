@@ -9,6 +9,7 @@ from typing import Dict, Any, List, Optional
 from telethon import events
 
 from app.db import db
+from app.dex import get_dex_service
 from app.models import BotModel, GroupModel, ScheduleModel, PnlForwardingRuleModel, CommandForwardingRuleModel, CommandTrackedMessageModel, AutoButtonClickRuleModel, CuratedAlphaRuleModel, CuratedAlphaTokenStateModel
 from app.models.source_chat import SourceChatModel
 from app.models.call_queue import CallQueueModel
@@ -75,6 +76,15 @@ class MessageHandler:
     async def _process_event(self, event, is_edit=False):
         direction = "outgoing" if event.out else "incoming"
         logger.debug(f"[MessageHandler] Processing {direction} event - Chat: {event.chat_id}, Userbot: {self.userbot_id}, Edit: {is_edit}, Sender: {event.sender_id}")
+
+        if not is_edit and direction == "incoming":
+            try:
+                dex_service = get_dex_service()
+                chart_fetcher = getattr(dex_service, "chart_fetcher", None)
+                if chart_fetcher:
+                    await chart_fetcher.handle_chart_bot_reply(event.message)
+            except Exception as exc:
+                logger.debug(f"[CHART_FETCH] Error handling potential chart reply: {exc}")
 
         if not is_edit and direction == "incoming":
             await self._handle_monitored_gain_alert(event)
@@ -247,13 +257,18 @@ class MessageHandler:
                 len(addresses),
             )
 
+            # Persist the user ID exactly as configured on the monitored source so
+            # channel/DM entries that track whole chats continue to store NULL and
+            # keep downstream joins (e.g. dispatch routing) aligned with that schema.
+            tracked_user_id = monitored.get("user_id")
+
             for address, blockchain in addresses:
                 await self.token_monitor.process_monitored_token(
                     address=address,
                     blockchain=blockchain,
                     chat_id=chat_id,
                     message_id=message.id if message else None,
-                    user_id=sender_id,
+                    user_id=tracked_user_id,
                     chat_type=monitored["chat_type"],
                 )
 

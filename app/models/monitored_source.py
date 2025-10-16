@@ -287,3 +287,29 @@ class MonitoredSourceModel:
             FROM aggregated
             ORDER BY chat_id
         """)
+
+    async def get_chart_settings(self, source_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Get chart alert settings for a monitored source.
+
+        Returns:
+            Dict with chart_enabled, chart_bot_id, chart_mc_threshold
+            or None if source not found
+        """
+        return await self.db.fetchrow("""
+            SELECT chart_enabled, chart_bot_id, chart_mc_threshold
+            FROM monitored_sources
+            WHERE id = $1
+        """, source_id)
+
+    async def set_chart_enabled(self, source_id: int, enabled: bool) -> Optional[Dict[str, Any]]:
+        """Toggle chart alerts for source"""
+        return await self.update_source_fields(source_id, chart_enabled=enabled)
+
+    async def set_chart_bot_id(self, source_id: int, bot_id: Optional[int]) -> Optional[Dict[str, Any]]:
+        """Assign chart bot to source"""
+        return await self.update_source_fields(source_id, chart_bot_id=bot_id)
+
+    async def set_chart_mc_threshold(self, source_id: int, threshold: Optional[float]) -> Optional[Dict[str, Any]]:
+        """Set MC threshold for charts (None = use default 100k)"""
+        return await self.update_source_fields(source_id, chart_mc_threshold=threshold)

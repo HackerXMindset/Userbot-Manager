@@ -184,6 +184,58 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
             await handler.start_edit_template(query, state, chat_id)
             return
 
+        if action == "chart_settings":
+            if len(parts) < 4:
+                await query.answer("❌ Invalid selection.", show_alert=True)
+                return
+            try:
+                chat_id = int(parts[3])
+            except ValueError:
+                await query.answer("❌ Invalid identifier.", show_alert=True)
+                return
+
+            await handler.show_chart_settings_menu(query, chat_id)
+            return
+
+        if action == "chart_toggle":
+            if len(parts) < 4:
+                await query.answer("❌ Invalid selection.", show_alert=True)
+                return
+            try:
+                chat_id = int(parts[3])
+            except ValueError:
+                await query.answer("❌ Invalid identifier.", show_alert=True)
+                return
+
+            await handler.toggle_chart_enabled(query, chat_id)
+            return
+
+        if action == "chart_threshold":
+            if len(parts) < 4:
+                await query.answer("❌ Invalid selection.", show_alert=True)
+                return
+            try:
+                chat_id = int(parts[3])
+            except ValueError:
+                await query.answer("❌ Invalid identifier.", show_alert=True)
+                return
+
+            await handler.start_edit_chart_threshold(query, state, chat_id)
+            return
+
+        if action == "chart_bot":
+            if len(parts) < 4:
+                await query.answer("❌ Invalid selection.", show_alert=True)
+                return
+            try:
+                chat_id = int(parts[3])
+            except ValueError:
+                await query.answer("❌ Invalid identifier.", show_alert=True)
+                return
+
+            await handler.start_edit_chart_bot(query, state, chat_id)
+            return
+
         if action == "tracked":
             if len(parts) == 4:
                 try:
@@ -281,6 +333,59 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
     async def edit_template_message(message: types.Message, state: FSMContext) -> None:
         await handler.handle_edit_template_input(message, state)
 
+    async def chart_groups_callback(query: types.CallbackQuery, state: FSMContext) -> None:
+        """Handle chart groups menu callbacks."""
+        parts = query.data.split(":")
+
+        if len(parts) == 3 and parts[2] == "menu":
+            await handler.show_chart_groups_menu(query)
+            return
+
+        if len(parts) == 3 and parts[2] == "add":
+            await handler.start_add_chart_group(query, state)
+            return
+
+        if len(parts) == 3 and parts[2] == "cancel":
+            await handler.cancel_chart_groups(query, state)
+            return
+
+        if len(parts) == 4 and parts[2] == "remove":
+            try:
+                chat_id = int(parts[3])
+            except ValueError:
+                await query.answer("❌ Invalid chat ID.", show_alert=True)
+                return
+            await handler.remove_chart_group(query, chat_id)
+            return
+
+        await query.answer("❌ Invalid selection.", show_alert=True)
+
+    async def chart_group_input_message(message: types.Message, state: FSMContext) -> None:
+        """Handle chart group chat ID input."""
+        await handler.handle_chart_group_input(message, state)
+
+    async def chart_settings_callback(query: types.CallbackQuery, state: FSMContext) -> None:
+        """Handle chart settings auxiliary callbacks (e.g., cancel)."""
+        parts = query.data.split(":")
+        if len(parts) == 4 and parts[2] == "cancel":
+            try:
+                chat_id = int(parts[3])
+            except ValueError:
+                await query.answer("❌ Invalid identifier.", show_alert=True)
+                return
+            await handler.cancel_chart_settings(query, state, chat_id)
+            return
+
+        await query.answer("❌ Invalid selection.", show_alert=True)
+
+    async def chart_threshold_message(message: types.Message, state: FSMContext) -> None:
+        """Handle chart MC threshold input."""
+        await handler.handle_chart_threshold_input(message, state)
+
+    async def chart_bot_message(message: types.Message, state: FSMContext) -> None:
+        """Handle chart bot ID input."""
+        await handler.handle_chart_bot_input(message, state)
+
     # Callback query registrations
     dispatcher.callback_query.register(menu_callback, F.data == "gain_alerts:menu", admin_filter)
     dispatcher.callback_query.register(add_callback, F.data == "gain_alerts:add", admin_filter)
@@ -288,6 +393,8 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
     dispatcher.callback_query.register(view_callback, F.data.startswith("gain_alerts:view"), admin_filter)
     dispatcher.callback_query.register(cancel_callback, F.data == "gain_alerts:cancel", admin_filter)
     dispatcher.callback_query.register(confirm_add_callback, F.data == "gain_alerts:add:confirm", admin_filter)
+    dispatcher.callback_query.register(chart_groups_callback, F.data.startswith("gain_alerts:chart_groups:"), admin_filter)
+    dispatcher.callback_query.register(chart_settings_callback, F.data.startswith("gain_alerts:chart_settings:"), admin_filter)
 
     # Message handlers for stateful input
     dispatcher.message.register(chat_id_message, StateFilter(ManagementStates.gain_alerts_add_chat_id), admin_filter)
@@ -295,5 +402,8 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
     dispatcher.message.register(edit_name_message, StateFilter(ManagementStates.gain_alerts_edit_name), admin_filter)
     dispatcher.message.register(edit_sensitivity_message, StateFilter(ManagementStates.gain_alerts_edit_sensitivity), admin_filter)
     dispatcher.message.register(edit_template_message, StateFilter(ManagementStates.gain_alerts_edit_template), admin_filter)
+    dispatcher.message.register(chart_group_input_message, StateFilter(ManagementStates.chart_groups_add_chat_id), admin_filter)
+    dispatcher.message.register(chart_threshold_message, StateFilter(ManagementStates.gain_alerts_edit_chart_threshold), admin_filter)
+    dispatcher.message.register(chart_bot_message, StateFilter(ManagementStates.gain_alerts_edit_chart_bot), admin_filter)
 
     logger.info("Gain alerts router registered")

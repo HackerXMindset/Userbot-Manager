@@ -32,6 +32,10 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
             await manager.settings_handler.prompt_edit_drop_threshold(query, state)
         elif action == "edit_drop_floor":
             await manager.settings_handler.prompt_edit_drop_floor(query, state)
+        elif action == "edit_chart_threshold":
+            await manager.settings_handler.prompt_edit_chart_threshold(query, state)
+        elif action == "edit_chart_bot":
+            await manager.settings_handler.prompt_edit_chart_bot(query, state)
         elif action == "edit_gain_template":
             await manager.settings_handler.prompt_edit_gain_template(query, state)
         elif action == "token_status":
@@ -55,6 +59,14 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
     async def handle_drop_floor_input(message: types.Message, state: FSMContext) -> None:
         """Handle drop floor value input"""
         await manager.settings_handler.save_drop_floor(message, state)
+
+    async def handle_chart_threshold_input(message: types.Message, state: FSMContext) -> None:
+        """Handle global chart threshold input."""
+        await manager.settings_handler.save_chart_threshold(message, state)
+
+    async def handle_chart_bot_input(message: types.Message, state: FSMContext) -> None:
+        """Handle global chart bot ID input."""
+        await manager.settings_handler.save_chart_bot(message, state)
 
     async def handle_gain_template_input(message: types.Message, state: FSMContext) -> None:
         """Handle global gain template text input"""
@@ -85,6 +97,18 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
     dispatcher.message.register(
         handle_drop_floor_input,
         StateFilter("awaiting_drop_floor"),
+        F.from_user.id.in_(settings_cfg.admin_telegram_ids_list),
+    )
+
+    dispatcher.message.register(
+        handle_chart_threshold_input,
+        StateFilter("awaiting_global_chart_threshold"),
+        F.from_user.id.in_(settings_cfg.admin_telegram_ids_list),
+    )
+
+    dispatcher.message.register(
+        handle_chart_bot_input,
+        StateFilter("awaiting_global_chart_bot"),
         F.from_user.id.in_(settings_cfg.admin_telegram_ids_list),
     )
 
