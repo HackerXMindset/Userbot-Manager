@@ -19,7 +19,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from app.config import get_gain_alert_template_text
+from app.config import get_gain_alert_template_text, get_chart_guardrails
 from app.gain_alert_templates import (
     missing_required_placeholders,
     normalise_template,
@@ -1074,7 +1074,7 @@ class GainAlertsHandler:
                 await query.answer("Monitored source not found.", show_alert=True)
                 return
 
-            text, keyboard = self._build_chart_settings_view(
+            text, keyboard = await self._build_chart_settings_view(
                 context["entry"],
                 context.get("chart_bot_display"),
             )
@@ -1477,7 +1477,62 @@ class GainAlertsHandler:
         await self.show_chart_groups_menu(query)
 
     # --------------------------------------------------------------------- #
-    # Helper utilities
+
+    GUARDRAIL_METRICS = (
+        "min_age_minutes",
+        "min_liquidity_usd",
+        "min_volume_usd",
+        "min_multiplier",
+        "max_price_change_pct",
+        "checks_required",
+    )
+
+    def _format_guardrail_value(self, entry: Dict[str, Any], global_guardrails: Dict[str, Any], metric: str) -> str:
+        """Format a single guardrail value, showing if it's an override."""
+        override = entry.get(f"chart_{metric}")
+        global_value = global_guardrails.get(metric, 0)
+
+        if override is None:
+            value = global_value
+            label = "<i>(global)</i>"
+        else:
+            value = override
+            label = "<b>✏️ override</b>"
+
+        if metric == "min_age_minutes":
+            return f"<code>{int(value)} min</code> {label}"
+        if metric in ("min_liquidity_usd", "min_volume_usd"):
+            return f"<code>{self._format_guardrail_currency(value)}</code> {label}"
+        if metric == "min_multiplier":
+            return f"<code>x{value:.2f}</code> {label}"
+        if metric == "max_price_change_pct":
+            return f"<code>{value:.1f}%</code> {label}"
+        if metric == "checks_required":
+            total_checks = len(self.GUARDRAIL_METRICS)
+            strategy = self._describe_guardrail_strategy(int(value), total_checks)
+            return f"<code>{int(value)}/{total_checks}</code> {label}"
+        return f"<code>{value}</code> {label}"
+
+    def _describe_guardrail_strategy(self, checks_required: int, total_checks: int) -> str:
+        """Generate guardrail strategy description."""
+        if checks_required <= 0 or checks_required >= total_checks:
+            return "All checks must pass"
+        return f"Require any {checks_required} of {total_checks} checks"
+
+    @staticmethod
+    def _format_guardrail_currency(value: float) -> str:
+        """Format a guardrail USD threshold."""
+        try:
+            decimal_value = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return "$0"
+        
+        quantised = decimal_value.quantize(Decimal("0.01"))
+        formatted = format(quantised, ",.2f")
+        if formatted.endswith(".00"):
+            formatted = formatted[:-3]
+        return f"${formatted}"
+
     # --------------------------------------------------------------------- #
 
     def _group_sources(self, sources: List[Dict[str, Any]]) -> OrderedDict[int, Dict[str, Any]]:
@@ -1503,6 +1558,12 @@ class GainAlertsHandler:
                 "chart_enabled": bool(row.get("chart_enabled")) if row.get("chart_enabled") is not None else False,
                 "chart_bot_id": row.get("chart_bot_id"),
                 "chart_mc_threshold": row.get("chart_mc_threshold"),
+                "chart_min_age_minutes": row.get("chart_min_age_minutes"),
+                "chart_min_liquidity_usd": row.get("chart_min_liquidity_usd"),
+                "chart_min_volume_usd": row.get("chart_min_volume_usd"),
+                "chart_min_multiplier": row.get("chart_min_multiplier"),
+                "chart_max_price_change_pct": row.get("chart_max_price_change_pct"),
+                "chart_checks_required": row.get("chart_checks_required"),
             })
             entry["records"].append(row)
             entry["token_sum"] += int(row.get("token_count") or 0)
@@ -1527,6 +1588,20 @@ class GainAlertsHandler:
                 entry["chart_bot_id"] = row.get("chart_bot_id")
             if "chart_mc_threshold" in row:
                 entry["chart_mc_threshold"] = row.get("chart_mc_threshold")
+
+            # Guardrail overrides
+            if row.get("chart_min_age_minutes") is not None:
+                entry["chart_min_age_minutes"] = row.get("chart_min_age_minutes")
+            if row.get("chart_min_liquidity_usd") is not None:
+                entry["chart_min_liquidity_usd"] = row.get("chart_min_liquidity_usd")
+            if row.get("chart_min_volume_usd") is not None:
+                entry["chart_min_volume_usd"] = row.get("chart_min_volume_usd")
+            if row.get("chart_min_multiplier") is not None:
+                entry["chart_min_multiplier"] = row.get("chart_min_multiplier")
+            if row.get("chart_max_price_change_pct") is not None:
+                entry["chart_max_price_change_pct"] = row.get("chart_max_price_change_pct")
+            if row.get("chart_checks_required") is not None:
+                entry["chart_checks_required"] = row.get("chart_checks_required")
 
             if row.get("target_count") is not None:
                 entry["target_count"] = int(row.get("target_count") or 0)
@@ -1883,6 +1958,16 @@ class GainAlertsHandler:
                 lines.append(f"• Chart Bot ID: {bot_id_int}")
         else:
             lines.append("• Chart Bot: Not configured")
+        
+        # Display the last guardrail evaluation result
+        last_guardrail_result = entry.get("last_guardrail_result")
+        if last_guardrail_result:
+            passed = last_guardrail_result.get("passed", False)
+            checks_passed = last_guardrail_result.get("checks_passed", 0)
+            total_checks = last_guardrail_result.get("total_checks", 0)
+            lines.append(f"• Last Guardrail Eval: {'✅ PASS' if passed else '❌ FAIL'} ({checks_passed}/{total_checks} checks passed)")
+        else:
+            lines.append("• Last Guardrail Eval: N/A (no evaluations yet)")
         lines.append("")
 
         template_text = entry.get("template_text")
@@ -1936,7 +2021,7 @@ class GainAlertsHandler:
             formatted = formatted[:-3]
         return f"${formatted}"
 
-    def _build_chart_settings_view(
+    async def _build_chart_settings_view(
         self,
         entry: Dict[str, Any],
         chart_bot_display: Optional[str],
@@ -1948,54 +2033,142 @@ class GainAlertsHandler:
         chart_bot_id = entry.get("chart_bot_id")
 
         threshold_text = (
-            f"{self._format_chart_threshold(self.DEFAULT_CHART_THRESHOLD)} (default)"
+            f"{self._format_chart_threshold(self.DEFAULT_CHART_THRESHOLD)} <i>(default)</i>"
             if threshold is None
             else self._format_chart_threshold(threshold)
         )
 
+        # Basic settings section
         lines = [
             "<b>📊 Chart Alert Settings</b>",
+            "━━━━━━━━━━━━━━━━━━━━",
             "",
-            f"Current Status: {'✅ Enabled' if chart_enabled else '⛔️ Disabled'}",
-            f"MC Threshold: {threshold_text}",
+            f"<b>Status:</b> {'✅ Enabled' if chart_enabled else '⛔️ Disabled'}",
+            f"<b>MC Threshold:</b> {threshold_text}",
         ]
 
         if chart_bot_id:
             bot_id_int = int(chart_bot_id)
             if chart_bot_display:
-                lines.append(f"Chart Bot: {chart_bot_display} (ID: {bot_id_int})")
+                lines.append(f"<b>Chart Bot:</b> {chart_bot_display}")
             else:
-                lines.append(f"Chart Bot ID: {bot_id_int}")
+                lines.append(f"<b>Chart Bot:</b> ID {bot_id_int}")
         else:
-            lines.append("Chart Bot: Not configured")
+            lines.append("<b>Chart Bot:</b> <i>Not configured</i>")
 
-        lines.append("")
-        lines.append("Adjust chart behaviour using the buttons below.")
+        # Guardrails section
+        lines.extend([
+            "",
+            "<b>🛡️ Chart Guardrails</b>",
+            "━━━━━━━━━━━━━━━━━━━━",
+        ])
 
-        keyboard = self._build_chart_settings_keyboard(chat_id, chart_enabled)
+        global_guardrails = await get_chart_guardrails()
+
+        # Metric display names with emojis
+        metric_labels = {
+            "min_age_minutes": "⏰ Token Age",
+            "min_liquidity_usd": "💧 Liquidity",
+            "min_volume_usd": "📊 Volume",
+            "min_multiplier": "📈 Multiplier",
+            "max_price_change_pct": "⚡ Price Stability",
+            "checks_required": "✅ Checks Required",
+        }
+
+        # Parse last guardrail result for per-metric status
+        last_result = entry.get("last_guardrail_result")
+        metric_status = {}
+        if last_result and isinstance(last_result, dict):
+            checks = last_result.get("checks", [])
+            for check in checks:
+                metric_name = check.get("name")
+                if metric_name:
+                    metric_status[metric_name] = {
+                        "passed": check.get("passed", False),
+                        "actual": check.get("actual_value"),
+                        "threshold": check.get("threshold_value"),
+                        "reason": check.get("reason")
+                    }
+
+        for metric in self.GUARDRAIL_METRICS:
+            metric_label = metric_labels.get(metric, metric.replace("_", " ").title())
+            value_str = self._format_guardrail_value(entry, global_guardrails, metric)
+            lines.append(f"  {metric_label}: {value_str}")
+
+            # Add last check result if available
+            if metric in metric_status:
+                status = metric_status[metric]
+                if status["passed"]:
+                    lines.append(f"     └ 🟢 Last check passed")
+                else:
+                    reason = status.get("reason", "Failed")
+                    lines.append(f"     └ 🔴 {reason}")
+
+        lines.extend([
+            "",
+            "<i>💡 Tip: Set overrides to customize this source</i>",
+        ])
+
+        keyboard = self._build_chart_settings_keyboard(chat_id, chart_enabled, entry, global_guardrails)
         return "\n".join(lines), keyboard
 
-    def _build_chart_settings_keyboard(self, chat_id: int, enabled: bool) -> InlineKeyboardMarkup:
+    def _build_chart_settings_keyboard(self, chat_id: int, enabled: bool, entry: Dict[str, Any], global_guardrails: Dict[str, Any]) -> InlineKeyboardMarkup:
         """Inline keyboard for chart settings menu."""
-        toggle_text = "⛔️ Disable Chart Alerts" if enabled else "✅ Enable Chart Alerts"
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text=toggle_text,
-                callback_data=f"gain_alerts:view:chart_toggle:{chat_id}"
-            )],
-            [InlineKeyboardButton(
-                text="💰 Set MC Threshold",
-                callback_data=f"gain_alerts:view:chart_threshold:{chat_id}"
-            )],
-            [InlineKeyboardButton(
-                text="🤖 Set Chart Bot ID",
-                callback_data=f"gain_alerts:view:chart_bot:{chat_id}"
-            )],
-            [InlineKeyboardButton(
-                text="🔙 Back to Detail",
-                callback_data=f"gain_alerts:view:{chat_id}"
-            )],
-        ])
+        # Basic settings row
+        toggle_text = "⛔️ Disable" if enabled else "✅ Enable"
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    text=toggle_text,
+                    callback_data=f"gain_alerts:view:chart_toggle:{chat_id}"
+                ),
+                InlineKeyboardButton(
+                    text="💰 MC Threshold",
+                    callback_data=f"gain_alerts:view:chart_threshold:{chat_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🤖 Chart Bot ID",
+                    callback_data=f"gain_alerts:view:chart_bot:{chat_id}"
+                )
+            ],
+        ]
+
+        # Guardrails section with compact labels
+        metric_labels = {
+            "min_age_minutes": "⏰ Token Age",
+            "min_liquidity_usd": "💧 Liquidity",
+            "min_volume_usd": "📊 Volume",
+            "min_multiplier": "📈 Multiplier",
+            "max_price_change_pct": "⚡ Stability",
+            "checks_required": "✅ Checks",
+        }
+
+        for metric in self.GUARDRAIL_METRICS:
+            metric_label = metric_labels.get(metric, metric.replace("_", " ").title())
+            override = entry.get(f"chart_{metric}")
+
+            # Show ✏️ if has override, otherwise just the label
+            edit_text = f"{metric_label} ✏️" if override is not None else metric_label
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=edit_text,
+                    callback_data=f"gain_alerts:edit_override:{chat_id}:{metric}"
+                ),
+                InlineKeyboardButton(
+                    text="↩️ Reset",
+                    callback_data=f"gain_alerts:reset_override:{chat_id}:{metric}"
+                ) if override is not None else InlineKeyboardButton(text="—", callback_data="noop")
+            ])
+
+        keyboard.append([InlineKeyboardButton(
+            text="🔙 Back",
+            callback_data=f"gain_alerts:view:{chat_id}"
+        )])
+
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     def _build_source_detail_keyboard(self, entry: Dict[str, Any], userbot_lookup: Dict[int, str]) -> InlineKeyboardMarkup:
         """Construct inline keyboard for source detail view."""
@@ -2298,7 +2471,7 @@ class GainAlertsHandler:
             )
             return
 
-        text, keyboard = self._build_chart_settings_view(
+        text, keyboard = await self._build_chart_settings_view(
             context["entry"],
             context.get("chart_bot_display"),
         )
@@ -2370,6 +2543,266 @@ class GainAlertsHandler:
                 return
             logger.warning("Failed to refresh detail message for chat %s: %s", source_chat_id, exc)
             raise
+
+    async def prompt_edit_source_guardrail(self, query: types.CallbackQuery, state: FSMContext, chat_id: int, metric: str) -> None:
+        """Prompt admin to set a new value for a specific chart guardrail override."""
+        try:
+            context = await self._build_detail_context(chat_id, query.bot)
+            if context is None:
+                await query.answer("Monitored source not found.", show_alert=True)
+                return
+
+            entry = context["entry"]
+
+            # Get current value - from either the override or global default
+            current_override = entry.get(f"chart_{metric}")
+            global_guardrails = await get_chart_guardrails()
+            global_value = global_guardrails.get(metric, 0)
+
+            # Build prompt based on metric (matching global settings style)
+            if metric == "min_age_minutes":
+                current_val = int(current_override) if current_override is not None else int(global_value)
+                override_note = " <i>(override)</i>" if current_override is not None else " <i>(global)</i>"
+                prompt = f"Enter new minimum age in minutes (e.g., 30 for 30 minutes):\n\nCurrent: {current_val} minutes{override_note}"
+            elif metric == "min_liquidity_usd":
+                current_val = current_override if current_override is not None else global_value
+                override_note = " <i>(override)</i>" if current_override is not None else " <i>(global)</i>"
+                prompt = f"Enter new minimum liquidity in USD (e.g., 5000 for $5,000):\n\nCurrent: {self._format_guardrail_currency(current_val)}{override_note}"
+            elif metric == "min_volume_usd":
+                current_val = current_override if current_override is not None else global_value
+                override_note = " <i>(override)</i>" if current_override is not None else " <i>(global)</i>"
+                prompt = f"Enter new minimum 24h volume in USD (e.g., 10000 for $10,000):\n\nCurrent: {self._format_guardrail_currency(current_val)}{override_note}"
+            elif metric == "min_multiplier":
+                current_val = current_override if current_override is not None else global_value
+                override_note = " <i>(override)</i>" if current_override is not None else " <i>(global)</i>"
+                prompt = f"Enter new minimum multiplier (e.g., 1.5 for 1.5x):\n\nCurrent: x{current_val:.2f}{override_note}"
+            elif metric == "max_price_change_pct":
+                current_val = current_override if current_override is not None else global_value
+                override_note = " <i>(override)</i>" if current_override is not None else " <i>(global)</i>"
+                prompt = f"Enter new max price change percentage (e.g., 50 for 50%):\n\nCurrent: {current_val:.1f}%{override_note}"
+            elif metric == "checks_required":
+                total_checks = len(self.GUARDRAIL_METRICS)
+                current_val = int(current_override) if current_override is not None else int(global_value)
+                override_note = " <i>(override)</i>" if current_override is not None else " <i>(global)</i>"
+                prompt = f"Enter how many checks must pass (1 to {total_checks}):\n\n0 or {total_checks} = All must pass\n\nCurrent: {self._describe_guardrail_strategy(current_val, total_checks)}{override_note}"
+            else:
+                await query.answer("Unknown metric.", show_alert=True)
+                return
+
+            # Setup state for the edit operation
+            await state.clear()
+            await state.set_state(ManagementStates.awaiting_source_guardrail_override)
+            await state.update_data(
+                chat_id=chat_id,
+                metric=metric,
+                detail_chat_id=query.message.chat.id,
+                detail_message_id=query.message.message_id,
+            )
+
+            await query.message.edit_text(
+                f"<b>📊 Edit Chart Guardrail Override</b>\n\n{prompt}\n\n<i>Type 'clear' to remove override</i>",
+                reply_markup=self.keyboards.cancel_button(f"gain_alerts:chart_settings:cancel:{chat_id}"),
+                parse_mode="HTML",
+            )
+            await query.answer()
+        except Exception as exc:
+            logger.error("Error starting guardrail override editor for %s metric %s: %s", chat_id, metric, exc, exc_info=True)
+            await query.answer("❌ Failed to start guardrail editor", show_alert=True)
+
+    async def save_source_guardrail(self, message: types.Message, state: FSMContext) -> None:
+        """Validate and save the new guardrail override value."""
+        try:
+            data = await state.get_data()
+            chat_id = data.get("chat_id")
+            metric = data.get("metric")
+
+            if not chat_id or not metric:
+                await message.answer("Error: Could not determine which setting to update.")
+                await state.clear()
+                return
+
+            raw_value = message.text.strip() if message.text else ""
+
+            # Check for clear command
+            if raw_value.lower() == "clear":
+                await self.db.execute(
+                    f"UPDATE monitored_sources SET chart_{metric} = NULL WHERE chat_id = $1",
+                    chat_id
+                )
+                await message.answer(f"✅ Guardrail '{metric.replace('_', ' ').title()}' override cleared.")
+            else:
+                # Validate and parse value (matching settings handler logic)
+                if metric in ("min_age_minutes", "checks_required"):
+                    value = int(raw_value)
+                else:
+                    value = float(raw_value.replace("$", "").replace(",", ""))
+
+                # Save the override
+                await self.db.execute(
+                    f"UPDATE monitored_sources SET chart_{metric} = $1 WHERE chat_id = $2",
+                    value,
+                    chat_id
+                )
+                await message.answer(f"✅ Guardrail '{metric.replace('_', ' ').title()}' override updated.")
+
+            await state.clear()
+
+            # Refresh chart settings view
+            detail_chat_id = data.get("detail_chat_id")
+            detail_message_id = data.get("detail_message_id")
+            if detail_chat_id and detail_message_id:
+                await self._render_chart_settings_view(
+                    message.bot,
+                    source_chat_id=chat_id,
+                    detail_chat_id=detail_chat_id,
+                    detail_message_id=detail_message_id,
+                )
+
+        except (ValueError, TypeError):
+            await message.answer("❌ Invalid input. Please enter a valid number.")
+        except Exception as exc:
+            logger.error("Error saving guardrail override: %s", exc, exc_info=True)
+            await message.answer("❌ Error saving setting.")
+
+    async def reset_source_guardrail(self, query: types.CallbackQuery, chat_id: int, metric: str) -> None:
+        """Clear the override value for a specific chart guardrail."""
+        try:
+            # Clear the override by setting it to NULL
+            await self.db.execute(
+                f"UPDATE monitored_sources SET chart_{metric} = NULL WHERE chat_id = $1",
+                chat_id
+            )
+
+            await query.answer(f"✅ Override cleared", show_alert=False)
+
+            # Refresh the chart settings view
+            context = await self._build_detail_context(chat_id, query.bot)
+            if context is not None:
+                text, keyboard = await self._build_chart_settings_view(
+                    context["entry"],
+                    context.get("chart_bot_display"),
+                )
+
+                await query.message.edit_text(
+                    text,
+                    reply_markup=keyboard,
+                    parse_mode="HTML",
+                )
+        except Exception as exc:
+            logger.error("Error resetting guardrail override for %s metric %s: %s", chat_id, metric, exc, exc_info=True)
+            await query.answer("❌ Failed to reset override", show_alert=True)
+
+    def _format_guardrail_value_for_input(self, metric: str, value: Any, is_override: bool = True) -> str:
+        """Format a guardrail value for display in prompts."""
+        try:
+            if metric == "min_age_minutes":
+                return f"{int(value)} min"
+            elif metric in ("min_liquidity_usd", "min_volume_usd"):
+                try:
+                    decimal_value = Decimal(str(value))
+                except (InvalidOperation, TypeError, ValueError):
+                    return f"${value}"
+                
+                decimal_value = decimal_value.quantize(Decimal("0.01"))
+                formatted = format(decimal_value, ",.2f")
+                if formatted.endswith(".00"):
+                    formatted = formatted[:-3]
+                return f"${formatted}"
+            elif metric == "min_multiplier":
+                return f"x{float(value):.2f}"
+            elif metric == "max_price_change_pct":
+                return f"{float(value):.1f}%"
+            elif metric == "checks_required":
+                if value == 0:
+                    return "All checks (0)"
+                else:
+                    total_checks = len(self.GUARDRAIL_METRICS)
+                    return f"Any {int(value)} of {total_checks}"
+            else:
+                return str(value)
+        except:
+            return str(value)
+
+    async def parse_guardrail_value(self, metric: str, raw_input: str) -> Optional[Any]:
+        """Parse a raw input string into the appropriate guardrail value type."""
+        try:
+            raw_input = raw_input.strip()
+            
+            if metric == "min_age_minutes":
+                # Parse as integer (minutes)
+                return int(float(raw_input))  # Convert through float to handle decimal inputs like "5.0"
+            elif metric in ("min_liquidity_usd", "min_volume_usd"):
+                # Parse as numeric value, allow k/m/b suffixes
+                cleaned = raw_input.lower().replace(",", "").replace("_", "")
+                multiplier = Decimal("1")
+                
+                if cleaned.endswith("k"):
+                    multiplier = Decimal("1000")
+                    cleaned = cleaned[:-1]
+                elif cleaned.endswith("m"):
+                    multiplier = Decimal("1000000")
+                    cleaned = cleaned[:-1]
+                elif cleaned.endswith("b"):
+                    multiplier = Decimal("1000000000")
+                    cleaned = cleaned[:-1]
+                
+                cleaned = cleaned.strip()
+                if cleaned.startswith("$"):
+                    cleaned = cleaned[1:]
+                
+                decimal_value = Decimal(cleaned) * multiplier
+                return float(decimal_value)
+            elif metric == "min_multiplier":
+                # Parse as float
+                return float(raw_input)
+            elif metric == "max_price_change_pct":
+                # Parse as float, remove % if present
+                cleaned = raw_input.replace("%", "").strip()
+                return float(cleaned)
+            elif metric == "checks_required":
+                # Parse as integer
+                value = int(float(raw_input))
+                # Validate it's between 0 and 5 (the actual number of checks)
+                if value < 0 or value > 5:
+                    return None
+                return value
+            else:
+                return None
+        except (ValueError, InvalidOperation):
+            return None
+
+    async def validate_guardrail_value(self, metric: str, value: Any) -> bool:
+        """Validate a guardrail value against business rules."""
+        try:
+            if metric == "min_age_minutes":
+                return value >= 0
+            elif metric in ("min_liquidity_usd", "min_volume_usd"):
+                return value >= 0
+            elif metric == "min_multiplier":
+                return value >= 1.0
+            elif metric == "max_price_change_pct":
+                return 0 <= value <= 100
+            elif metric == "checks_required":
+                # 0 means all checks, 1-5 means number of checks that must pass
+                return 0 <= value <= 5
+            else:
+                return False
+        except (TypeError, ValueError):
+            return False
+
+    async def save_guardrail_override(self, chat_id: int, metric: str, value: Optional[Any]) -> None:
+        """Save a guardrail override to the database."""
+        # Map the metric name to the database column name
+        column_name = f"chart_{metric}"
+        
+        # Update all source records for this chat ID
+        query = f"""
+            UPDATE monitored_sources 
+            SET {column_name} = $1 
+            WHERE chat_id = $2
+        """
+        async with self.db.acquire() as conn:
+            await conn.execute(query, value, chat_id)
 
     def _show_add_entry_summary(self, data: Dict[str, Any]) -> str:
         """Generate confirmation summary text."""

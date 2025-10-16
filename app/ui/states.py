@@ -106,3 +106,15 @@ class ManagementStates(StatesGroup):
     gain_alerts_edit_chart_threshold = State()
     gain_alerts_edit_chart_bot = State()
     chart_groups_add_chat_id = State()
+
+    # Chart Guardrails
+    awaiting_guardrail_value = State()
+    awaiting_source_guardrail_override = State()
+
+    # Settings
+    awaiting_gain_threshold = State()
+    awaiting_drop_threshold = State()
+    awaiting_drop_floor = State()
+    awaiting_global_chart_threshold = State()
+    awaiting_global_chart_bot = State()
+    awaiting_gain_template = State()

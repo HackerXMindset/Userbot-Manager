@@ -22,3 +22,4 @@ class ManagementRouterContext:
     manager: Any
     cleanup_service: Any
     system_manager: Optional[Any] = None
+    settings_handler: Optional[Any] = None

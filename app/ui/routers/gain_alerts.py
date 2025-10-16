@@ -378,6 +378,38 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
 
         await query.answer("❌ Invalid selection.", show_alert=True)
 
+    async def edit_override_callback(query: types.CallbackQuery, state: FSMContext) -> None:
+        """Handle edit override callbacks."""
+        parts = query.data.split(":")
+        if len(parts) < 4 or parts[1] != "edit_override":
+            await query.answer("❌ Invalid selection.", show_alert=True)
+            return
+
+        try:
+            chat_id = int(parts[2])
+            metric = parts[3]
+        except (ValueError, IndexError):
+            await query.answer("❌ Invalid identifier.", show_alert=True)
+            return
+
+        await handler.prompt_edit_source_guardrail(query, state, chat_id, metric)
+
+    async def reset_override_callback(query: types.CallbackQuery, state: FSMContext) -> None:
+        """Handle reset override callbacks."""
+        parts = query.data.split(":")
+        if len(parts) < 4 or parts[1] != "reset_override":
+            await query.answer("❌ Invalid selection.", show_alert=True)
+            return
+
+        try:
+            chat_id = int(parts[2])
+            metric = parts[3]
+        except (ValueError, IndexError):
+            await query.answer("❌ Invalid identifier.", show_alert=True)
+            return
+
+        await handler.reset_source_guardrail(query, chat_id, metric)
+
     async def chart_threshold_message(message: types.Message, state: FSMContext) -> None:
         """Handle chart MC threshold input."""
         await handler.handle_chart_threshold_input(message, state)
@@ -395,6 +427,8 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
     dispatcher.callback_query.register(confirm_add_callback, F.data == "gain_alerts:add:confirm", admin_filter)
     dispatcher.callback_query.register(chart_groups_callback, F.data.startswith("gain_alerts:chart_groups:"), admin_filter)
     dispatcher.callback_query.register(chart_settings_callback, F.data.startswith("gain_alerts:chart_settings:"), admin_filter)
+    dispatcher.callback_query.register(edit_override_callback, F.data.startswith("gain_alerts:edit_override:"), admin_filter)
+    dispatcher.callback_query.register(reset_override_callback, F.data.startswith("gain_alerts:reset_override:"), admin_filter)
 
     # Message handlers for stateful input
     dispatcher.message.register(chat_id_message, StateFilter(ManagementStates.gain_alerts_add_chat_id), admin_filter)
@@ -404,6 +438,11 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
     dispatcher.message.register(edit_template_message, StateFilter(ManagementStates.gain_alerts_edit_template), admin_filter)
     dispatcher.message.register(chart_group_input_message, StateFilter(ManagementStates.chart_groups_add_chat_id), admin_filter)
     dispatcher.message.register(chart_threshold_message, StateFilter(ManagementStates.gain_alerts_edit_chart_threshold), admin_filter)
+    async def save_source_guardrail_message(message: types.Message, state: FSMContext) -> None:
+        """Handle guardrail override value input."""
+        await handler.save_source_guardrail(message, state)
+
     dispatcher.message.register(chart_bot_message, StateFilter(ManagementStates.gain_alerts_edit_chart_bot), admin_filter)
+    dispatcher.message.register(save_source_guardrail_message, StateFilter(ManagementStates.awaiting_source_guardrail_override), admin_filter)
 
     logger.info("Gain alerts router registered")

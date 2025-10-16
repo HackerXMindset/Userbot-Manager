@@ -1,121 +1,142 @@
 """
-Settings routing module - Routes settings-related callbacks
+UI Router for Settings
 """
 
-import logging
-from aiogram import Dispatcher, F, types
+from aiogram import Dispatcher, Router, F
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
+from aiogram.types import Message, CallbackQuery
 
-from .context import ManagementRouterContext
+from app.ui.handlers.settings import SettingsHandler
+from app.ui.states import ManagementStates
+from app.ui.routers.context import ManagementRouterContext
 
-logger = logging.getLogger(__name__)
+def setup_settings_router(dispatcher: Dispatcher, context: ManagementRouterContext):
+    """Register all handlers for the settings sections."""
+    handler = context.settings_handler
+    router = Router()
 
+    # Admin filter - only admin users can access settings
+    admin_filter = F.from_user.id.in_(context.settings.admin_telegram_ids_list)
 
-def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
-    """Register settings handlers"""
-
-    settings_cfg = context.settings
-    manager = context.manager
-
-    async def handle_settings_callbacks(query: types.CallbackQuery, state: FSMContext) -> None:
-        """Route settings callback queries"""
-        parts = query.data.split(":")
-        action = parts[1] if len(parts) > 1 else ""
-
-        if action == "main":
-            await manager.settings_handler.show_settings_menu(query)
-        elif action == "gain_alerts":
-            await manager.settings_handler.show_gain_alert_settings(query)
-        elif action == "edit_gain_threshold":
-            await manager.settings_handler.prompt_edit_gain_threshold(query, state)
-        elif action == "edit_drop_threshold":
-            await manager.settings_handler.prompt_edit_drop_threshold(query, state)
-        elif action == "edit_drop_floor":
-            await manager.settings_handler.prompt_edit_drop_floor(query, state)
-        elif action == "edit_chart_threshold":
-            await manager.settings_handler.prompt_edit_chart_threshold(query, state)
-        elif action == "edit_chart_bot":
-            await manager.settings_handler.prompt_edit_chart_bot(query, state)
-        elif action == "edit_gain_template":
-            await manager.settings_handler.prompt_edit_gain_template(query, state)
-        elif action == "token_status":
-            await manager.settings_handler.show_token_status_menu(query)
-        elif action == "scheduler_overview":
-            await manager.settings_handler.show_scheduler_overview(query)
-        elif action == "tokens_list":
-            # Format: settings:tokens_list:active:1
-            status = parts[2] if len(parts) > 2 else "active"
-            page = int(parts[3]) if len(parts) > 3 else 1
-            await manager.settings_handler.show_tokens_list(query, status, page)
-
-    async def handle_gain_threshold_input(message: types.Message, state: FSMContext) -> None:
-        """Handle gain threshold value input"""
-        await manager.settings_handler.save_gain_threshold(message, state)
-
-    async def handle_drop_threshold_input(message: types.Message, state: FSMContext) -> None:
-        """Handle drop threshold value input"""
-        await manager.settings_handler.save_drop_threshold(message, state)
-
-    async def handle_drop_floor_input(message: types.Message, state: FSMContext) -> None:
-        """Handle drop floor value input"""
-        await manager.settings_handler.save_drop_floor(message, state)
-
-    async def handle_chart_threshold_input(message: types.Message, state: FSMContext) -> None:
-        """Handle global chart threshold input."""
-        await manager.settings_handler.save_chart_threshold(message, state)
-
-    async def handle_chart_bot_input(message: types.Message, state: FSMContext) -> None:
-        """Handle global chart bot ID input."""
-        await manager.settings_handler.save_chart_bot(message, state)
-
-    async def handle_gain_template_input(message: types.Message, state: FSMContext) -> None:
-        """Handle global gain template text input"""
-        await manager.settings_handler.save_gain_template(message, state)
-
-    # Register callback query handlers
-    dispatcher.callback_query.register(
-        handle_settings_callbacks,
-        F.data.startswith("settings:"),
-        F.from_user.id.in_(settings_cfg.admin_telegram_ids_list),
+    # Register handlers with the router
+    router.callback_query.register(
+        handler.show_settings_menu,
+        F.data.startswith("settings:main"),
+        admin_filter
     )
 
-    # Register message handlers for awaiting input states
-    from aiogram.filters import StateFilter
-
-    dispatcher.message.register(
-        handle_gain_threshold_input,
-        StateFilter("awaiting_gain_threshold"),
-        F.from_user.id.in_(settings_cfg.admin_telegram_ids_list),
+    router.callback_query.register(
+        handler.show_gain_alert_settings,
+        F.data.startswith("settings:gain_alerts"),
+        admin_filter
     )
 
-    dispatcher.message.register(
-        handle_drop_threshold_input,
-        StateFilter("awaiting_drop_threshold"),
-        F.from_user.id.in_(settings_cfg.admin_telegram_ids_list),
+    # Edit Gain/Drop Thresholds
+    router.callback_query.register(
+        handler.prompt_edit_gain_threshold,
+        F.data.startswith("settings:edit_gain_threshold"),
+        admin_filter
+    )
+    router.message.register(
+        handler.save_gain_threshold,
+        StateFilter(ManagementStates.awaiting_gain_threshold),
+        admin_filter
     )
 
-    dispatcher.message.register(
-        handle_drop_floor_input,
-        StateFilter("awaiting_drop_floor"),
-        F.from_user.id.in_(settings_cfg.admin_telegram_ids_list),
+    router.callback_query.register(
+        handler.prompt_edit_drop_threshold,
+        F.data.startswith("settings:edit_drop_threshold"),
+        admin_filter
+    )
+    router.message.register(
+        handler.save_drop_threshold,
+        StateFilter(ManagementStates.awaiting_drop_threshold),
+        admin_filter
     )
 
-    dispatcher.message.register(
-        handle_chart_threshold_input,
-        StateFilter("awaiting_global_chart_threshold"),
-        F.from_user.id.in_(settings_cfg.admin_telegram_ids_list),
+    router.callback_query.register(
+        handler.prompt_edit_drop_floor,
+        F.data.startswith("settings:edit_drop_floor"),
+        admin_filter
+    )
+    router.message.register(
+        handler.save_drop_floor,
+        StateFilter(ManagementStates.awaiting_drop_floor),
+        admin_filter
     )
 
-    dispatcher.message.register(
-        handle_chart_bot_input,
-        StateFilter("awaiting_global_chart_bot"),
-        F.from_user.id.in_(settings_cfg.admin_telegram_ids_list),
+    # Edit Chart Threshold & Bot
+    router.callback_query.register(
+        handler.prompt_edit_chart_threshold,
+        F.data.startswith("settings:edit_chart_threshold"),
+        admin_filter
+    )
+    router.message.register(
+        handler.save_chart_threshold,
+        StateFilter(ManagementStates.awaiting_global_chart_threshold),
+        admin_filter
     )
 
-    dispatcher.message.register(
-        handle_gain_template_input,
-        StateFilter("awaiting_gain_template"),
-        F.from_user.id.in_(settings_cfg.admin_telegram_ids_list),
+    router.callback_query.register(
+        handler.prompt_edit_chart_bot,
+        F.data.startswith("settings:edit_chart_bot"),
+        admin_filter
+    )
+    router.message.register(
+        handler.save_chart_bot,
+        StateFilter(ManagementStates.awaiting_global_chart_bot),
+        admin_filter
     )
 
-    logger.info("Settings router registered")
+    # Edit Gain Template
+    router.callback_query.register(
+        handler.prompt_edit_gain_template,
+        F.data.startswith("settings:edit_gain_template"),
+        admin_filter
+    )
+    router.message.register(
+        handler.save_gain_template,
+        StateFilter(ManagementStates.awaiting_gain_template),
+        admin_filter
+    )
+
+    # Edit Guardrails
+    async def edit_guardrail_callback(query: CallbackQuery, state: FSMContext) -> None:
+        metric = query.data.split(":")[-1]
+        await handler.prompt_edit_guardrail(query, state, metric=metric)
+
+    router.callback_query.register(
+        edit_guardrail_callback,
+        F.data.startswith("settings:edit_guardrail:"),
+        admin_filter
+    )
+    router.message.register(
+        handler.save_guardrail_value,
+        StateFilter(ManagementStates.awaiting_guardrail_value),
+        admin_filter
+    )
+
+    # Token Status
+    router.callback_query.register(
+        handler.show_token_status_menu,
+        F.data.startswith("settings:token_status"),
+        admin_filter
+    )
+    router.callback_query.register(
+        handler.show_scheduler_overview,
+        F.data.startswith("settings:scheduler_overview"),
+        admin_filter
+    )
+    async def tokens_list_callback(query: CallbackQuery) -> None:
+        status = query.data.split(":")[-2]
+        page = int(query.data.split(":")[-1])
+        await handler.show_tokens_list(query, status=status, page=page)
+
+    router.callback_query.register(
+        tokens_list_callback,
+        F.data.startswith("settings:tokens_list:"),
+        admin_filter
+    )
+
+    dispatcher.include_router(router)

@@ -70,6 +70,7 @@ class ManagementBot(ScheduleMixin):
             manager=self,
             cleanup_service=self.cleanup_service,
             system_manager=self.system_manager,
+            settings_handler=self.settings_handler,
         )
 
         register_management_routes(self.dp, router_context)

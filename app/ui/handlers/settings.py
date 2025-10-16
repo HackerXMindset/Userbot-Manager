@@ -5,19 +5,24 @@ Settings Handler - Manages gain alert threshold configuration
 import logging
 import html
 from decimal import Decimal, InvalidOperation
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
-from aiogram import types
+from aiogram import types, Router
 from aiogram.fsm.context import FSMContext
+from aiogram.filters import StateFilter, Command
+
+from app.ui.states import ManagementStates
 
 from app.ui.keyboards import Keyboards
 from app.config import (
     get_gain_alert_settings,
     get_gain_alert_template_text,
     get_global_chart_settings,
+    get_chart_guardrails,
     set_gain_alert_template_text,
     set_global_chart_threshold,
     set_global_chart_bot_id,
+    set_chart_guardrails,
 )
 from app.gain_alert_templates import (
     DEFAULT_GAIN_ALERT_TEMPLATE,
@@ -34,6 +39,15 @@ logger = logging.getLogger(__name__)
 class SettingsHandler:
     """Handler for system settings"""
 
+    GUARDRAIL_METRICS = (
+        "min_age_minutes",
+        "min_liquidity_usd",
+        "min_volume_usd",
+        "min_multiplier",
+        "max_price_change_pct",
+        "checks_required",
+    )
+
     def __init__(self, db_pool, keyboards: Keyboards):
         self.db = db_pool
         self.keyboards = keyboards
@@ -48,6 +62,7 @@ class SettingsHandler:
         chart_threshold: Decimal,
         chart_threshold_override: bool,
         chart_bot_id: Optional[int],
+        guardrails: Dict[str, float],
     ) -> str:
         """Render the gain alert settings summary block."""
         template_preview = html.escape(template_text)
@@ -59,6 +74,8 @@ class SettingsHandler:
             chart_bot_display = f"ID {chart_bot_id}"
         else:
             chart_bot_display = "Not configured"
+
+        guardrail_summary = self._compose_guardrail_summary(guardrails)
 
         return (
             "<b>🌙 Gain Alert Settings</b>\n\n"
@@ -73,10 +90,27 @@ class SettingsHandler:
             f"  └ Charts trigger when current MC meets or exceeds this value\n\n"
             f"<b>🤖 Chart Bot ID:</b> {chart_bot_display}\n"
             "  └ Defaults used when monitored sources do not override it\n\n"
+            "<b>📊 Chart Guardrails</b>\n"
+            f"{guardrail_summary}\n\n"
             "<i>Tap a setting to edit it.</i>\n\n"
             "<b>Current Alert Template</b>\n"
             f"<code>{template_preview}</code>"
         )
+
+    def _compose_guardrail_summary(self, guardrails: Dict[str, float]) -> str:
+        """Format the guardrail configuration into human-readable lines."""
+        total_checks = len(self.GUARDRAIL_METRICS)
+        checks_required = int(guardrails.get("checks_required", 0) or 0)
+
+        lines = [
+            f"  ├ Minimum Age: {int(guardrails.get('min_age_minutes', 0))} minutes",
+            f"  ├ Minimum Liquidity: {self._format_guardrail_currency(guardrails.get('min_liquidity_usd', 0))}",
+            f"  ├ Minimum Volume (24h): {self._format_guardrail_currency(guardrails.get('min_volume_usd', 0))}",
+            f"  ├ Minimum Multiplier: x{guardrails.get('min_multiplier', 0):.2f}",
+            f"  ├ Max Price Change: {guardrails.get('max_price_change_pct', 0):.1f}%",
+            f"  └ Strategy: {self._describe_guardrail_strategy(checks_required, total_checks)}",
+        ]
+        return "\n".join(lines)
 
     @staticmethod
     def _format_currency(value: Decimal) -> str:
@@ -86,6 +120,35 @@ class SettingsHandler:
         if formatted.endswith(".00"):
             formatted = formatted[:-3]
         return f"${formatted}"
+
+    @staticmethod
+    def _format_guardrail_currency(value: float) -> str:
+        """Format a guardrail USD threshold."""
+        try:
+            decimal_value = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return "$0"
+        return SettingsHandler._format_currency(decimal_value)
+
+    def _describe_guardrail_strategy(self, checks_required: int, total_checks: int) -> str:
+        """Generate guardrail strategy description."""
+        if checks_required <= 0 or checks_required >= total_checks:
+            return "All checks must pass"
+        return f"Require any {checks_required} of {total_checks} checks"
+
+    def _build_guardrail_button_labels(self, guardrails: Dict[str, float]) -> Dict[str, str]:
+        """Prepare label text for guardrail edit buttons."""
+        labels = {
+            "min_age_minutes": f"{int(guardrails.get('min_age_minutes', 0))}m",
+            "min_liquidity_usd": self._format_guardrail_currency(guardrails.get("min_liquidity_usd", 0)),
+            "min_volume_usd": self._format_guardrail_currency(guardrails.get("min_volume_usd", 0)),
+            "min_multiplier": f"x{guardrails.get('min_multiplier', 0):.2f}",
+            "max_price_change_pct": f"{guardrails.get('max_price_change_pct', 0):.1f}%",
+            "checks_required": self._describe_guardrail_strategy(
+                int(guardrails.get("checks_required", 0) or 0), len(self.GUARDRAIL_METRICS)
+            ),
+        }
+        return labels
 
     async def _build_gain_alert_settings_view(self) -> Tuple[str, types.InlineKeyboardMarkup]:
         """Compose the gain alert settings overview text and keyboard."""
@@ -97,6 +160,7 @@ class SettingsHandler:
         global_template = await get_gain_alert_template_text()
         chart_group_count = await self.chart_group_model.count_groups()
         chart_settings = await get_global_chart_settings()
+        guardrails = await get_chart_guardrails()
 
         chart_override: Optional[Decimal] = chart_settings.get('chart_threshold_override')
         chart_default: Decimal = chart_settings['chart_threshold_default']
@@ -117,7 +181,10 @@ class SettingsHandler:
             effective_chart_threshold,
             chart_override is not None,
             chart_bot_id,
+            guardrails,
         )
+
+        guardrail_labels = self._build_guardrail_button_labels(guardrails)
 
         keyboard = self.keyboards.gain_alert_settings_menu(
             gain_threshold,
@@ -126,9 +193,15 @@ class SettingsHandler:
             chart_group_count,
             threshold_label,
             chart_bot_label,
+            guardrail_labels,
         )
 
         return text, keyboard
+
+    async def _send_gain_alert_settings_overview(self, target: types.Message) -> None:
+        """Send the refreshed gain alert settings overview to the given target."""
+        text, keyboard = await self._build_gain_alert_settings_view()
+        await target.answer(text, reply_markup=keyboard)
 
     async def show_settings_menu(self, query: types.CallbackQuery):
         """Show main settings menu"""
@@ -170,7 +243,7 @@ class SettingsHandler:
                 f"will be sent when the market cap rises 30% above the last alert level.</i>",
                 reply_markup=self.keyboards.cancel_button("settings:gain_alerts")
             )
-            await state.set_state("awaiting_gain_threshold")
+            await state.set_state(ManagementStates.awaiting_gain_threshold)
             await query.answer()
         except Exception as e:
             logger.error(f"Error prompting gain threshold edit: {e}")
@@ -190,7 +263,7 @@ class SettingsHandler:
                 f"A 70% threshold means monitoring stops when MC falls to 70% of the first seen value.</i>",
                 reply_markup=self.keyboards.cancel_button("settings:gain_alerts")
             )
-            await state.set_state("awaiting_drop_threshold")
+            await state.set_state(ManagementStates.awaiting_drop_threshold)
             await query.answer()
         except Exception as e:
             logger.error(f"Error prompting drop threshold edit: {e}")
@@ -210,7 +283,7 @@ class SettingsHandler:
                 f"regardless of percentage thresholds.</i>",
                 reply_markup=self.keyboards.cancel_button("settings:gain_alerts")
             )
-            await state.set_state("awaiting_drop_floor")
+            await state.set_state(ManagementStates.awaiting_drop_floor)
             await query.answer()
         except Exception as e:
             logger.error(f"Error prompting drop floor edit: {e}")
@@ -243,7 +316,7 @@ class SettingsHandler:
                 reply_markup=self.keyboards.cancel_button("settings:gain_alerts"),
                 parse_mode="HTML",
             )
-            await state.set_state("awaiting_gain_template")
+            await state.set_state(ManagementStates.awaiting_gain_template)
             await query.answer()
         except Exception as exc:
             logger.error(f"Error prompting global template edit: {exc}")
@@ -270,7 +343,7 @@ class SettingsHandler:
                 reply_markup=self.keyboards.cancel_button("settings:gain_alerts"),
                 parse_mode="HTML",
             )
-            await state.set_state("awaiting_global_chart_threshold")
+            await state.set_state(ManagementStates.awaiting_global_chart_threshold)
             await query.answer()
         except Exception as exc:
             logger.error("Error prompting global chart threshold edit: %s", exc)
@@ -292,7 +365,7 @@ class SettingsHandler:
                 reply_markup=self.keyboards.cancel_button("settings:gain_alerts"),
                 parse_mode="HTML",
             )
-            await state.set_state("awaiting_global_chart_bot")
+            await state.set_state(ManagementStates.awaiting_global_chart_bot)
             await query.answer()
         except Exception as exc:
             logger.error("Error prompting global chart bot edit: %s", exc)
@@ -458,6 +531,79 @@ class SettingsHandler:
         except Exception as exc:
             logger.error("Error saving global chart bot ID: %s", exc)
             await message.answer("❌ Error saving chart bot ID")
+
+    async def prompt_edit_guardrail(
+        self, query: types.CallbackQuery, state: FSMContext, metric: str
+    ):
+        """Prompt user to edit a specific guardrail value."""
+        try:
+            guardrails = await get_chart_guardrails()
+            current_value = guardrails.get(metric, 0)
+
+            # Customise prompt based on metric
+            if metric == "min_age_minutes":
+                prompt = f"Enter new minimum age in minutes (e.g., 30 for 30 minutes):\n\nCurrent: {int(current_value)} minutes"
+            elif metric == "min_liquidity_usd":
+                prompt = f"Enter new minimum liquidity in USD (e.g., 5000 for $5,000):\n\nCurrent: {self._format_guardrail_currency(current_value)}"
+            elif metric == "min_volume_usd":
+                prompt = f"Enter new minimum 24h volume in USD (e.g., 10000 for $10,000):\n\nCurrent: {self._format_guardrail_currency(current_value)}"
+            elif metric == "min_multiplier":
+                prompt = f"Enter new minimum multiplier (e.g., 1.5 for 1.5x):\n\nCurrent: x{current_value:.2f}"
+            elif metric == "max_price_change_pct":
+                prompt = f"Enter new max price change percentage (e.g., 50 for 50%):\n\nCurrent: {current_value:.1f}%"
+            elif metric == "checks_required":
+                total_checks = len(self.GUARDRAIL_METRICS)
+                prompt = f"Enter how many checks must pass (1 to {total_checks}):\n\n0 or {total_checks} = All must pass\n\nCurrent: {self._describe_guardrail_strategy(int(current_value), total_checks)}"
+            else:
+                await query.answer("Unknown metric.", show_alert=True)
+                return
+
+            await query.message.edit_text(
+                f"<b>📊 Edit Chart Guardrail</b>\n\n{prompt}",
+                reply_markup=self.keyboards.cancel_button("settings:gain_alerts"),
+            )
+            await state.set_state(ManagementStates.awaiting_guardrail_value)
+            await state.update_data(metric_to_edit=metric)
+            await query.answer()
+        except Exception as e:
+            logger.error(f"Error prompting guardrail edit for {metric}: {e}")
+            await query.answer("❌ Error", show_alert=True)
+
+    async def save_guardrail_value(self, message: types.Message, state: FSMContext):
+        """Save an updated guardrail value from user input."""
+        try:
+            data = await state.get_data()
+            metric = data.get("metric_to_edit")
+            if not metric:
+                await message.answer("Error: Could not determine which setting to update.")
+                await state.clear()
+                return
+
+            raw_value = message.text.strip()
+            
+            # Validate and parse value
+            if metric in ("min_age_minutes", "checks_required"):
+                value = int(raw_value)
+            else:
+                value = float(raw_value.replace("$", "").replace(",", ""))
+
+            # Update guardrails
+            guardrails = await get_chart_guardrails()
+            guardrails[metric] = value
+            await set_chart_guardrails(guardrails)
+
+            await message.answer(f"✅ Guardrail '{metric.replace('_', ' ').title()}' updated.")
+            await state.clear()
+
+            # Refresh settings view
+            text, keyboard = await self._build_gain_alert_settings_view()
+            await message.answer(text, reply_markup=keyboard)
+
+        except (ValueError, TypeError):
+            await message.answer("❌ Invalid input. Please enter a valid number.")
+        except Exception as e:
+            logger.error(f"Error saving guardrail value: {e}")
+            await message.answer("❌ Error saving setting.")
 
     async def save_gain_template(self, message: types.Message, state: FSMContext) -> None:
         """Persist the updated global gain alert template."""

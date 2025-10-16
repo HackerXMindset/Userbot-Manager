@@ -98,6 +98,7 @@ DROP_FLOOR_MC_DEFAULT = 8000.0     # $8,000 absolute floor
 GAIN_ALERT_TEMPLATE_KEY = "gain_alert_template"
 GLOBAL_CHART_THRESHOLD_KEY = "chart_global_mc_threshold"
 GLOBAL_CHART_BOT_ID_KEY = "chart_global_bot_id"
+CHART_GUARDRAILS_KEY = "chart_guardrails"
 DEFAULT_GLOBAL_CHART_THRESHOLD = Decimal("100000")
 
 # Market cap validation bounds
@@ -106,6 +107,22 @@ MAX_VALID_MARKET_CAP = 1_000_000_000_000.0  # $1T maximum
 
 # In-memory cache for global gain alert template
 _GAIN_TEMPLATE_CACHE: Optional[str] = None
+DEFAULT_CHART_GUARDRAILS: Dict[str, Any] = {
+    "min_age_minutes": 5,
+    "min_liquidity_usd": 10_000,
+    "min_volume_usd": 5_000,
+    "min_multiplier": 1.5,
+    "max_price_change_pct": 50,
+    "checks_required": 0,
+}
+_GUARDRAIL_SOURCE_MAP = {
+    "min_age_minutes": "chart_min_age_minutes",
+    "min_liquidity_usd": "chart_min_liquidity_usd",
+    "min_volume_usd": "chart_min_volume_usd",
+    "min_multiplier": "chart_min_multiplier",
+    "max_price_change_pct": "chart_max_price_change_pct",
+    "checks_required": "chart_checks_required",
+}
 
 async def get_gain_alert_settings():
     """
@@ -307,3 +324,122 @@ def clear_gain_alert_template_cache() -> None:
     """Clear the in-memory cache for the gain alert template."""
     global _GAIN_TEMPLATE_CACHE
     _GAIN_TEMPLATE_CACHE = None
+
+
+def _coerce_guardrail_value(key: str, value: Any) -> Any:
+    """Normalise guardrail values loaded from the database or user input."""
+    if value is None:
+        return None
+
+    if key in {"min_age_minutes", "checks_required"}:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid integer for {key}: {value}")
+
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid number for {key}: {value}")
+
+    return numeric
+
+
+async def get_chart_guardrails() -> Dict[str, Any]:
+    """Load the global chart guardrail configuration."""
+    from app.db import db
+
+    guardrails = DEFAULT_CHART_GUARDRAILS.copy()
+
+    try:
+        raw_value = await db.fetchval(
+            "SELECT value FROM settings WHERE key = $1",
+            CHART_GUARDRAILS_KEY,
+        )
+    except Exception as exc:
+        logging.warning("Failed to load chart guardrails from DB (%s); using defaults.", exc)
+        return guardrails
+
+    if raw_value is None:
+        return guardrails
+
+    if isinstance(raw_value, str):
+        try:
+            raw_value = json.loads(raw_value)
+        except json.JSONDecodeError:
+            logging.warning("Chart guardrails stored as invalid JSON string; using defaults.")
+            return guardrails
+
+    if not isinstance(raw_value, dict):
+        logging.warning(
+            "Unexpected chart guardrails payload type %s; using defaults.",
+            type(raw_value).__name__,
+        )
+        return guardrails
+
+    for key, default_value in DEFAULT_CHART_GUARDRAILS.items():
+        if key not in raw_value or raw_value[key] is None:
+            continue
+        try:
+            guardrails[key] = _coerce_guardrail_value(key, raw_value[key])
+        except ValueError as exc:
+            logging.warning("Invalid chart guardrail value for %s: %s (fallback=%s)", key, exc, default_value)
+
+    return guardrails
+
+
+async def set_chart_guardrails(updates: Dict[str, Any]) -> None:
+    """Persist updates to the global chart guardrail configuration."""
+    from app.db import db
+
+    if not isinstance(updates, dict):
+        raise ValueError("Chart guardrail updates must be provided as a dict.")
+
+    current = await get_chart_guardrails()
+    merged = current.copy()
+
+    for key, value in updates.items():
+        if key not in DEFAULT_CHART_GUARDRAILS:
+            logging.debug("Ignoring unknown guardrail key %s", key)
+            continue
+        if value is None:
+            merged[key] = DEFAULT_CHART_GUARDRAILS[key]
+            continue
+        merged[key] = _coerce_guardrail_value(key, value)
+
+    await db.execute(
+        """
+        INSERT INTO settings (key, value)
+        VALUES ($1, $2::jsonb)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """,
+        CHART_GUARDRAILS_KEY,
+        json.dumps(merged),
+    )
+
+
+async def resolve_chart_guardrails(source: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Resolve guardrail configuration, applying per-source overrides when available.
+    """
+    guardrails = await get_chart_guardrails()
+
+    if not source:
+        return guardrails
+
+    overrides: Dict[str, Any] = {}
+    for key, source_field in _GUARDRAIL_SOURCE_MAP.items():
+        if source_field in source and source[source_field] is not None:
+            overrides[key] = source[source_field]
+
+    if not overrides:
+        return guardrails
+
+    merged = guardrails.copy()
+    for key, value in overrides.items():
+        try:
+            merged[key] = _coerce_guardrail_value(key, value)
+        except ValueError as exc:
+            logging.warning("Invalid override for %s: %s (keeping global value)", key, exc)
+
+    return merged

@@ -926,9 +926,10 @@ class Keyboards:
         chart_group_count: int,
         chart_threshold_label: str,
         chart_bot_label: str,
+        guardrail_labels: Dict[str, str],
     ) -> InlineKeyboardMarkup:
         """Gain alert settings menu with current values"""
-        return InlineKeyboardMarkup(inline_keyboard=[
+        keyboard = [
             [InlineKeyboardButton(
                 text=f"📈 Gain Threshold: {gain_threshold*100:.0f}%",
                 callback_data="settings:edit_gain_threshold"
@@ -949,6 +950,36 @@ class Keyboards:
                 text=f"🤖 Set Chart Bot ID ({chart_bot_label})",
                 callback_data="settings:edit_chart_bot"
             )],
+            [
+                InlineKeyboardButton(
+                    text=f"Age: {guardrail_labels['min_age_minutes']}",
+                    callback_data="settings:edit_guardrail:min_age_minutes"
+                ),
+                InlineKeyboardButton(
+                    text=f"Liq: {guardrail_labels['min_liquidity_usd']}",
+                    callback_data="settings:edit_guardrail:min_liquidity_usd"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Vol: {guardrail_labels['min_volume_usd']}",
+                    callback_data="settings:edit_guardrail:min_volume_usd"
+                ),
+                InlineKeyboardButton(
+                    text=f"MC x: {guardrail_labels['min_multiplier']}",
+                    callback_data="settings:edit_guardrail:min_multiplier"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Price Δ: {guardrail_labels['max_price_change_pct']}",
+                    callback_data="settings:edit_guardrail:max_price_change_pct"
+                ),
+                InlineKeyboardButton(
+                    text=f"Strat: {guardrail_labels['checks_required']}",
+                    callback_data="settings:edit_guardrail:checks_required"
+                ),
+            ],
             [InlineKeyboardButton(
                 text="📝 Edit Alert Template",
                 callback_data="settings:edit_gain_template"
@@ -958,7 +989,8 @@ class Keyboards:
                 callback_data="gain_alerts:chart_groups:menu"
             )],
             [InlineKeyboardButton(text="🔙 Back", callback_data="settings:main")]
-        ])
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
     def token_status_menu() -> InlineKeyboardMarkup:

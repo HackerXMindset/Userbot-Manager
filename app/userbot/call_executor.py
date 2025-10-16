@@ -231,37 +231,81 @@ class CallExecutor:
             logger.error(f"Error getting group targets: {e}")
             return []
     
-    async def _log_successful_call(self, group_id: int, token_address: str, 
+    async def _log_successful_call(self, group_id: int, token_address: str,
                                   target_chat_id: int, message_id: int):
         """Log a successful call to the database"""
         try:
             # Get or create token record first
             token_record = await db.fetchrow("""
-                INSERT INTO tokens_tracked (address, source_group_id) 
-                VALUES ($1, $2) 
-                ON CONFLICT (address) DO UPDATE SET 
+                INSERT INTO tokens_tracked (address, source_group_id)
+                VALUES ($1, $2)
+                ON CONFLICT (address) DO UPDATE SET
                     last_checked_at = NOW(),
                     source_group_id = COALESCE(tokens_tracked.source_group_id, $2)
                 RETURNING id, source_group_id
             """, token_address, group_id)
-            
-            # Get target record  
+
+            # Get target record
             target_record = await db.fetchrow("""
                 SELECT id, group_id FROM targets WHERE group_id = $1 AND dest_chat_id = $2
             """, group_id, target_chat_id)
-            
+
             if not target_record:
                 logger.warning(f"No target record found for group {group_id} and chat {target_chat_id}")
                 return
-            
-            # Log successful call
+
+            # Log to OLD calls table (legacy)
             await db.execute("""
-                INSERT INTO calls (group_id, token_id, target_id, userbot_id, 
+                INSERT INTO calls (group_id, token_id, target_id, userbot_id,
                                  scheduled_at, sent_at, status, message_id)
                 VALUES ($1, $2, $3, $4, NOW(), NOW(), 'sent', $5)
-            """, target_record['group_id'], token_record['id'], 
+            """, target_record['group_id'], token_record['id'],
                 target_record['id'], self.userbot_id, message_id)
-            
+
+            # ALSO log to NEW token_call_history table for inspector
+            # Get source chat info from group
+            group_record = await db.fetchrow("""
+                SELECT tg_chat_id, display_name, title FROM groups WHERE id = $1
+            """, group_id)
+
+            source_chat_id = group_record['tg_chat_id'] if group_record else group_id
+            source_name = (group_record.get('display_name') or group_record.get('title')) if group_record else f"Group {group_id}"
+
+            await db.execute("""
+                INSERT INTO token_call_history (
+                    token_address,
+                    caller_user_id,
+                    caller_name,
+                    source_chat_id,
+                    source_name,
+                    source_type,
+                    target_chat_id,
+                    forwarding_userbot_id,
+                    routing_rule_id,
+                    curated_alpha_rule_id,
+                    market_cap_at_call,
+                    call_job_id,
+                    forwarded_message_id,
+                    called_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+            """,
+                token_address,           # token_address
+                None,                    # caller_user_id (unknown in legacy path)
+                None,                    # caller_name (unknown in legacy path)
+                source_chat_id,          # source_chat_id
+                source_name,             # source_name
+                'group',                 # source_type (assume group for legacy)
+                target_chat_id,          # target_chat_id
+                self.userbot_id,         # forwarding_userbot_id
+                None,                    # routing_rule_id (unknown in legacy path)
+                None,                    # curated_alpha_rule_id (unknown in legacy path)
+                None,                    # market_cap_at_call (unknown in legacy path)
+                None,                    # call_job_id (not from queue)
+                message_id               # forwarded_message_id
+            )
+
+            logger.debug(f"Logged legacy call to both tables: {token_address[:8]}... → {target_chat_id}")
+
         except Exception as e:
             logger.error(f"Error logging successful call: {e}")
     

@@ -7,6 +7,7 @@ polling intervals. Handles gain alert triggers and stop-loss conditions.
 
 import asyncio
 import heapq
+import json
 import logging
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timedelta, timezone
@@ -31,6 +32,8 @@ from app.gain_alert_templates import (
     missing_required_placeholders,
 )
 from app.chart_fetcher import ChartFetcher
+from app.config import resolve_chart_guardrails
+from app.chart_guardrail_evaluator import evaluate_chart_guardrails, format_guardrail_summary
 
 logger = logging.getLogger(__name__)
 
@@ -653,49 +656,137 @@ class DexScreenerService:
                 elif chart_threshold is None:
                     chart_threshold = self.DEFAULT_CHART_THRESHOLD
 
+                # Evaluate chart guardrails and store the result
                 chart_bytes: Optional[bytes] = None
                 if chart_enabled_flag and chart_bot_id_value:
                     if current_mc >= chart_threshold:
-                        if self.chart_fetcher:
+                        # Get source record to resolve guardrails
+                        source_records = await self.source_model.get_by_chat(chat_id)
+                        source_record = None
+                        if source_records:
+                            # Find the relevant source record for this specific token tracking
+                            for record in source_records:
+                                if (record.get('user_id') == group.get('original_user_id') or 
+                                    (record.get('user_id') is None and group.get('original_user_id') is None)):
+                                    source_record = record
+                                    break
+                        
+                        # Resolve guardrail configuration (global + overrides)
+                        guardrails = await resolve_chart_guardrails(source_record)
+                        
+                        # Fetch token data for guardrail evaluation
+                        token_data = await db.fetchrow("SELECT * FROM tokens_tracked WHERE address = $1", address)
+                        if not token_data:
+                            logger.warning("[CHART_GUARDRAIL] Token data not found for %s", address[:8])
+                        else:
+                            # Fetch DexScreener pair data for evaluation
+                            pair_data = None
                             try:
-                                logger.info(
-                                    "[CHART_ALERT] Fetching chart for %s (chat %s, threshold=%s, current_mc=%s)",
-                                    address[:8],
-                                    chat_id,
-                                    chart_threshold,
-                                    current_mc,
+                                # Determine chain for API call
+                                chain_id = self._normalise_chain_id(token_data.get('chain') or token_data.get('blockchain'), address)
+                                pairs = await self.dex_client.fetch_token_pairs(address, chain_id=chain_id, use_cache=False)
+                                if pairs:
+                                    pair_data = self.dex_client._select_preferred_pair(pairs)
+                            except Exception as exc:
+                                logger.warning("[CHART_GUARDRAIL] Error fetching pair data for %s: %s", address[:8], exc)
+
+                            # Evaluate chart guardrails
+                            first_seen_at = token_data.get('first_seen_at')
+                            first_seen_mc = token_data.get('first_seen_mc', Decimal(0))
+                            
+                            result = await evaluate_chart_guardrails(
+                                token_data=token_data,
+                                pair_data=pair_data,
+                                guardrails=guardrails,
+                                current_mc=current_mc,
+                                first_seen_mc=first_seen_mc,
+                                first_seen_at=first_seen_at,
+                                address=address,
+                            )
+                            
+                            # Store the result in the monitored source record
+                            if source_record and source_record.get('id'):
+                                # Prepare a simplified version of the result that can be JSON serialized
+                                result_dict = {
+                                    'passed': result.passed,
+                                    'checks_passed': result.checks_passed,
+                                    'checks_required': result.checks_required,
+                                    'total_checks': len(result.checks),
+                                    'checks': [
+                                        {
+                                            'name': check.name,
+                                            'passed': check.passed,
+                                            'actual_value': str(check.actual_value),
+                                            'threshold_value': str(check.threshold_value),
+                                            'reason': check.reason
+                                        }
+                                        for check in result.checks
+                                    ]
+                                }
+                                await db.execute(
+                                    """
+                                    UPDATE monitored_sources
+                                    SET last_guardrail_result = $1::jsonb
+                                    WHERE id = $2
+                                    """,
+                                    json.dumps(result_dict),
+                                    source_record['id']
                                 )
-                                chart_bytes = await self.chart_fetcher.fetch_chart_for_token(
-                                    contract_address=address,
-                                    chart_bot_id=int(chart_bot_id_value),
+                                logger.debug(
+                                    "[CHART_GUARDRAIL] Stored result for source %s: %s", 
+                                    source_record['id'], 
+                                    'PASS' if result.passed else 'FAIL'
                                 )
-                                if chart_bytes:
-                                    logger.info(
-                                        "[CHART_ALERT] Chart fetched for %s (chat %s, bytes=%d)",
-                                        address[:8],
-                                        chat_id,
-                                        len(chart_bytes),
-                                    )
+
+                            # Only fetch chart if guardrails pass
+                            if result.passed:
+                                if self.chart_fetcher:
+                                    try:
+                                        logger.info(
+                                            "[CHART_ALERT] Fetching chart for %s (chat %s, threshold=%s, current_mc=%s)",
+                                            address[:8],
+                                            chat_id,
+                                            chart_threshold,
+                                            current_mc,
+                                        )
+                                        chart_bytes = await self.chart_fetcher.fetch_chart_for_token(
+                                            contract_address=address,
+                                            chart_bot_id=int(chart_bot_id_value),
+                                        )
+                                        if chart_bytes:
+                                            logger.info(
+                                                "[CHART_ALERT] Chart fetched for %s (chat %s, bytes=%d)",
+                                                address[:8],
+                                                chat_id,
+                                                len(chart_bytes),
+                                            )
+                                        else:
+                                            logger.warning(
+                                                "[CHART_ALERT] Chart fetch returned no image for %s (chat %s)",
+                                                address[:8],
+                                                chat_id,
+                                            )
+                                    except Exception as exc:
+                                        logger.error(
+                                            "[CHART_ALERT] Error fetching chart for %s (chat %s): %s",
+                                            address[:8],
+                                            chat_id,
+                                            exc,
+                                            exc_info=True,
+                                        )
+                                        chart_bytes = None
                                 else:
                                     logger.warning(
-                                        "[CHART_ALERT] Chart fetch returned no image for %s (chat %s)",
-                                        address[:8],
+                                        "[CHART_ALERT] ChartFetcher unavailable; cannot fetch chart for chat %s",
                                         chat_id,
                                     )
-                            except Exception as exc:
-                                logger.error(
-                                    "[CHART_ALERT] Error fetching chart for %s (chat %s): %s",
+                            else:
+                                logger.debug(
+                                    "[CHART_GUARDRAIL] Token %s failed guardrails for chat %s; skipping chart fetch. %s",
                                     address[:8],
                                     chat_id,
-                                    exc,
-                                    exc_info=True,
+                                    format_guardrail_summary(result)
                                 )
-                                chart_bytes = None
-                        else:
-                            logger.warning(
-                                "[CHART_ALERT] ChartFetcher unavailable; cannot fetch chart for chat %s",
-                                chat_id,
-                            )
                     else:
                         logger.debug(
                             "[CHART_ALERT] Current MC %s below chart threshold %s for chat %s; skipping chart fetch",
