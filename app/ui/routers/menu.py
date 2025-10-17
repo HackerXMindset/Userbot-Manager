@@ -110,10 +110,56 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
             await manager.templates_handler.show_templates_root(query)
         elif action == "settings":
             await manager.settings_handler.show_settings_menu(query)
+        elif action == "commands":
+            await show_commands_help(query)
         elif action == "close":
             await query.message.delete()
 
         await query.answer()
+
+    async def show_commands_help(query: types.CallbackQuery) -> None:
+        """Show all available admin commands"""
+        try:
+            await query.message.edit_text(
+                "📚 <b>Available Admin Commands</b>\n\n"
+
+                "🔍 <b>Token Inspector</b>\n"
+                "<code>/i &lt;ca&gt;</code> - Inspect token details\n"
+                "Shows 4 pages: Overview, Sources, Targets, Call Activity\n\n"
+
+                "🎯 <b>Trigger Gain Alert</b>\n"
+                "<code>/tri &lt;ca&gt; [p] [c]</code> - Force gain alert\n"
+                "<code>/tri &lt;group_id&gt; &lt;ca&gt; [p] [c]</code> - To specific group\n"
+                "Flags: <code>p</code>=peak MC, <code>c</code>=include chart\n\n"
+
+                "🔄 <b>Restart Monitoring</b>\n"
+                "<code>/str &lt;ca&gt; [tier]</code> - Restart stopped token\n"
+                "Tiers: tier_a (10s) to tier_f (30min)\n\n"
+
+                "⛔ <b>Stop Monitoring</b>\n"
+                "<code>/stop &lt;ca&gt;</code> - Stop tracking token\n\n"
+
+                "🎛 <b>Management</b>\n"
+                "<code>/menu</code> or <code>/start</code> - Show main menu\n"
+                "<code>/all</code> - Show this command list\n\n"
+
+                "📖 <b>Examples:</b>\n"
+                "• <code>/i HnKk7xPZmL...</code>\n"
+                "• <code>/tri HnKk7... p c</code>\n"
+                "• <code>/tri -1001234567890 HnKk7... c</code>\n"
+                "• <code>/str HnKk7... tier_c</code>\n"
+                "• <code>/stop HnKk7...</code>\n\n"
+
+                "💡 <b>Tips:</b>\n"
+                "• CA = Contract Address\n"
+                "• Use <code>/command</code> without args to see detailed help\n"
+                "• All commands support both Solana & BSC tokens",
+                reply_markup=keyboards.back_button("menu:main"),
+                parse_mode='HTML'
+            )
+        except Exception as error:  # pragma: no cover - logging only
+            logger.error("Error showing commands help: %s", error)
+            await query.answer("❌ Error loading commands", show_alert=True)
 
     dispatcher.message.register(
         cmd_menu,

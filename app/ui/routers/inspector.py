@@ -41,7 +41,30 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
 
         parts = (message.text or "").split(maxsplit=1)
         if len(parts) < 2:
-            await message.answer("Usage: /i <contract address>")
+            await message.answer(
+                "🔍 <b>Token Inspector Command</b>\n\n"
+                "Inspect detailed information about a tracked token.\n\n"
+
+                "📋 <b>Usage:</b>\n"
+                "<code>/i &lt;contract_address&gt;</code>\n\n"
+
+                "📖 <b>Examples:</b>\n\n"
+                "1️⃣ <b>Inspect Solana token:</b>\n"
+                "   <code>/i HnKk7xPZmL7KRuUg...</code>\n\n"
+
+                "2️⃣ <b>Inspect BSC token:</b>\n"
+                "   <code>/i 0x907D7eE6FB40C...</code>\n\n"
+
+                "📊 <b>Shows:</b>\n"
+                "• Page 1: Overview + Tracking (status, MC, tier)\n"
+                "• Page 2: Monitored Sources (groups watching)\n"
+                "• Page 3: Sources & Targets (where posted)\n"
+                "• Page 4: Call Activity (forwarding history)\n\n"
+
+                "💡 <b>Navigation:</b>\n"
+                "Use emoji buttons to switch between pages",
+                parse_mode='HTML'
+            )
             return
 
         raw_address = parts[1].strip().split()[0]
@@ -83,9 +106,671 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
         await callback.message.edit_text(text, parse_mode='HTML', disable_web_page_preview=True, reply_markup=keyboard)
         await callback.answer()
 
+    async def cmd_restart(message: types.Message) -> None:
+        """Restart monitoring a stopped token with specified tier"""
+        if message.from_user.id not in settings.admin_telegram_ids_list:
+            return
+
+        parts = (message.text or "").split()
+        if len(parts) < 2:
+            await message.answer(
+                "🔄 <b>Restart Token Monitoring</b>\n\n"
+                "Restart monitoring a stopped token with a specific tier.\n\n"
+
+                "📋 <b>Usage:</b>\n"
+                "<code>/str &lt;contract_address&gt; [tier]</code>\n"
+                "<code>/restart &lt;contract_address&gt; [tier]</code>\n\n"
+
+                "🎚️ <b>Available Tiers:</b>\n"
+                "• <code>tier_a</code> - 10s polling (0-10min old tokens)\n"
+                "• <code>tier_b</code> - 30s polling (10-30min old)\n"
+                "• <code>tier_c</code> - 3min polling (30min-2hr old)\n"
+                "• <code>tier_d</code> - 5min polling (2-6hr old)\n"
+                "• <code>tier_e</code> - 10min polling (6-24hr old)\n"
+                "• <code>tier_f</code> - 30min polling (1-7 days old)\n\n"
+
+                "📖 <b>Examples:</b>\n\n"
+                "1️⃣ <b>Restart with default tier (tier_a):</b>\n"
+                "   <code>/str HnKk7xPZmL7...</code>\n\n"
+
+                "2️⃣ <b>Restart with specific tier:</b>\n"
+                "   <code>/str HnKk7xPZmL7... tier_c</code>\n\n"
+
+                "💡 <b>Tips:</b>\n"
+                "• Default tier is <code>tier_a</code> if not specified\n"
+                "• Clears the stop reason\n"
+                "• Sets next poll time immediately",
+                parse_mode='HTML'
+            )
+            return
+
+        raw_address = parts[1].strip()
+        tier = parts[2].lower() if len(parts) > 2 else "tier_a"
+
+        # Validate tier
+        valid_tiers = ['tier_a', 'tier_b', 'tier_c', 'tier_d', 'tier_e', 'tier_f']
+        if tier not in valid_tiers:
+            await message.answer(
+                f"❌ Invalid tier: {html.escape(tier)}\n"
+                f"Valid tiers: {', '.join(valid_tiers)}",
+                parse_mode='HTML'
+            )
+            return
+
+        # Validate address
+        chain = _detect_chain(raw_address, sol_pattern, bnb_pattern)
+        if chain is None:
+            await message.answer("❌ Unrecognised address. Provide a Solana or BNB contract.")
+            return
+
+        # Find token
+        token_record = await token_model.get_by_address(raw_address)
+        if not token_record:
+            await message.answer(f"❌ Token <code>{html.escape(raw_address)}</code> is not in the database.", parse_mode='HTML')
+            return
+
+        token_id = token_record["id"]
+        current_status = token_record.get("status")
+        ticker = token_record.get("ticker") or raw_address[:8]
+
+        # Calculate next poll time based on tier
+        from app.utils.tier_calculator import get_poll_interval_for_tier
+        from datetime import datetime, timedelta, timezone
+
+        poll_interval = get_poll_interval_for_tier(tier)
+        next_poll = datetime.now(timezone.utc) + timedelta(seconds=poll_interval)
+
+        # Restart the token
+        await token_model.set_status(token_id, "active")
+        await token_model.set_stop_reason(token_id, None)  # Clear stop reason
+        await token_model.update_tier(token_id, tier, next_poll)
+
+        # Format response
+        tier_info = {
+            'tier_a': "10s polling (0-10min)",
+            'tier_b': "30s polling (10-30min)",
+            'tier_c': "3min polling (30min-2hr)",
+            'tier_d': "5min polling (2-6hr)",
+            'tier_e': "10min polling (6-24hr)",
+            'tier_f': "30min polling (1-7days)",
+        }
+
+        status_emoji = "🔄" if current_status == "stopped" else "✅"
+        await message.answer(
+            f"{status_emoji} Restarted monitoring token <b>{html.escape(ticker)}</b>\n"
+            f"Address: <code>{html.escape(raw_address)}</code>\n"
+            f"Status: <b>active</b>\n"
+            f"Tier: <b>{tier}</b> ({tier_info.get(tier, 'unknown')})\n"
+            f"Next Poll: {next_poll.strftime('%H:%M:%S UTC')}",
+            parse_mode='HTML'
+        )
+
+    async def cmd_trigger(message: types.Message) -> None:
+        """Trigger forced gain alert in all targets where this token was posted"""
+        if message.from_user.id not in settings.admin_telegram_ids_list:
+            return
+
+        from app.dex import get_dex_service
+        from decimal import Decimal
+
+        parts = (message.text or "").split()
+
+        if len(parts) < 2:
+            await message.answer(
+                "🎯 <b>Trigger Gain Alert Command</b>\n\n"
+                "Force-send gain alerts to target groups where a token was posted.\n\n"
+
+                "📋 <b>Usage:</b>\n"
+                "<code>/tri &lt;contract_address&gt; [flags]</code>\n"
+                "<code>/tri &lt;group_id&gt; &lt;contract_address&gt; [flags]</code>\n\n"
+
+                "🚩 <b>Flags:</b>\n"
+                "  <code>p</code> = Use <b>peak MC</b> instead of current MC\n"
+                "  <code>c</code> = Include <b>chart</b> in alert\n\n"
+
+                "📖 <b>Examples:</b>\n\n"
+                "1️⃣ <b>All targets, current MC, no chart:</b>\n"
+                "   <code>/tri HnKk7xPZmL7...</code>\n\n"
+
+                "2️⃣ <b>All targets, current MC, with chart:</b>\n"
+                "   <code>/tri HnKk7xPZmL7... c</code>\n\n"
+
+                "3️⃣ <b>All targets, peak MC, no chart:</b>\n"
+                "   <code>/tri HnKk7xPZmL7... p</code>\n\n"
+
+                "4️⃣ <b>All targets, peak MC, with chart:</b>\n"
+                "   <code>/tri HnKk7xPZmL7... p c</code>\n\n"
+
+                "5️⃣ <b>Specific group, peak MC, with chart:</b>\n"
+                "   <code>/tri -1001234567890 HnKk7xPZmL7... p c</code>\n\n"
+
+                "💡 <b>Tips:</b>\n"
+                "• Flags can be in any order (<code>c p</code> or <code>p c</code>)\n"
+                "• Each group uses its custom template if configured\n"
+                "• Replies to the original CA message in each group\n"
+                "• Uses assigned userbot or management bot per group settings",
+                parse_mode='HTML'
+            )
+            return
+
+        # Parse arguments: detect if first arg is group_id (numeric) or contract address
+        target_group_id = None
+        raw_address = None
+        include_chart = False
+        use_peak_mc = False
+
+        # Check if first argument looks like a group ID (starts with - or is numeric)
+        first_arg = parts[1].strip()
+        try:
+            # Try to parse as integer (group ID)
+            potential_group_id = int(first_arg)
+            # If successful, this is a group ID
+            if len(parts) < 3:
+                await message.answer(
+                    "❌ Missing contract address after group ID\n"
+                    "Usage: /tri <group_id> <contract_address> [p] [c]",
+                    parse_mode='HTML'
+                )
+                return
+            target_group_id = potential_group_id
+            raw_address = parts[2].strip()
+            # Check for flags in remaining args
+            flags = [p.lower() for p in parts[3:]]
+            include_chart = 'c' in flags
+            use_peak_mc = 'p' in flags or 'peak' in flags
+        except ValueError:
+            # First arg is not numeric, so it's a contract address
+            raw_address = first_arg
+            # Check for flags in remaining args
+            flags = [p.lower() for p in parts[2:]]
+            include_chart = 'c' in flags
+            use_peak_mc = 'p' in flags or 'peak' in flags
+
+        # Validate address format
+        chain = _detect_chain(raw_address, sol_pattern, bnb_pattern)
+        if chain is None:
+            await message.answer("❌ Unrecognised address. Provide a Solana or BNB contract.")
+            return
+
+        try:
+            # Find token in database
+            token = await token_model.get_by_address(raw_address)
+
+            if not token:
+                await message.answer(
+                    f"❌ Token not found: <code>{html.escape(raw_address[:8])}...</code>",
+                    parse_mode='HTML'
+                )
+                return
+
+            token_id = token['id']
+            ticker = token.get('ticker') or raw_address[:8]
+            first_seen_mc = token.get('first_seen_mc') or Decimal(0)
+
+            # Choose MC based on flag
+            if use_peak_mc:
+                chosen_mc = token.get('peak_mc') or Decimal(0)
+                mc_type = "peak"
+            else:
+                chosen_mc = token.get('last_mc') or Decimal(0)
+                mc_type = "current"
+
+            if chosen_mc <= 0 or first_seen_mc <= 0:
+                await message.answer(
+                    f"❌ Cannot trigger alert for <b>{html.escape(ticker)}</b>\n"
+                    f"Missing market cap data ({mc_type} MC or first MC is zero). Token may need to be polled first.",
+                    parse_mode='HTML'
+                )
+                return
+
+            # Get targets where this token was posted with their settings
+            if target_group_id:
+                # Query specific target group with latest message and userbot settings
+                targets = await db.fetch("""
+                    SELECT DISTINCT ON (tch.target_chat_id)
+                        tch.target_chat_id,
+                        tch.forwarded_message_id,
+                        ms.assigned_userbot_id,
+                        ms.use_management_bot,
+                        ms.template_text,
+                        tga.original_user_id,
+                        tga.first_seen_mc AS group_first_seen_mc
+                    FROM token_call_history tch
+                    LEFT JOIN token_group_alerts tga
+                        ON tga.token_id = $3
+                        AND tga.chat_id = tch.target_chat_id
+                    LEFT JOIN monitored_sources ms
+                        ON ms.chat_id = tch.target_chat_id
+                        AND (ms.user_id = tga.original_user_id OR ms.user_id IS NULL)
+                    WHERE LOWER(tch.token_address) = LOWER($1)
+                    AND tch.target_chat_id = $2
+                    ORDER BY tch.target_chat_id, tch.called_at DESC
+                """, raw_address, target_group_id, token_id)
+
+                if not targets:
+                    await message.answer(
+                        f"❌ Token <b>{html.escape(ticker)}</b> was not posted to group <code>{target_group_id}</code>\n"
+                        f"Check the group ID and try again.",
+                        parse_mode='HTML'
+                    )
+                    return
+            else:
+                # Query all targets with latest message and userbot settings
+                targets = await db.fetch("""
+                    SELECT DISTINCT ON (tch.target_chat_id)
+                        tch.target_chat_id,
+                        tch.forwarded_message_id,
+                        ms.assigned_userbot_id,
+                        ms.use_management_bot,
+                        ms.template_text,
+                        tga.original_user_id,
+                        tga.first_seen_mc AS group_first_seen_mc
+                    FROM token_call_history tch
+                    LEFT JOIN token_group_alerts tga
+                        ON tga.token_id = $2
+                        AND tga.chat_id = tch.target_chat_id
+                    LEFT JOIN monitored_sources ms
+                        ON ms.chat_id = tch.target_chat_id
+                        AND (ms.user_id = tga.original_user_id OR ms.user_id IS NULL)
+                    WHERE LOWER(tch.token_address) = LOWER($1)
+                    AND tch.target_chat_id IS NOT NULL
+                    ORDER BY tch.target_chat_id, tch.called_at DESC
+                """, raw_address, token_id)
+
+                if not targets:
+                    await message.answer(
+                        f"❌ No targets found for <b>{html.escape(ticker)}</b>\n"
+                        f"This token has not been posted to any target channels.",
+                        parse_mode='HTML'
+                    )
+                    return
+
+            logger.info(f"[TRIGGER] Found {len(targets)} target(s) for {raw_address[:8]}...")
+
+            target_count = len(targets)
+
+            # Get DexService for alert dispatching (need it early for formatting)
+            dex_service = get_dex_service()
+
+            # Build status message
+            mc_display = f"{mc_type.upper()} MC: {dex_service._format_mc_shorthand(chosen_mc)}"
+
+            if target_group_id:
+                status_msg = (
+                    f"🎯 Triggering forced gain alert for <b>{html.escape(ticker)}</b>\n"
+                    f"📍 Target: <code>{target_group_id}</code> (specific)\n"
+                    f"💰 {mc_display}\n"
+                    f"📊 Chart: {'✅ Enabled' if include_chart else '❌ Disabled'}\n\n"
+                    f"Sending alert..."
+                )
+            else:
+                status_msg = (
+                    f"🎯 Triggering forced gain alert for <b>{html.escape(ticker)}</b>\n"
+                    f"📍 Targets: {target_count} (all)\n"
+                    f"💰 {mc_display}\n"
+                    f"📊 Chart: {'✅ Enabled' if include_chart else '❌ Disabled'}\n\n"
+                    f"Sending alerts..."
+                )
+
+            await message.answer(status_msg, parse_mode='HTML')
+
+            # Get global template as fallback
+            from app.config import get_gain_alert_template_text
+            from app.gain_alert_templates import DEFAULT_GAIN_ALERT_TEMPLATE
+
+            global_template = await get_gain_alert_template_text()
+
+            # Base template values (will be customized per-group for first_market_cap)
+            elapsed = dex_service._format_elapsed_time(token.get('first_seen_at'))
+            base_template_values = {
+                "address": raw_address,
+                "token_symbol": ticker,
+                "elapsed_time": elapsed,
+            }
+
+            # Fetch chart if requested
+            chart_bytes = None
+            if include_chart and dex_service.chart_fetcher:
+                from app.config import get_global_chart_settings
+                chart_config = await get_global_chart_settings()
+                chart_bot_id = chart_config.get('chart_bot_id')
+
+                if chart_bot_id:
+                    try:
+                        logger.info(f"[TRIGGER] Fetching chart for {raw_address[:8]}...")
+                        chart_bytes = await dex_service.chart_fetcher.fetch_chart_for_token(
+                            contract_address=raw_address,
+                            chart_bot_id=int(chart_bot_id),
+                        )
+                        if chart_bytes:
+                            logger.info(f"[TRIGGER] Chart fetched ({len(chart_bytes)} bytes)")
+                    except Exception as exc:
+                        logger.error(f"[TRIGGER] Chart fetch failed: {exc}", exc_info=True)
+
+            # Send alerts to all targets
+            success_count = 0
+            failed_count = 0
+
+            # Cache for workers
+            workers_cache = {}
+
+            for target_row in targets:
+                target_chat_id = target_row['target_chat_id']
+                reply_to_msg_id = target_row['forwarded_message_id']
+                use_management_bot = bool(target_row.get('use_management_bot'))
+                assigned_userbot_id = target_row.get('assigned_userbot_id')
+                custom_template = target_row.get('template_text')
+                group_first_seen_mc = target_row.get('group_first_seen_mc')
+
+                # Use group-specific first_seen_mc if available, otherwise fall back to token's global first_seen_mc
+                if group_first_seen_mc and group_first_seen_mc > 0:
+                    effective_first_mc = Decimal(str(group_first_seen_mc))
+                else:
+                    effective_first_mc = first_seen_mc
+
+                # Calculate multiplier using effective first_seen_mc
+                multiplier_value = float(chosen_mc / effective_first_mc) if effective_first_mc > 0 else 1.0
+
+                logger.debug(
+                    f"[TRIGGER] {target_chat_id}: group_first_mc={group_first_seen_mc}, "
+                    f"token_first_mc={first_seen_mc}, effective={effective_first_mc}, "
+                    f"chosen_mc={chosen_mc}, multiplier={multiplier_value:.2f}x"
+                )
+
+                # Build template values for this group
+                group_template_values = dict(base_template_values)
+                group_template_values.update({
+                    "multiplier": f"{multiplier_value:.1f}x",
+                    "first_market_cap": dex_service._format_mc_shorthand(effective_first_mc),
+                    "current_market_cap": dex_service._format_mc_shorthand(chosen_mc),
+                    "gain_emoji": dex_service._multiplier_to_emoji(multiplier_value),
+                })
+
+                # Select template: custom > global > default
+                template_to_use = custom_template or global_template or DEFAULT_GAIN_ALERT_TEMPLATE
+
+                # Format alert message for this group
+                try:
+                    alert_message = template_to_use.format(**group_template_values)
+                except KeyError as exc:
+                    logger.error(
+                        f"[TRIGGER] Template formatting failed for {target_chat_id}: missing key {exc}"
+                    )
+                    failed_count += 1
+                    continue
+
+                logger.info(
+                    f"[TRIGGER] Sending to {target_chat_id}, "
+                    f"reply_to={reply_to_msg_id}, "
+                    f"use_mgmt_bot={use_management_bot}, "
+                    f"assigned_userbot={assigned_userbot_id}, "
+                    f"custom_template={'Yes' if custom_template else 'No'}"
+                )
+
+                try:
+                    result = None
+
+                    # Determine which bot to use
+                    if use_management_bot:
+                        # Use management bot if configured
+                        if not dex_service.management_bot:
+                            logger.warning(
+                                f"[TRIGGER] Management bot not available for {target_chat_id}, falling back to userbot"
+                            )
+                            use_management_bot = False
+
+                    if use_management_bot:
+                        # Send via management bot
+                        result = await dex_service._send_via_management_bot(
+                            target_chat_id,
+                            alert_message,
+                            reply_to_msg_id,
+                            photo_bytes=chart_bytes,
+                        )
+                    else:
+                        # Send via userbot
+                        if not dex_service.userbot_manager:
+                            logger.error(f"[TRIGGER] No userbot manager available")
+                            failed_count += 1
+                            continue
+
+                        worker = None
+                        if assigned_userbot_id:
+                            worker = dex_service.userbot_manager.get_worker(assigned_userbot_id)
+                            if not worker:
+                                logger.warning(
+                                    f"[TRIGGER] Assigned userbot {assigned_userbot_id} not available, using fallback"
+                                )
+
+                        if not worker:
+                            # Get any available worker
+                            workers = dex_service.userbot_manager.get_all_workers()
+                            if not workers:
+                                logger.error(f"[TRIGGER] No active workers available")
+                                failed_count += 1
+                                continue
+                            worker = next(iter(workers.values()))
+
+                        worker_id = getattr(worker, 'userbot_id', None)
+                        if worker_id is None:
+                            logger.error(f"[TRIGGER] Worker missing userbot_id")
+                            failed_count += 1
+                            continue
+
+                        # Get or create executor for this worker
+                        executor = workers_cache.get(worker_id)
+                        if executor is None:
+                            existing_executor = getattr(worker, 'call_executor', None)
+                            if existing_executor:
+                                executor = existing_executor
+                            else:
+                                from app.userbot.call_executor import CallExecutor
+                                executor = CallExecutor(worker.userbot_id, worker.session_manager)
+                                worker.call_executor = executor
+                            workers_cache[worker_id] = executor
+
+                        # Send via userbot
+                        result = await executor.send_call_message(
+                            target_chat_id=target_chat_id,
+                            message=alert_message,
+                            token_address=raw_address,
+                            reply_to_message_id=reply_to_msg_id,
+                            photo_bytes=chart_bytes,
+                        )
+
+                    if result and result.get('success'):
+                        success_count += 1
+                        logger.info(f"[TRIGGER] Successfully sent to {target_chat_id}")
+                    else:
+                        failed_count += 1
+                        error_text = result.get('error') if result else 'No result'
+                        logger.error(f"[TRIGGER] Failed to send to {target_chat_id}: {error_text}")
+
+                except Exception as exc:
+                    failed_count += 1
+                    logger.error(f"[TRIGGER] Error sending to {target_chat_id}: {exc}", exc_info=True)
+
+            # Report results
+            if success_count > 0:
+                if target_group_id:
+                    result_msg = (
+                        f"✅ Forced gain alert sent!\n\n"
+                        f"<b>{html.escape(ticker)}</b>\n"
+                        f"📍 Target: <code>{target_group_id}</code>\n"
+                        f"✅ Status: Success\n"
+                        f"💰 MC Type: {mc_type.upper()}\n"
+                        f"📊 Chart: {'Included' if chart_bytes else 'Not included'}"
+                    )
+                else:
+                    result_msg = (
+                        f"✅ Forced gain alert sent!\n\n"
+                        f"<b>{html.escape(ticker)}</b>\n"
+                        f"✅ Sent: {success_count}/{target_count}\n"
+                        f"❌ Failed: {failed_count}/{target_count}\n"
+                        f"💰 MC Type: {mc_type.upper()}\n"
+                        f"📊 Chart: {'Included' if chart_bytes else 'Not included'}"
+                    )
+                await message.answer(result_msg, parse_mode='HTML')
+            else:
+                if target_group_id:
+                    await message.answer(
+                        f"❌ Failed to send alert\n\n"
+                        f"Target <code>{target_group_id}</code> failed. Check logs for details.",
+                        parse_mode='HTML'
+                    )
+                else:
+                    await message.answer(
+                        f"❌ Failed to send alerts\n\n"
+                        f"All {target_count} targets failed. Check logs for details.",
+                        parse_mode='HTML'
+                    )
+
+        except Exception as e:
+            logger.error(f"Error in cmd_trigger: {e}", exc_info=True)
+            await message.answer(
+                f"❌ Error triggering alert: {html.escape(str(e))}",
+                parse_mode='HTML'
+            )
+
+    async def cmd_stop(message: types.Message) -> None:
+        """Stop monitoring a token by contract address"""
+        if message.from_user.id not in settings.admin_telegram_ids_list:
+            return
+
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer(
+                "⛔ <b>Stop Token Monitoring</b>\n\n"
+                "Stop monitoring a token by contract address.\n\n"
+
+                "📋 <b>Usage:</b>\n"
+                "<code>/stop &lt;contract_address&gt;</code>\n\n"
+
+                "📖 <b>Examples:</b>\n\n"
+                "1️⃣ <b>Stop Solana token:</b>\n"
+                "   <code>/stop HnKk7xPZmL7KRuUg...</code>\n\n"
+
+                "2️⃣ <b>Stop BSC token:</b>\n"
+                "   <code>/stop 0x907D7eE6FB40C...</code>\n\n"
+
+                "⚙️ <b>What happens:</b>\n"
+                "• Sets token status to <code>stopped</code>\n"
+                "• Sets stop reason to <code>admin_manual_stop</code>\n"
+                "• Removes from polling scheduler\n"
+                "• No more gain alerts will be sent\n\n"
+
+                "💡 <b>Tips:</b>\n"
+                "• Use <code>/str</code> to restart monitoring\n"
+                "• Token data remains in database",
+                parse_mode='HTML'
+            )
+            return
+
+        raw_address = parts[1].strip().split()[0]
+        chain = _detect_chain(raw_address, sol_pattern, bnb_pattern)
+        if chain is None:
+            await message.answer("❌ Unrecognised address. Provide a Solana or BNB contract.")
+            return
+
+        # Find token by address
+        token_record = await token_model.get_by_address(raw_address)
+        if not token_record:
+            await message.answer(f"❌ Token <code>{html.escape(raw_address)}</code> is not being tracked.", parse_mode='HTML')
+            return
+
+        token_id = token_record["id"]
+        current_status = token_record.get("status")
+
+        if current_status == "stopped":
+            await message.answer(
+                f"⚠️ Token <code>{html.escape(raw_address)}</code> is already stopped.\n"
+                f"Stop Reason: {html.escape(token_record.get('stop_reason') or 'Unknown')}",
+                parse_mode='HTML'
+            )
+            return
+
+        # Stop the token
+        await token_model.set_status(token_id, "stopped")
+        await token_model.set_stop_reason(token_id, "admin_manual_stop")
+
+        ticker = token_record.get("ticker") or raw_address[:8]
+        await message.answer(
+            f"✅ Stopped monitoring token <b>{html.escape(ticker)}</b>\n"
+            f"Address: <code>{html.escape(raw_address)}</code>\n"
+            f"Status: <b>stopped</b>\n"
+            f"Reason: admin_manual_stop",
+            parse_mode='HTML'
+        )
+
     dispatcher.message.register(
         cmd_inspect,
         Command(commands=["i"]),
+        F.from_user.id.in_(settings.admin_telegram_ids_list),
+    )
+
+    dispatcher.message.register(
+        cmd_restart,
+        Command(commands=["restart", "str"]),
+        F.from_user.id.in_(settings.admin_telegram_ids_list),
+    )
+
+    dispatcher.message.register(
+        cmd_stop,
+        Command(commands=["stop"]),
+        F.from_user.id.in_(settings.admin_telegram_ids_list),
+    )
+
+    async def cmd_all_commands(message: types.Message) -> None:
+        """Show all available admin commands"""
+        if message.from_user.id not in settings.admin_telegram_ids_list:
+            return
+
+        await message.answer(
+            "📚 <b>Available Admin Commands</b>\n\n"
+
+            "🔍 <b>Token Inspector</b>\n"
+            "<code>/i &lt;ca&gt;</code> - Inspect token details\n"
+            "Shows 4 pages: Overview, Sources, Targets, Call Activity\n\n"
+
+            "🎯 <b>Trigger Gain Alert</b>\n"
+            "<code>/tri &lt;ca&gt; [p] [c]</code> - Force gain alert\n"
+            "<code>/tri &lt;group_id&gt; &lt;ca&gt; [p] [c]</code> - To specific group\n"
+            "Flags: <code>p</code>=peak MC, <code>c</code>=include chart\n\n"
+
+            "🔄 <b>Restart Monitoring</b>\n"
+            "<code>/str &lt;ca&gt; [tier]</code> - Restart stopped token\n"
+            "Tiers: tier_a (10s) to tier_f (30min)\n\n"
+
+            "⛔ <b>Stop Monitoring</b>\n"
+            "<code>/stop &lt;ca&gt;</code> - Stop tracking token\n\n"
+
+            "🎛 <b>Management</b>\n"
+            "<code>/menu</code> or <code>/start</code> - Show main menu\n"
+            "<code>/all</code> - Show this command list\n\n"
+
+            "📖 <b>Examples:</b>\n"
+            "• <code>/i HnKk7xPZmL...</code>\n"
+            "• <code>/tri HnKk7... p c</code>\n"
+            "• <code>/tri -1001234567890 HnKk7... c</code>\n"
+            "• <code>/str HnKk7... tier_c</code>\n"
+            "• <code>/stop HnKk7...</code>\n\n"
+
+            "💡 <b>Tips:</b>\n"
+            "• CA = Contract Address\n"
+            "• Use <code>/command</code> without args to see detailed help\n"
+            "• All commands support both Solana & BSC tokens",
+            parse_mode='HTML'
+        )
+
+    dispatcher.message.register(
+        cmd_trigger,
+        Command(commands=["trigger", "tri"]),
+        F.from_user.id.in_(settings.admin_telegram_ids_list),
+    )
+
+    dispatcher.message.register(
+        cmd_all_commands,
+        Command(commands=["all", "commands", "help"]),
         F.from_user.id.in_(settings.admin_telegram_ids_list),
     )
 

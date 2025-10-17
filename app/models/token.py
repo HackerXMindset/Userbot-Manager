@@ -156,8 +156,8 @@ class TokenModel(BaseModel):
         query = "UPDATE tokens_tracked SET last_alert_mc = $1 WHERE id = $2"
         await self.db.execute(query, alert_mc, token_id)
 
-    async def set_stop_reason(self, token_id: int, reason: str) -> None:
-        """Set stop reason for a token"""
+    async def set_stop_reason(self, token_id: int, reason: str | None) -> None:
+        """Set stop reason for a token (None to clear)"""
         query = "UPDATE tokens_tracked SET stop_reason = $1 WHERE id = $2"
         await self.db.execute(query, reason, token_id)
 

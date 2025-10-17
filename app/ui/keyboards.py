@@ -52,7 +52,8 @@ class Keyboards:
                 InlineKeyboardButton(text="📝 Templates", callback_data="menu:templates")
             ],
             [
-                InlineKeyboardButton(text="⚙️ Settings", callback_data="menu:settings")
+                InlineKeyboardButton(text="⚙️ Settings", callback_data="menu:settings"),
+                InlineKeyboardButton(text="📚 Commands", callback_data="menu:commands")
             ],
             [
                 InlineKeyboardButton(text="🔻 Collapse", callback_data="menu:close")

@@ -745,8 +745,12 @@ class SettingsHandler:
                 text += "<i>No tokens found.</i>"
             else:
                 for token in tokens:
-                    ticker = token['ticker'] or token['address'][:8]
+                    ticker = token['ticker'] or "Unknown"
+                    address = token['address']
+
+                    # Show ticker and full CA
                     text += f"<b>{ticker}</b>\n"
+                    text += f"  ├ <b>CA:</b> <code>{html.escape(address)}</code>\n"
 
                     if status == 'active':
                         tier = token['current_tier'] or 'N/A'
