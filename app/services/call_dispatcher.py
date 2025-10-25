@@ -8,6 +8,7 @@ import time
 import json
 from typing import Dict, Any, Optional, List, Set
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from app.db import db
 from app.models import BotModel, TargetModel, TokenModel
@@ -18,7 +19,7 @@ from app.models.source_chat import SourceChatModel
 from app.models.group import GroupModel
 from app.models.curated_alpha import CuratedAlphaTokenStateModel
 from app.userbot.call_executor import CallExecutor
-from app.services.placeholder_service import PlaceholderService
+from app.services.placeholder_service import PlaceholderService, PlaceholderDataUnavailable
 from app.services.call_history_service import CallHistoryService
 
 logger = logging.getLogger(__name__)
@@ -187,9 +188,22 @@ class CallDispatcher:
                 job_context['current_caller_name'] = caller_name
                 job_context['current_caller_id'] = caller_user_id
                 job_context['blockchain'] = blockchain
-                
+
                 placeholder_service = PlaceholderService(token_address, job_context)
-                placeholders = await placeholder_service.get_all_placeholders()
+                try:
+                    placeholders = await placeholder_service.get_all_placeholders()
+                except PlaceholderDataUnavailable as missing_data_error:
+                    logger.warning(
+                        "[DISPATCHER] Skipping job %s for %s: %s",
+                        job_id,
+                        token_address,
+                        missing_data_error,
+                    )
+                    await self.call_queue_model.mark_failed(job_id, str(missing_data_error))
+                    return False
+                template_mc_decimal = placeholder_service.find_template_market_cap(template_record.get('template_text'))
+                if template_mc_decimal is not None:
+                    await self._apply_template_market_cap(token_address, target_chat_id, template_mc_decimal)
                 message_content = placeholder_service.format_template(template_record['template_text'], placeholders)
                 use_mgmt_bot = template_record.get('use_management_bot', False)
 
@@ -420,6 +434,62 @@ class CallDispatcher:
             )
 
         return sources
+
+    async def _apply_template_market_cap(self, token_address: str, chat_id: int, market_cap_value: Decimal) -> None:
+        """Update baseline market cap using values sourced from a rendered template."""
+        try:
+            if market_cap_value <= 0:
+                return
+
+            token_record = await db.fetchrow(
+                "SELECT id FROM tokens_tracked WHERE address = $1",
+                token_address,
+            )
+            if not token_record:
+                logger.debug(
+                    "[DISPATCHER] No tokens_tracked record for %s while applying template market cap",
+                    token_address[:8],
+                )
+                return
+
+            token_id = token_record['id']
+
+            await db.execute(
+                """
+                UPDATE tokens_tracked
+                SET first_seen_mc = $2,
+                    last_mc = $2
+                WHERE id = $1
+                """,
+                token_id,
+                market_cap_value,
+            )
+
+            await db.execute(
+                """
+                UPDATE token_group_alerts
+                SET first_seen_mc = $3
+                WHERE token_id = $1
+                  AND chat_id = $2
+                """,
+                token_id,
+                chat_id,
+                market_cap_value,
+            )
+
+            logger.debug(
+                "[DISPATCHER] Applied template market cap %s to token %s (chat %s)",
+                market_cap_value,
+                token_address[:8],
+                chat_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[DISPATCHER] Failed to apply template market cap for %s (chat %s): %s",
+                token_address[:8],
+                chat_id,
+                exc,
+            )
 
     def _parse_market_cap_to_cents(self, mc_str: Optional[str]) -> Optional[int]:
         if not mc_str or mc_str == 'N/A':

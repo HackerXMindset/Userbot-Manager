@@ -1,7 +1,7 @@
 from aiogram import types
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import logging
 import time
 
@@ -23,6 +23,22 @@ class GroupsHandler:
         self.target_model = TargetModel(db)
         self.cache = {}
         self.cache_time = {}
+    
+    @staticmethod
+    def _extract_inspector_page(parts: list[str]) -> Optional[int]:
+        if parts and parts[-1].startswith("ginsp-"):
+            token = parts.pop()
+            try:
+                return int(token.split("-", 1)[1])
+            except (ValueError, IndexError):
+                return None
+        return None
+
+    @staticmethod
+    def _inspector_return_callback(group_id: int, inspector_page: Optional[int]) -> Optional[str]:
+        if inspector_page is None:
+            return None
+        return f"ginsp:return:{group_id}:{inspector_page}"
     
     def is_fresh(self, key, seconds=300):
         """Check if cache entry is fresh (default 5 minutes)"""
@@ -95,7 +111,8 @@ class GroupsHandler:
     async def handle_group_action(self, query: types.CallbackQuery, state: FSMContext):
         """Handle group-related callbacks"""
         parts = query.data.split(':')
-        
+        inspector_page = self._extract_inspector_page(parts)
+
         # Handle pagination
         if parts[0] == 'groups_page':
             if parts[1] == 'page':
@@ -109,26 +126,26 @@ class GroupsHandler:
             await self.start_add_group(query, state)
         elif action == 'view':
             group_id = int(parts[2])
-            await self.show_group_details(query, group_id)
+            await self.show_group_details(query, group_id, inspector_page=inspector_page)
         elif action == 'toggle':
             group_id = int(parts[2])
-            await self.toggle_group(query, group_id)
+            await self.toggle_group(query, group_id, inspector_page=inspector_page)
         elif action == 'delete':
             group_id = int(parts[2])
-            await self.confirm_delete_group(query, group_id)
+            await self.confirm_delete_group(query, group_id, inspector_page=inspector_page)
         elif action == 'assign':
             group_id = int(parts[2])
             page = int(parts[3]) if len(parts) > 3 else 0
-            await self.show_userbot_assignment(query, group_id, page)
+            await self.show_userbot_assignment(query, group_id, page, inspector_page=inspector_page)
         elif action == 'schedules':
             group_id = int(parts[2])
-            await self.show_group_schedules(query, group_id)
+            await self.show_group_schedules(query, group_id, inspector_page=inspector_page)
         elif action == 'stats':
             group_id = int(parts[2])
-            await self.show_group_stats(query, group_id)
+            await self.show_group_stats(query, group_id, inspector_page=inspector_page)
         elif action == 'set_name':
             group_id = int(parts[2])
-            await self.start_set_group_name(query, group_id, state)
+            await self.start_set_group_name(query, group_id, state, inspector_page=inspector_page)
         # No alerts configuration actions anymore
     
     async def start_add_group(self, query: types.CallbackQuery, state: FSMContext):
@@ -210,7 +227,12 @@ class GroupsHandler:
         finally:
             await state.clear()
     
-    async def show_group_details(self, query: types.CallbackQuery, group_id: int):
+    async def show_group_details(
+        self,
+        query: types.CallbackQuery,
+        group_id: int,
+        inspector_page: Optional[int] = None,
+    ):
         """Show detailed group information"""
         try:
             group = await self.db.fetchrow("""
@@ -250,18 +272,23 @@ class GroupsHandler:
             )
             
             # Get the base keyboard
-            keyboard_rows = self.keyboards.group_details(dict(group)).inline_keyboard
-            
+            keyboard = self.keyboards.group_details(dict(group), inspector_page)
+
             await query.message.edit_text(
                 text,
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+                reply_markup=keyboard
             )
             
         except Exception as e:
             logger.error(f"Error showing group details: {e}")
             await query.answer("❌ Error loading group details")
     
-    async def toggle_group(self, query: types.CallbackQuery, group_id: int):
+    async def toggle_group(
+        self,
+        query: types.CallbackQuery,
+        group_id: int,
+        inspector_page: Optional[int] = None,
+    ):
         """Toggle group enabled status"""
         try:
             new_status = await self.group_model.toggle_enabled(group_id)
@@ -269,13 +296,19 @@ class GroupsHandler:
             # Clear cache since we modified group status
             self.clear_cache()
             
-            await self.show_group_details(query, group_id)
+            await self.show_group_details(query, group_id, inspector_page=inspector_page)
             await query.answer(f"Group {'enabled' if new_status else 'disabled'}!")
         except Exception as e:
             logger.error(f"Error toggling group: {e}")
             await query.answer("❌ Error updating group")
     
-    async def show_userbot_assignment(self, query: types.CallbackQuery, group_id: int, page: int = 0):
+    async def show_userbot_assignment(
+        self,
+        query: types.CallbackQuery,
+        group_id: int,
+        page: int = 0,
+        inspector_page: Optional[int] = None,
+    ):
         """Show userbot assignment options with pagination (3x3 grid)"""
         try:
             userbots = await self.bot_model.get_active_userbots()
@@ -283,7 +316,9 @@ class GroupsHandler:
             if not userbots:
                 await query.message.edit_text(
                     "❌ No active userbots available.\nAdd a userbot first.",
-                    reply_markup=self.keyboards.back_button(f"group:view:{group_id}")
+                    reply_markup=self.keyboards.back_button(
+                        self._inspector_return_callback(group_id, inspector_page) or f"group:view:{group_id}"
+                    )
                 )
                 return
 
@@ -349,6 +384,11 @@ class GroupsHandler:
             keyboard.append([
                 InlineKeyboardButton(text="🔙 Back", callback_data=f"group:view:{group_id}")
             ])
+            if inspector_page is not None:
+                keyboard[-1][0] = InlineKeyboardButton(
+                    text="🔙 Back",
+                    callback_data=self._inspector_return_callback(group_id, inspector_page)
+                )
 
             await query.message.edit_text(
                 "<b>🤖 Assign Userbot</b>\n\n"
@@ -360,7 +400,12 @@ class GroupsHandler:
             logger.error(f"Error showing userbot assignment: {e}")
             await query.answer("❌ Error loading userbots")
     
-    async def show_group_schedules(self, query: types.CallbackQuery, group_id: int):
+    async def show_group_schedules(
+        self,
+        query: types.CallbackQuery,
+        group_id: int,
+        inspector_page: Optional[int] = None,
+    ):
         """Show schedules for a specific group"""
         try:
             # Get group info
@@ -413,7 +458,10 @@ class GroupsHandler:
             
             # Back button
             keyboard_rows.append([
-                InlineKeyboardButton(text="🔙 Back to Group", callback_data=f"group:view:{group_id}")
+                InlineKeyboardButton(
+                    text="🔙 Back to Group",
+                    callback_data=self._inspector_return_callback(group_id, inspector_page) or f"group:view:{group_id}"
+                )
             ])
             
             keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
@@ -424,7 +472,12 @@ class GroupsHandler:
             logger.error(f"Error showing group schedules: {e}")
             await query.answer("❌ Error loading schedules")
     
-    async def show_group_stats(self, query: types.CallbackQuery, group_id: int):
+    async def show_group_stats(
+        self,
+        query: types.CallbackQuery,
+        group_id: int,
+        inspector_page: Optional[int] = None,
+    ):
         """Show statistics for a specific group"""
         try:
             # Get group info
@@ -482,8 +535,9 @@ class GroupsHandler:
             text += f"<b>Group Details:</b>\n"
             text += f"└ Chat ID: <code>{group['tg_chat_id']}</code>"
             
+            back_callback = self._inspector_return_callback(group_id, inspector_page) or f"group:view:{group_id}"
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Back to Group", callback_data=f"group:view:{group_id}")],
+                [InlineKeyboardButton(text="🔙 Back to Group", callback_data=back_callback)],
                 [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]
             ])
             
@@ -493,7 +547,12 @@ class GroupsHandler:
             logger.error(f"Error showing group stats: {e}")
             await query.answer("❌ Error loading statistics")
     
-    async def confirm_delete_group(self, query: types.CallbackQuery, group_id: int):
+    async def confirm_delete_group(
+        self,
+        query: types.CallbackQuery,
+        group_id: int,
+        inspector_page: Optional[int] = None,
+    ):
         """Show delete confirmation for a group"""
         try:
             # Get group info
@@ -532,10 +591,11 @@ class GroupsHandler:
             text += f"<b>This action cannot be undone!</b>\n"
             text += f"Are you sure you want to delete this group?"
             
+            cancel_cb = self._inspector_return_callback(group_id, inspector_page) or f"group:view:{group_id}"
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [
                     InlineKeyboardButton(text="✅ Yes, Delete", callback_data=f"confirm_delete_group:{group_id}"),
-                    InlineKeyboardButton(text="❌ Cancel", callback_data=f"group:view:{group_id}")
+                    InlineKeyboardButton(text="❌ Cancel", callback_data=cancel_cb)
                 ]
             ])
             
@@ -613,7 +673,13 @@ class GroupsHandler:
         else:
             return ", ".join([day_names[d-1] for d in sorted(weekdays)])
     
-    async def start_set_group_name(self, query: types.CallbackQuery, group_id: int, state: FSMContext):
+    async def start_set_group_name(
+        self,
+        query: types.CallbackQuery,
+        group_id: int,
+        state: FSMContext,
+        inspector_page: Optional[int] = None,
+    ):
         """Start group name setting process"""
         try:
             group = await self.group_model.get_by_id(group_id)
@@ -623,18 +689,20 @@ class GroupsHandler:
             
             current_name = group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}"
             
+            cancel_cb = self._inspector_return_callback(group_id, inspector_page) or f"group:view:{group_id}"
             await query.message.edit_text(
                 f"<b>✏️ Set Group Name</b>\n\n"
                 f"Current name: <b>{current_name}</b>\n\n"
                 f"Enter a new custom name for this group:\n\n"
                 f"Type /cancel to abort.",
-                reply_markup=self.keyboards.cancel_button(f"group:view:{group_id}")
+                reply_markup=self.keyboards.cancel_button(cancel_cb)
             )
             
             await state.set_state(ManagementStates.group_set_name)
             await state.update_data(
                 group_id=group_id,
-                message_id=query.message.message_id
+                message_id=query.message.message_id,
+                inspector_return=cancel_cb if inspector_page is not None else None,
             )
             
         except Exception as e:

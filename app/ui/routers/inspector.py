@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import html
+import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Iterable, Sequence
+from decimal import Decimal, InvalidOperation
+from textwrap import shorten
+from typing import Iterable, Sequence, Any
 
 from aiogram import Dispatcher, F, types
 from aiogram.filters import Command
@@ -19,11 +22,40 @@ from .context import ManagementRouterContext
 
 logger = logging.getLogger(__name__)
 
+try:
+    from asyncpg import exceptions as pg_exceptions  # type: ignore
+except ImportError:  # pragma: no cover - fallback when asyncpg unavailable
+    class pg_exceptions:  # type: ignore
+        UndefinedColumnError = Exception
+        UndefinedTableError = Exception
+
 
 class InspectorPageCallback(CallbackData, prefix="insp"):
     """Callback data for inspector pagination"""
     address: str
     page: int
+
+
+class GroupInspectorCallback(CallbackData, prefix="ginsp"):
+    """Callback data for group inspector pagination"""
+    group_id: int
+    page: int
+
+
+async def _fetchrow_safe(db, query: str, *args):
+    try:
+        return await db.fetchrow(query, *args)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.error("Group inspector fetchrow failed: %s", exc, exc_info=True)
+        return None
+
+
+async def _fetch_safe(db, query: str, *args):
+    try:
+        return await db.fetch(query, *args)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.error("Group inspector fetch failed: %s", exc, exc_info=True)
+        return []
 
 
 def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
@@ -34,6 +66,340 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
     token_model = TokenModel(db)
     sol_pattern = re.compile(settings.solana_pattern)
     bnb_pattern = re.compile(settings.bnb_pattern, re.IGNORECASE)
+
+    async def _find_group_record(identifier: int):
+        if identifier > 0:
+            record = await _fetchrow_safe(db, "SELECT * FROM groups WHERE id = $1", identifier)
+            if record:
+                return record
+            return await _fetchrow_safe(db, "SELECT * FROM groups WHERE tg_chat_id = $1", identifier)
+        return await _fetchrow_safe(db, "SELECT * FROM groups WHERE tg_chat_id = $1", identifier)
+
+    async def _gather_group_payload(group_id: int) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        group_row = await _fetchrow_safe(db, "SELECT * FROM groups WHERE id = $1", group_id)
+        if not group_row:
+            return None, None
+
+        group = dict(group_row)
+        tg_chat_id = group.get("tg_chat_id")
+
+        userbot_row = await _fetchrow_safe(
+            db,
+            """
+            SELECT ua.*, b.display_name AS bot_display_name, b.session_name, b.status
+            FROM userbot_assignments ua
+            LEFT JOIN bots b ON b.id = ua.userbot_id
+            WHERE ua.group_id = $1
+            """,
+            group_id,
+        )
+
+        targets_rows = await _fetch_safe(
+            db,
+            """
+            SELECT t.*, g2.display_name AS dest_group_display, g2.title AS dest_group_title
+            FROM targets t
+            LEFT JOIN groups g2 ON g2.tg_chat_id = t.dest_chat_id
+            WHERE t.group_id = $1
+            ORDER BY t.dest_chat_id
+            """,
+            group_id,
+        )
+
+        schedules_rows = await _fetch_safe(
+            db,
+            """
+            SELECT *
+            FROM group_schedules
+            WHERE group_id = $1
+            ORDER BY start_time
+            """,
+            group_id,
+        )
+
+        templates_rows = await _fetch_safe(
+            db,
+            """
+            SELECT tta.blockchain, pt.id, pt.name
+            FROM target_template_assignments tta
+            LEFT JOIN post_templates pt ON pt.id = tta.template_id
+            WHERE tta.group_id = $1
+            ORDER BY tta.blockchain
+            """,
+            group_id,
+        )
+
+        call_stats_row = await _fetchrow_safe(
+            db,
+            """
+            SELECT COUNT(*) AS total_calls,
+                   MAX(called_at) AS last_call_at
+            FROM token_call_history
+            WHERE target_chat_id = $1
+            """,
+            tg_chat_id,
+        ) if tg_chat_id is not None else None
+
+        recent_calls_rows = await _fetch_safe(
+            db,
+            """
+            SELECT token_address, source_name, called_at, market_cap_at_call
+            FROM token_call_history
+            WHERE target_chat_id = $1
+            ORDER BY called_at DESC
+            LIMIT 5
+            """,
+            tg_chat_id,
+        ) if tg_chat_id is not None else []
+
+        queue_stats_rows = await _fetch_safe(
+            db,
+            """
+            SELECT status, COUNT(*) AS total
+            FROM call_queue
+            WHERE target_group_id = $1
+            GROUP BY status
+            ORDER BY status
+            """,
+            group_id,
+        )
+
+        pending_jobs_rows = []
+        pending_jobs_uses_created = False
+        try:
+            pending_jobs_rows = await db.fetch(
+                """
+                SELECT id, token_address, status, priority, scheduled_at, forwarding_userbot_id
+                FROM call_queue
+                WHERE target_group_id = $1
+                ORDER BY scheduled_at ASC NULLS LAST
+                LIMIT 5
+                """,
+                group_id,
+            )
+        except pg_exceptions.UndefinedColumnError:
+            pending_jobs_rows = await db.fetch(
+                """
+                SELECT id,
+                       token_address,
+                       status,
+                       priority,
+                       created_at AS fallback_timestamp,
+                       forwarding_userbot_id
+                FROM call_queue
+                WHERE target_group_id = $1
+                ORDER BY created_at ASC NULLS LAST
+                LIMIT 5
+                """,
+                group_id,
+            )
+            pending_jobs_uses_created = True
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.error("Group inspector pending jobs query failed: %s", exc, exc_info=True)
+
+        gain_summary_row = await _fetchrow_safe(
+            db,
+            """
+            SELECT
+                COUNT(*) AS total_tokens,
+                COUNT(*) FILTER (WHERE last_alert_at IS NOT NULL) AS tokens_alerted,
+                COUNT(*) FILTER (WHERE last_alert_at IS NULL) AS pending_tokens
+            FROM token_group_alerts
+            WHERE chat_id = $1
+            """,
+            tg_chat_id,
+        ) if tg_chat_id is not None else None
+
+        gain_recent_rows = await _fetch_safe(
+            db,
+            """
+            SELECT tga.*, tt.address
+            FROM token_group_alerts tga
+            LEFT JOIN tokens_tracked tt ON tt.id = tga.token_id
+            WHERE tga.chat_id = $1
+            ORDER BY COALESCE(tga.last_alert_at, tga.first_seen_at) DESC
+            LIMIT 5
+            """,
+            tg_chat_id,
+        ) if tg_chat_id is not None else []
+
+        monitored_sources_rows = await _fetch_safe(
+            db,
+            """
+            SELECT
+                ms.*,
+                b.display_name AS assigned_userbot_name,
+                b.session_name AS assigned_session_name,
+                b.status AS assigned_status,
+                ARRAY_REMOVE(ARRAY_AGG(mst.target_chat_id), NULL) AS target_chat_ids
+            FROM monitored_sources ms
+            LEFT JOIN bots b ON b.id = ms.assigned_userbot_id
+            LEFT JOIN monitored_source_targets mst ON mst.source_id = ms.id
+            WHERE ms.chat_id = $1
+            GROUP BY ms.id, b.display_name, b.session_name, b.status
+            ORDER BY ms.created_at ASC
+            """,
+            tg_chat_id,
+        ) if tg_chat_id is not None else []
+
+        targets_ids = [row["id"] for row in targets_rows]
+        target_state_stats = {}
+        if targets_ids:
+            try:
+                state_rows = await db.fetch(
+                    """
+                    SELECT target_id,
+                           COUNT(*) AS tracked_tokens,
+                           MAX(last_alert_at) AS last_alert_at
+                    FROM target_token_alert_state
+                    WHERE target_id = ANY($1::bigint[])
+                    GROUP BY target_id
+                    """,
+                    targets_ids,
+                )
+                target_state_stats = {row["target_id"]: dict(row) for row in state_rows}
+            except pg_exceptions.UndefinedTableError:
+                target_state_stats = {}
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.error("Group inspector target state query failed: %s", exc, exc_info=True)
+                target_state_stats = {}
+
+        curated_rules_rows = []
+        if tg_chat_id is not None:
+            curated_rules_rows = await _fetch_safe(
+                db,
+                "SELECT id, name FROM curated_alpha_rules WHERE destination_chat_id = $1 ORDER BY created_at DESC",
+                tg_chat_id,
+            )
+
+        payload = {
+            "userbot": dict(userbot_row) if userbot_row else None,
+            "templates": [dict(r) for r in templates_rows],
+            "targets": [dict(r) for r in targets_rows],
+            "target_state_stats": target_state_stats,
+            "schedules": [dict(r) for r in schedules_rows],
+            "call_stats": dict(call_stats_row) if call_stats_row else None,
+            "recent_calls": [dict(r) for r in recent_calls_rows],
+            "queue_stats": [dict(r) for r in queue_stats_rows],
+            "pending_jobs": [dict(r) for r in pending_jobs_rows],
+            "pending_jobs_use_created": pending_jobs_uses_created,
+            "gain_summary": dict(gain_summary_row) if gain_summary_row else None,
+            "gain_recent": [dict(r) for r in gain_recent_rows],
+            "monitored_sources": [dict(r) for r in monitored_sources_rows],
+            "curated_alpha_rules": [dict(r) for r in curated_rules_rows],
+            "tg_chat_id": tg_chat_id,
+        }
+
+        return group, payload
+
+    async def cmd_inspect_group(message: types.Message) -> None:
+        """Detailed group inspector command (/ic <group_id>)."""
+        if message.from_user.id not in settings.admin_telegram_ids_list:
+            return
+
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer(
+                "👥 <b>Group Inspector</b>\n\n"
+                "Inspect every known data point for a configured group.\n\n"
+                "📋 <b>Usage:</b>\n"
+                "<code>/ic &lt;group_id&gt;</code> — internal group ID (preferred)\n"
+                "<code>/ic &lt;chat_id&gt;</code> — Telegram chat ID (e.g. -100...)\n\n"
+                "The report includes group settings, routing, activity, and gain-alert configuration.",
+                parse_mode="HTML",
+            )
+            return
+
+        identifier_raw = parts[1].strip().split()[0]
+        try:
+            identifier_val = int(identifier_raw)
+        except ValueError:
+            await message.answer("❌ Provide a numeric group ID or Telegram chat ID.", parse_mode="HTML")
+            return
+
+        group_row = await _find_group_record(identifier_val)
+        if not group_row:
+            await message.answer(
+                f"❌ Group not found for identifier <code>{html.escape(identifier_raw)}</code>.",
+                parse_mode="HTML",
+            )
+            return
+
+        group, payload = await _gather_group_payload(group_row["id"])
+        if not group or payload is None:
+            await message.answer("❌ Unable to load group details at this time.", parse_mode="HTML")
+            return
+
+        text, keyboard = _render_group_report_page(group, payload, page=1)
+
+        await message.answer(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=keyboard,
+        )
+
+    async def handle_group_pagination(callback: types.CallbackQuery, callback_data: GroupInspectorCallback):
+        if callback.from_user.id not in settings.admin_telegram_ids_list:
+            await callback.answer("Unauthorized", show_alert=True)
+            return
+
+        group_id = callback_data.group_id
+        group_row = await _fetchrow_safe(db, "SELECT * FROM groups WHERE id = $1", group_id)
+        if not group_row:
+            await callback.answer("Group not found", show_alert=True)
+            try:
+                await callback.message.edit_text("❌ Group no longer exists.")
+            except Exception:
+                pass
+            return
+
+        group, payload = await _gather_group_payload(group_id)
+        if not group or payload is None:
+            await callback.answer("Failed to load data", show_alert=True)
+            return
+
+        text, keyboard = _render_group_report_page(group, payload, page=callback_data.page)
+
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=keyboard,
+        )
+        await callback.answer()
+
+    async def handle_group_return(callback: types.CallbackQuery):
+        if callback.from_user.id not in settings.admin_telegram_ids_list:
+            await callback.answer("Unauthorized", show_alert=True)
+            return
+
+        parts = callback.data.split(':')
+        if len(parts) < 4:
+            await callback.answer("Invalid request", show_alert=True)
+            return
+
+        try:
+            group_id = int(parts[2])
+            page = int(parts[3])
+        except ValueError:
+            await callback.answer("Invalid request", show_alert=True)
+            return
+
+        group, payload = await _gather_group_payload(group_id)
+        if not group or payload is None:
+            await callback.answer("Failed to load data", show_alert=True)
+            return
+
+        text, keyboard = _render_group_report_page(group, payload, page=page)
+
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=keyboard,
+        )
+        await callback.answer()
 
     async def cmd_inspect(message: types.Message) -> None:
         if message.from_user.id not in settings.admin_telegram_ids_list:
@@ -702,6 +1068,24 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
             parse_mode='HTML'
         )
 
+    async def cmd_clean_contracts(message: types.Message) -> None:
+        """Prompt admin confirmation to wipe all contract addresses."""
+        if message.from_user.id not in settings.admin_telegram_ids_list:
+            return
+
+        cleanup_service = context.cleanup_service
+        if cleanup_service is None:
+            await message.answer("❌ Cleanup service unavailable.", parse_mode="HTML")
+            return
+
+        await cleanup_service.prompt_wipe_contracts(message)
+
+    dispatcher.message.register(
+        cmd_inspect_group,
+        Command(commands=["ic"]),
+        F.from_user.id.in_(settings.admin_telegram_ids_list),
+    )
+
     dispatcher.message.register(
         cmd_inspect,
         Command(commands=["i"]),
@@ -720,6 +1104,12 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
         F.from_user.id.in_(settings.admin_telegram_ids_list),
     )
 
+    dispatcher.message.register(
+        cmd_clean_contracts,
+        Command(commands=["clean_ca", "wipe_ca"]),
+        F.from_user.id.in_(settings.admin_telegram_ids_list),
+    )
+
     async def cmd_all_commands(message: types.Message) -> None:
         """Show all available admin commands"""
         if message.from_user.id not in settings.admin_telegram_ids_list:
@@ -731,6 +1121,9 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
             "🔍 <b>Token Inspector</b>\n"
             "<code>/i &lt;ca&gt;</code> - Inspect token details\n"
             "Shows 4 pages: Overview, Sources, Targets, Call Activity\n\n"
+
+            "👥 <b>Group Inspector</b>\n"
+            "<code>/ic &lt;group_id&gt;</code> - Full group configuration report\n\n"
 
             "🎯 <b>Trigger Gain Alert</b>\n"
             "<code>/tri &lt;ca&gt; [p] [c]</code> - Force gain alert\n"
@@ -747,6 +1140,9 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
             "🎛 <b>Management</b>\n"
             "<code>/menu</code> or <code>/start</code> - Show main menu\n"
             "<code>/all</code> - Show this command list\n\n"
+
+            "🧹 <b>Danger Zone</b>\n"
+            "<code>/clean_ca</code> - Wipe every tracked contract address (confirmation required)\n\n"
 
             "📖 <b>Examples:</b>\n"
             "• <code>/i HnKk7xPZmL...</code>\n"
@@ -777,6 +1173,18 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
     dispatcher.callback_query.register(
         handle_pagination,
         InspectorPageCallback.filter(),
+    )
+
+    dispatcher.callback_query.register(
+        handle_group_return,
+        F.data.startswith("ginsp:return:"),
+        F.from_user.id.in_(settings.admin_telegram_ids_list),
+    )
+
+    dispatcher.callback_query.register(
+        handle_group_pagination,
+        GroupInspectorCallback.filter(),
+        F.from_user.id.in_(settings.admin_telegram_ids_list),
     )
 
 
@@ -928,6 +1336,403 @@ async def _fetch_call_history(db, address: str):
     except Exception as exc:  # pragma: no cover - defensive logging
         logger.error("Inspector call history lookup failed for %s: %s", address, exc, exc_info=True)
         return [], {}
+
+
+def _render_group_report_page(
+    group: dict[str, Any],
+    payload: dict[str, Any],
+    page: int = 1,
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    total_pages = 4
+    if page < 1 or page > total_pages:
+        page = 1
+
+    if page == 1:
+        text = _build_group_overview_page(group, payload)
+    elif page == 2:
+        text = _build_group_routing_page(group, payload)
+    elif page == 3:
+        text = _build_group_activity_page(group, payload)
+    else:
+        text = _build_group_gain_page(group, payload)
+
+    keyboard = _build_group_navigation_keyboard(group, payload, page, total_pages)
+    return text, keyboard
+
+
+def _build_group_overview_page(group: dict[str, Any], payload: dict[str, Any]) -> str:
+    lines = [
+        "<b>👥 Group Overview</b>",
+        f"ID: <code>{group['id']}</code>",
+        f"Chat ID: <code>{group.get('tg_chat_id') or '—'}</code>",
+        f"Title: {html.escape(group.get('title') or '—')}",
+        f"Display: {html.escape(group.get('display_name') or '—')}",
+        f"Status: {_format_status_with_icon(group.get('enabled'))}",
+        f"Daily Cap: {group.get('daily_cap') or '∞'}",
+        f"Cooldown: {group.get('cooldown_minutes') or 0} min",
+        f"Notif Channel: <code>{group.get('notif_channel_id') or '—'}</code>",
+        f"Created: {_format_time(group.get('created_at'))}",
+    ]
+
+    lines.append("\n<b>🤖 Userbot</b>")
+    userbot = payload.get("userbot")
+    if userbot:
+        lines.extend(
+            [
+                f"ID: <code>{userbot.get('userbot_id')}</code>",
+                f"Name: {html.escape(userbot.get('bot_display_name') or userbot.get('session_name') or '—')}",
+                f"Status: {html.escape(userbot.get('status') or 'unknown')}",
+                f"Assigned: {_format_time(userbot.get('created_at'))}",
+            ]
+        )
+    else:
+        lines.append("No dedicated userbot assigned.")
+
+    lines.append("\n<b>🧩 Templates</b>")
+    templates = payload.get("templates") or []
+    if not templates:
+        lines.append("No template overrides assigned.")
+    else:
+        for tpl in templates[:6]:
+            name = tpl.get("name") or f"Template #{tpl.get('id')}"
+            lines.append(f"{tpl.get('blockchain')} → {html.escape(name)} (#{tpl.get('id')})")
+        if len(templates) > 6:
+            lines.append(f"... and {len(templates) - 6} more")
+
+    return "\n".join(lines)
+
+
+def _build_group_routing_page(group: dict[str, Any], payload: dict[str, Any]) -> str:
+    lines = ["<b>🎯 Targets</b>"]
+    targets = payload.get("targets") or []
+    target_stats = payload.get("target_state_stats") or {}
+    if not targets:
+        lines.append("No forwarding targets configured.")
+    else:
+        for record in targets[:6]:
+            dest_chat_id = record.get("dest_chat_id")
+            dest_name = record.get("dest_group_display") or record.get("dest_group_title")
+            name_part = f" → {html.escape(dest_name)}" if dest_name else ""
+            lines.append(f"<code>{dest_chat_id}</code>{name_part}")
+            lines.append(
+                f"  Alerts: {_format_yes_no(record.get('alerts_enabled'))} | "
+                f"Thresholds: {_format_thresholds(record.get('alerts_thresholds'))}"
+            )
+            lines.append(
+                f"  Modes: {_format_modes(record.get('alerts_modes'))} | "
+                f"Sensitivity: {record.get('alerts_sensitivity_percent')}"
+            )
+            stats = target_stats.get(record.get("id")) or {}
+            lines.append(
+                f"  Tracked Tokens: {stats.get('tracked_tokens', 0)} | "
+                f"Last Alert: {_format_time(stats.get('last_alert_at'))}"
+            )
+            lines.append(f"  Added: {_format_time(record.get('created_at'))}")
+        if len(targets) > 6:
+            lines.append(f"... and {len(targets) - 6} more")
+
+    lines.append("\n<b>🗓 Schedules</b>")
+    schedules = payload.get("schedules") or []
+    if not schedules:
+        lines.append("No active schedules.")
+    else:
+        for sched in schedules[:8]:
+            lines.append(
+                f"{_format_weekdays_list(sched.get('weekdays'))} "
+                f"{sched.get('start_time')}→{sched.get('end_time')} "
+                f"(max {sched.get('max_calls_in_window') or '∞'})"
+            )
+        if len(schedules) > 8:
+            lines.append(f"... and {len(schedules) - 8} more")
+
+    return "\n".join(lines)
+
+
+def _build_group_activity_page(group: dict[str, Any], payload: dict[str, Any]) -> str:
+    lines = ["<b>☎️ Call Activity</b>"]
+    call_stats = payload.get("call_stats") or {}
+    lines.append(f"Total Calls Logged: {call_stats.get('total_calls', 0)}")
+    lines.append(f"Last Call: {_format_time(call_stats.get('last_call_at'))}")
+
+    recent_calls = payload.get("recent_calls") or []
+    if recent_calls:
+        for rec in recent_calls[:6]:
+            lines.append(
+                f"• {_format_time(rec.get('called_at'))} — {_shorten_address(rec.get('token_address'))} "
+                f"(MC {_format_money_from_cents(rec.get('market_cap_at_call'))}) via "
+                f"{html.escape(rec.get('source_name') or 'Unknown')}"
+            )
+        if len(recent_calls) > 6:
+            lines.append(f"... and {len(recent_calls) - 6} more")
+    else:
+        lines.append("No call history yet.")
+
+    lines.append("\n<b>📬 Queue</b>")
+    queue_stats = payload.get("queue_stats") or []
+    if queue_stats:
+        summary = ", ".join(f"{row['status']}: {row['total']}" for row in queue_stats)
+        lines.append(summary)
+    else:
+        lines.append("No queued jobs.")
+
+    pending_jobs = payload.get("pending_jobs") or []
+    if pending_jobs:
+        lines.append("\n<b>🕒 Pending Jobs</b>")
+        use_created = payload.get("pending_jobs_use_created")
+        for job in pending_jobs[:5]:
+            timestamp = job.get("fallback_timestamp") if use_created else job.get("scheduled_at")
+            lines.append(
+                f"• #{job['id']} {job['status']} {_shorten_address(job.get('token_address'))} "
+                f"(prio {job.get('priority')}, sched {_format_time(timestamp)})"
+            )
+        if len(pending_jobs) > 5:
+            lines.append(f"... and {len(pending_jobs) - 5} more")
+
+    return "\n".join(lines)
+
+
+def _build_group_gain_page(group: dict[str, Any], payload: dict[str, Any]) -> str:
+    lines = ["<b>🚀 Gain Alerts & Monitors</b>"]
+    summary = payload.get("gain_summary")
+    if summary:
+        lines.append(
+            f"Tracked Tokens: {summary.get('total_tokens', 0)} "
+            f"(alerts sent: {summary.get('tokens_alerted', 0)}, pending: {summary.get('pending_tokens', 0)})"
+        )
+    else:
+        lines.append("No gain-alert state recorded.")
+
+    recent = payload.get("gain_recent") or []
+    if recent:
+        lines.append("\n<b>Recent Activity</b>")
+        for alert in recent[:6]:
+            lines.append(
+                f"• {_shorten_address(alert.get('address'))} | "
+                f"Baseline {_format_money(alert.get('first_seen_mc'))} | "
+                f"Last Alert {_format_time(alert.get('last_alert_at'))}"
+            )
+        if len(recent) > 6:
+            lines.append(f"... and {len(recent) - 6} more")
+
+    sources = payload.get("monitored_sources") or []
+    lines.append("\n<b>👀 Monitored Sources</b>")
+    if not sources:
+        lines.append("No monitored-source overrides attach to this chat.")
+    else:
+        for source in sources[:6]:
+            title = f"ID {source['id']} · {source['chat_type']} · User {source.get('user_id') or '—'}"
+            branches: list[tuple[str, str | None] | tuple[str, str | None, bool]] = [
+                ("Enabled", _format_yes_no(source.get('is_enabled'))),
+                ("Sensitivity", source.get('sensitivity_pct')),
+                ("Mgmt Bot", _format_yes_no(source.get('use_management_bot'))),
+            ]
+            assigned_label = source.get("assigned_userbot_name") or source.get("assigned_session_name")
+            if assigned_label:
+                branches.append(("Userbot", assigned_label))
+            if source.get("chart_enabled"):
+                branches.append(("Chart", _format_chart(source)))
+            targets_list = source.get("target_chat_ids") or []
+            if targets_list:
+                branches.append(("Extra Targets", ", ".join(str(x) for x in targets_list)))
+            template_text = source.get("template_text")
+            if template_text:
+                snippet = shorten(template_text, width=80, placeholder="…")
+                branches.append(("Template", snippet))
+            tree = _render_tree(title, branches, title_safe=True)
+            if tree:
+                lines.append(tree)
+        if len(sources) > 6:
+            lines.append(f"... and {len(sources) - 6} more")
+
+    return "\n".join(lines)
+
+
+def _build_group_navigation_keyboard(
+    group: dict[str, Any],
+    payload: dict[str, Any],
+    current_page: int,
+    total_pages: int,
+) -> InlineKeyboardMarkup:
+    group_id = group["id"]
+    tg_chat_id = group.get("tg_chat_id")
+
+    page_emojis = {1: "📊", 2: "🎯", 3: "☎️", 4: "🚀"}
+    rows: list[list[InlineKeyboardButton]] = [[]]
+
+    if current_page > 1:
+        rows[0].append(
+            InlineKeyboardButton(
+                text="◀️ Prev",
+                callback_data=GroupInspectorCallback(group_id=group_id, page=current_page - 1).pack(),
+            )
+        )
+
+    rows[0].append(
+        InlineKeyboardButton(
+            text=f"{page_emojis.get(current_page, '📄')} {current_page}/{total_pages}",
+            callback_data="noop",
+        )
+    )
+
+    if current_page < total_pages:
+        rows[0].append(
+            InlineKeyboardButton(
+                text="Next ▶️",
+                callback_data=GroupInspectorCallback(group_id=group_id, page=current_page + 1).pack(),
+            )
+        )
+
+    quick_nav = []
+    for page_num in range(1, total_pages + 1):
+        emoji = page_emojis.get(page_num, "📄")
+        if page_num == current_page:
+            quick_nav.append(InlineKeyboardButton(text=f"• {emoji} •", callback_data="noop"))
+        else:
+            quick_nav.append(
+                InlineKeyboardButton(
+                    text=emoji,
+                    callback_data=GroupInspectorCallback(group_id=group_id, page=page_num).pack(),
+                )
+            )
+    rows.append(quick_nav)
+
+    suffix = f":ginsp-{current_page}"
+
+    primary_actions: list[InlineKeyboardButton] = [
+        InlineKeyboardButton(text="⚙️ Group Menu", callback_data=f"group:view:{group_id}{suffix}"),
+        InlineKeyboardButton(text="📊 Group Stats", callback_data=f"group:stats:{group_id}"),
+    ]
+
+    chat_url = _build_chat_url(tg_chat_id)
+    if chat_url:
+        primary_actions.append(InlineKeyboardButton(text="🔗 Open Chat", url=chat_url))
+
+    rows.append(primary_actions)
+
+    feature_buttons: list[InlineKeyboardButton] = []
+    if payload.get("targets"):
+        feature_buttons.append(
+            InlineKeyboardButton(text="🎯 Targets", callback_data=f"group:view:{group_id}{suffix}")
+        )
+
+    if payload.get("schedules"):
+        feature_buttons.append(
+            InlineKeyboardButton(text="📅 Schedules", callback_data=f"group:schedules:{group_id}")
+        )
+
+    if payload.get("templates"):
+        feature_buttons.append(InlineKeyboardButton(text="🧩 Templates", callback_data="menu:templates"))
+
+    if payload.get("monitored_sources"):
+        feature_buttons.append(InlineKeyboardButton(text="📡 Sources", callback_data="menu:sources"))
+        if tg_chat_id:
+            feature_buttons.append(
+                InlineKeyboardButton(text="🚀 Gain Alerts", callback_data=f"gain_alerts:view:{tg_chat_id}")
+            )
+
+    curated_rules = payload.get("curated_alpha_rules") or []
+    if curated_rules:
+        rule = curated_rules[0]
+        label = rule.get("name") or f"Rule #{rule['id']}"
+        label = (label[:14] + "…") if len(label) > 17 else label
+        feature_buttons.append(
+            InlineKeyboardButton(text=f"✨ {label}", callback_data=f"curate_alpha:view:{rule['id']}")
+        )
+        feature_buttons.append(InlineKeyboardButton(text="✨ All Rules", callback_data="curate_alpha:list"))
+
+    if feature_buttons:
+        rows.append(feature_buttons[:3])
+        if len(feature_buttons) > 3:
+            rows.append(feature_buttons[3:6])
+
+    sources = payload.get("monitored_sources") or []
+    if sources:
+        source_buttons: list[InlineKeyboardButton] = []
+        for entry in sources[:3]:
+            source_id = entry.get("id")
+            if not source_id:
+                continue
+            display = entry.get("display_name") or entry.get("chat_id") or entry.get("chat_type") or "Source"
+            display = str(display)
+            if len(display) > 14:
+                display = display[:13] + "…"
+            source_buttons.append(
+                InlineKeyboardButton(
+                    text=f"📡 {display}",
+                    callback_data=f"sources:source_details:{source_id}",
+                )
+            )
+        if len(sources) > 3:
+            source_buttons.append(InlineKeyboardButton(text="More Sources", callback_data="menu:sources"))
+        if source_buttons:
+            rows.append(source_buttons)
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _format_status_with_icon(value: bool | None) -> str:
+    return "🟢 Enabled" if value else "⚪️ Disabled"
+
+
+def _format_yes_no(value: bool | None) -> str:
+    return "Yes" if value else "No"
+
+
+def _format_thresholds(thresholds) -> str:
+    thresholds = _parse_json_field(thresholds)
+    if isinstance(thresholds, (list, tuple)):
+        return ", ".join(f"{item}x" for item in thresholds) if thresholds else "—"
+    return str(thresholds) if thresholds is not None else "—"
+
+
+def _format_modes(modes) -> str:
+    modes = _parse_json_field(modes)
+    if isinstance(modes, dict):
+        if not modes:
+            return "{}"
+        return ", ".join(f"{key}:{'on' if bool(val) else 'off'}" for key, val in sorted(modes.items()))
+    return str(modes) if modes is not None else "—"
+
+
+def _format_weekdays_list(values) -> str:
+    if not values:
+        return "—"
+    names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    try:
+        return ", ".join(names[int(v) % 7] for v in values)
+    except Exception:
+        return ", ".join(str(v) for v in values)
+
+
+def _shorten_address(address: str | None) -> str:
+    if not address:
+        return "—"
+    if len(address) <= 12:
+        return address
+    return f"{address[:6]}…{address[-4:]}"
+
+
+def _format_money_from_cents(cents) -> str:
+    if cents in (None, "", 0):
+        return "N/A"
+    try:
+        dollars = Decimal(cents) / Decimal(100)
+    except (InvalidOperation, ValueError, TypeError):
+        return str(cents)
+    return _format_money(dollars)
+
+
+def _parse_json_field(value):
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
 
 
 def _render_report_page(
@@ -1334,6 +2139,21 @@ def _format_telegram_link(chat_id: int | None, message_id: int | None) -> str | 
         return f'<a href="{url}">#{message_id_int}</a>'
     except (ValueError, TypeError):
         return None
+
+
+def _build_chat_url(chat_id: Any) -> str | None:
+    try:
+        chat_int = int(chat_id)
+    except (TypeError, ValueError):
+        return None
+
+    if chat_int < 0:
+        chat_str = str(abs(chat_int))
+        if chat_str.startswith("100"):
+            chat_str = chat_str[3:]
+        return f"https://t.me/c/{chat_str}"
+
+    return None
 
 
 def _format_money(value) -> str:

@@ -86,26 +86,37 @@ class Keyboards:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
     
     @staticmethod
-    def group_details(group: Dict) -> InlineKeyboardMarkup:
+    def group_details(group: Dict, inspector_page: Optional[int] = None) -> InlineKeyboardMarkup:
         """Single group details menu"""
+        suffix = f":ginsp-{inspector_page}" if inspector_page is not None else ""
+
+        def with_suffix(base: str) -> str:
+            return f"{base}{suffix}"
+
         status_btn = InlineKeyboardButton(
             text="🔴 Disable" if group['enabled'] else "🟢 Enable",
-            callback_data=f"group:toggle:{group['id']}"
+            callback_data=with_suffix(f"group:toggle:{group['id']}")
         )
-        
+
+        back_callback = (
+            f"ginsp:return:{group['id']}:{inspector_page}"
+            if inspector_page is not None
+            else "menu:groups"
+        )
+
         return InlineKeyboardMarkup(inline_keyboard=[
             [status_btn],
             [
-                InlineKeyboardButton(text="✏️ Set Name", callback_data=f"group:set_name:{group['id']}"),
-                InlineKeyboardButton(text="📅 Schedules", callback_data=f"group:schedules:{group['id']}")
+                InlineKeyboardButton(text="✏️ Set Name", callback_data=with_suffix(f"group:set_name:{group['id']}")),
+                InlineKeyboardButton(text="📅 Schedules", callback_data=with_suffix(f"group:schedules:{group['id']}"))
             ],
             [
-                InlineKeyboardButton(text="🤖 Assign Bot", callback_data=f"group:assign:{group['id']}"),
-                InlineKeyboardButton(text="📊 Stats", callback_data=f"group:stats:{group['id']}")
+                InlineKeyboardButton(text="🤖 Assign Bot", callback_data=with_suffix(f"group:assign:{group['id']}")),
+                InlineKeyboardButton(text="📊 Stats", callback_data=with_suffix(f"group:stats:{group['id']}"))
             ],
             [
-                InlineKeyboardButton(text="🗑 Delete", callback_data=f"group:delete:{group['id']}"),
-                InlineKeyboardButton(text="🔙 Back", callback_data="menu:groups")
+                InlineKeyboardButton(text="🗑 Delete", callback_data=with_suffix(f"group:delete:{group['id']}")),
+                InlineKeyboardButton(text="🔙 Back", callback_data=back_callback)
             ]
         ])
     

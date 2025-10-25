@@ -5,11 +5,16 @@ use anyhow::Result;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use teloxide::types::{
+    AllowedUpdate, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, UpdateKind,
+};
 use teloxide::update_listeners::{AsUpdateStream, UpdateListener};
-use teloxide::{prelude::*, types::UpdateKind, update_listeners, utils::html};
-use tokio::sync::watch;
+use teloxide::{prelude::*, update_listeners, utils::html};
+use tokio::sync::{watch, RwLock};
 use tokio_stream::StreamExt;
 use tracing::error;
 
@@ -18,6 +23,283 @@ static SOLANA_ADDRESS_REGEX: Lazy<Regex> =
 
 static BNB_ADDRESS_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\b0x[a-fA-F0-9]{40}\b").expect("valid bnb regex"));
+
+const SOLANA_GROUP_RULES: &[GroupRule] = &[
+    GroupRule {
+        id: "market_pulse",
+        label: "📊 Market Pulse",
+        members: &["market", "liquidity", "technical", "stats", "orders"],
+    },
+    GroupRule {
+        id: "tokenomics",
+        label: "📦 Tokenomics & Holders",
+        members: &["supply"],
+    },
+    GroupRule {
+        id: "launch_safety",
+        label: "🛡️ Launch & Safety",
+        members: &["developer", "security", "pump"],
+    },
+    GroupRule {
+        id: "community",
+        label: "🧛 Community & Socials",
+        members: &["community", "socials"],
+    },
+    GroupRule {
+        id: "timeline",
+        label: "🗓️ Timeline",
+        members: &["timestamps"],
+    },
+];
+
+const BNB_GROUP_RULES: &[GroupRule] = &[
+    GroupRule {
+        id: "market_pulse",
+        label: "📊 Market Pulse",
+        members: &["market", "liquidity", "technical", "orders"],
+    },
+    GroupRule {
+        id: "tokenomics",
+        label: "📦 Tokenomics & Holders",
+        members: &["dex_summary", "holders"],
+    },
+    GroupRule {
+        id: "launch_safety",
+        label: "🛡️ Launch & Safety",
+        members: &["security"],
+    },
+    GroupRule {
+        id: "community",
+        label: "🌐 Social Channels",
+        members: &["socials"],
+    },
+    GroupRule {
+        id: "timeline",
+        label: "🗓️ Timeline",
+        members: &["timestamps"],
+    },
+];
+
+const SOLANA_API_RULES: &[GroupRule] = &[
+    GroupRule {
+        id: "api_dex",
+        label: "🧮 DexScreener",
+        members: &["market", "liquidity", "technical", "orders"],
+    },
+    GroupRule {
+        id: "api_jupiter",
+        label: "🪐 Jupiter",
+        members: &["stats", "supply"],
+    },
+    GroupRule {
+        id: "api_pump",
+        label: "🎢 Pump.fun",
+        members: &["pump"],
+    },
+    GroupRule {
+        id: "api_helius",
+        label: "🛡️ Helius",
+        members: &["developer", "security", "timestamps"],
+    },
+    GroupRule {
+        id: "api_social",
+        label: "🌐 Social Signals",
+        members: &["community", "socials"],
+    },
+];
+
+const BNB_API_RULES: &[GroupRule] = &[
+    GroupRule {
+        id: "api_dex",
+        label: "🧮 DexScreener",
+        members: &["market", "liquidity", "technical", "orders"],
+    },
+    GroupRule {
+        id: "api_okx",
+        label: "🅾️ OKX",
+        members: &["dex_summary"],
+    },
+    GroupRule {
+        id: "api_holders",
+        label: "👥 Holder Stats",
+        members: &["holders"],
+    },
+    GroupRule {
+        id: "api_security",
+        label: "🛡️ Security",
+        members: &["security"],
+    },
+    GroupRule {
+        id: "api_social",
+        label: "🌐 Social Channels",
+        members: &["socials"],
+    },
+];
+
+#[derive(Clone)]
+struct RenderSection {
+    id: String,
+    label: String,
+    content: String,
+}
+
+#[derive(Clone)]
+struct RenderedAnalysis {
+    summary: String,
+    sections: Vec<RenderSection>,
+    api_sections: Vec<RenderSection>,
+    image_url: Option<String>,
+}
+
+struct HeadingRule {
+    prefix: &'static str,
+    id: &'static str,
+    label: &'static str,
+}
+
+struct GroupRule {
+    id: &'static str,
+    label: &'static str,
+    members: &'static [&'static str],
+}
+
+static ANALYSIS_CACHE: Lazy<RwLock<HashMap<String, RenderedAnalysis>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+static ANALYSIS_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+const ANALYSIS_CACHE_LIMIT: usize = 100;
+const CALLBACK_PREFIX: &str = "section";
+const TELEGRAM_TEXT_LIMIT: usize = 3900;
+
+fn regroup_sections(sections: Vec<RenderSection>, rules: &[GroupRule]) -> Vec<RenderSection> {
+    if rules.is_empty() {
+        return sections;
+    }
+
+    let mut member_to_index: HashMap<&str, usize> = HashMap::new();
+    for (idx, rule) in rules.iter().enumerate() {
+        for member in rule.members {
+            member_to_index.insert(*member, idx);
+        }
+    }
+
+    let mut grouped_contents: Vec<Vec<String>> = vec![Vec::new(); rules.len()];
+    let mut leftover: Vec<RenderSection> = Vec::new();
+
+    for section in sections {
+        if let Some(&idx) = member_to_index.get(section.id.as_str()) {
+            if !section.content.trim().is_empty() {
+                grouped_contents[idx].push(section.content);
+            }
+        } else {
+            leftover.push(section);
+        }
+    }
+
+    fn strip_markup(text: &str) -> String {
+        text.replace("<b>", "")
+            .replace("</b>", "")
+            .trim()
+            .to_string()
+    }
+
+    fn render_entries(entries: Vec<String>, label: &str) -> String {
+        if entries.is_empty() {
+            return format!("<b>{}</b>\nNo data reported.", label);
+        }
+
+        let mut output: Vec<String> = Vec::new();
+        output.push(format!("<b>{}</b>", label));
+
+        let mut current_title: Option<String> = None;
+        let mut buffer: Vec<String> = Vec::new();
+
+        let flush = |out: &mut Vec<String>, heading: Option<String>, buf: &mut Vec<String>| {
+            if buf.is_empty() {
+                return;
+            }
+            if let Some(title) = heading {
+                out.push(String::new());
+                out.push(format!("<i>{}</i>", title));
+            } else if out.len() > 1 {
+                out.push(String::new());
+            }
+            for entry in buf.drain(..) {
+                out.push(format!("  • {}", entry));
+            }
+        };
+
+        for entry in entries {
+            if entry.contains("<b>") && entry.contains("</b>") {
+                flush(&mut output, current_title.take(), &mut buffer);
+                current_title = Some(strip_markup(&entry));
+            } else if entry.ends_with(':') {
+                flush(&mut output, current_title.take(), &mut buffer);
+                current_title = Some(entry.trim_end_matches(':').to_string());
+            } else {
+                buffer.push(entry);
+            }
+        }
+
+        flush(&mut output, current_title.take(), &mut buffer);
+
+        output.join("\n")
+    }
+
+    let mut result: Vec<RenderSection> = Vec::new();
+    for (idx, rule) in rules.iter().enumerate() {
+        let mut entries: Vec<String> = Vec::new();
+        for block in &grouped_contents[idx] {
+            for line in block.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                entries.push(trimmed.to_string());
+            }
+        }
+
+        let content = render_entries(entries, rule.label);
+
+        result.push(RenderSection {
+            id: rule.id.to_string(),
+            label: rule.label.to_string(),
+            content,
+        });
+    }
+
+    let mut extras: Vec<String> = Vec::new();
+    for section in leftover {
+        if section.content.trim().is_empty() {
+            continue;
+        }
+        extras.push(section.content);
+    }
+
+    if !extras.is_empty() {
+        let mut entries: Vec<String> = Vec::new();
+        for block in extras {
+            for line in block.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                entries.push(trimmed.to_string());
+            }
+        }
+
+        let content = render_entries(entries, "Additional Insights");
+
+        result.push(RenderSection {
+            id: "additional".to_string(),
+            label: "ℹ️ Additional Insights".to_string(),
+            content,
+        });
+    }
+
+    result
+}
 
 fn format_compact_amount(value: f64) -> String {
     let abs_val = value.abs();
@@ -107,6 +389,529 @@ fn format_relative_timestamp(timestamp_ms: i64) -> Option<String> {
     })
 }
 
+fn collect_sections<'a, I>(
+    lines: I,
+    heading_rules: &[HeadingRule],
+) -> (Vec<String>, HashMap<String, (String, Vec<String>)>)
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut summary_lines = Vec::new();
+    let mut sections: HashMap<String, (String, Vec<String>)> = HashMap::new();
+    let mut current_id: Option<String> = None;
+
+    for line in lines {
+        if let Some(rule) = heading_rules
+            .iter()
+            .find(|rule| line.starts_with(rule.prefix))
+        {
+            let id = rule.id.to_string();
+            let entry = sections
+                .entry(id.clone())
+                .or_insert_with(|| (rule.label.to_string(), Vec::new()));
+            entry.1.push(line.to_string());
+            current_id = Some(id);
+        } else if let Some(id) = current_id.clone() {
+            if let Some(entry) = sections.get_mut(&id) {
+                entry.1.push(line.to_string());
+            }
+        } else {
+            summary_lines.push(line.to_string());
+        }
+    }
+
+    (summary_lines, sections)
+}
+
+fn trim_lines(lines: &mut Vec<String>) {
+    while matches!(lines.first(), Some(line) if line.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while matches!(lines.last(), Some(line) if line.trim().is_empty()) {
+        lines.pop();
+    }
+}
+
+fn join_lines(lines: &[String]) -> String {
+    if lines.is_empty() {
+        String::new()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn clamp_text(text: &str) -> String {
+    if text.len() <= TELEGRAM_TEXT_LIMIT {
+        return text.to_string();
+    }
+
+    let mut total = 0usize;
+    let mut lines_out: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        let line_len = line.len() + 1; // account for newline
+        if total + line_len > TELEGRAM_TEXT_LIMIT {
+            break;
+        }
+        lines_out.push(line);
+        total += line_len;
+    }
+
+    if lines_out.is_empty() {
+        return format!(
+            "{}…\n\n⚠️ Section truncated for Telegram limit.",
+            &text[..TELEGRAM_TEXT_LIMIT.saturating_sub(40)]
+        );
+    }
+
+    let mut result = lines_out.join("\n");
+    result.push_str("\n…\n\n⚠️ Section truncated for Telegram limit.");
+    result
+}
+
+fn organize_solana_sections(full_text: String, image_url: Option<String>) -> RenderedAnalysis {
+    const RULES: &[HeadingRule] = &[
+        HeadingRule {
+            prefix: "💰 <b>Price & Market Data</b>",
+            id: "market",
+            label: "📈 Market & Activity",
+        },
+        HeadingRule {
+            prefix: "📊 <b>Trading Volume</b>",
+            id: "market",
+            label: "📈 Market & Activity",
+        },
+        HeadingRule {
+            prefix: "📈 <b>Price Changes</b>",
+            id: "market",
+            label: "📈 Market & Activity",
+        },
+        HeadingRule {
+            prefix: "🔄 <b>Transaction Activity</b>",
+            id: "market",
+            label: "📈 Market & Activity",
+        },
+        HeadingRule {
+            prefix: "💧 <b>Liquidity</b>",
+            id: "liquidity",
+            label: "💧 Liquidity",
+        },
+        HeadingRule {
+            prefix: "📦 <b>Supply & Token Info</b>",
+            id: "supply",
+            label: "📦 Supply & Holders",
+        },
+        HeadingRule {
+            prefix: "👥 <b>Holders Analysis</b>",
+            id: "supply",
+            label: "📦 Supply & Holders",
+        },
+        HeadingRule {
+            prefix: "🧑‍💻 <b>Developer Info",
+            id: "developer",
+            label: "🧑‍💻 Developer",
+        },
+        HeadingRule {
+            prefix: "🔒 <b>Security & Governance",
+            id: "security",
+            label: "🔒 Security",
+        },
+        HeadingRule {
+            prefix: "🎢 <b>Bonding Curve (pf)</b>",
+            id: "pump",
+            label: "🎢 Pump.fun & Bonding",
+        },
+        HeadingRule {
+            prefix: "🚦 <b>Status & Flags (pf)</b>",
+            id: "pump",
+            label: "🎢 Pump.fun & Bonding",
+        },
+        HeadingRule {
+            prefix: "🏛️ <b>Pump.fun Addresses</b>",
+            id: "pump",
+            label: "🎢 Pump.fun & Bonding",
+        },
+        HeadingRule {
+            prefix: "🖼️ <b>Pump.fun Media</b>",
+            id: "pump",
+            label: "🎢 Pump.fun & Bonding",
+        },
+        HeadingRule {
+            prefix: "📺 <b>Livestream Info (pf)</b>",
+            id: "community",
+            label: "🧛 Community & Signals",
+        },
+        HeadingRule {
+            prefix: "💬 <b>Community Engagement (pf)</b>",
+            id: "community",
+            label: "🧛 Community & Signals",
+        },
+        HeadingRule {
+            prefix: "🧛 <b>Vamped.fun Status</b>",
+            id: "community",
+            label: "🧛 Community & Signals",
+        },
+        HeadingRule {
+            prefix: "🗓️ <b>Timestamps</b>",
+            id: "timestamps",
+            label: "🗓️ Timeline",
+        },
+        HeadingRule {
+            prefix: "⚙️ <b>Technical Details</b>",
+            id: "technical",
+            label: "⚙️ Technical Details",
+        },
+        HeadingRule {
+            prefix: "🔗 <b>Pair Metadata (dex)</b>",
+            id: "technical",
+            label: "⚙️ Technical Details",
+        },
+        HeadingRule {
+            prefix: "🔁 <b>Other Pairs (dex)</b>",
+            id: "technical",
+            label: "⚙️ Technical Details",
+        },
+        HeadingRule {
+            prefix: "📋 <b>DexScreener Orders (dex)</b>",
+            id: "orders",
+            label: "📋 Orders",
+        },
+        HeadingRule {
+            prefix: "🧾 <b>Dex Orders</b>",
+            id: "orders",
+            label: "📋 Orders",
+        },
+        HeadingRule {
+            prefix: "📊 <b>Advanced Analytics (jup)</b>",
+            id: "stats",
+            label: "📊 Advanced Stats",
+        },
+        HeadingRule {
+            prefix: "🌐 <b>Social Links</b>",
+            id: "socials",
+            label: "🌐 Socials & Description",
+        },
+        HeadingRule {
+            prefix: "📣 <b>Socials (dex)</b>",
+            id: "socials",
+            label: "🌐 Socials & Description",
+        },
+        HeadingRule {
+            prefix: "🌐 <b>Websites (dex)</b>",
+            id: "socials",
+            label: "🌐 Socials & Description",
+        },
+        HeadingRule {
+            prefix: "📝 <b>Description</b>",
+            id: "socials",
+            label: "🌐 Socials & Description",
+        },
+    ];
+
+    let (mut summary_lines, mut sections_map) = collect_sections(full_text.lines(), RULES);
+    trim_lines(&mut summary_lines);
+
+    let order = [
+        "market",
+        "liquidity",
+        "supply",
+        "developer",
+        "security",
+        "pump",
+        "timestamps",
+        "technical",
+        "stats",
+        "community",
+        "socials",
+        "orders",
+    ];
+
+    let mut sections: Vec<RenderSection> = Vec::new();
+
+    for id in order {
+        if let Some((label, mut lines)) = sections_map.remove(id) {
+            trim_lines(&mut lines);
+            if !lines.is_empty() {
+                sections.push(RenderSection {
+                    id: id.to_string(),
+                    label,
+                    content: join_lines(&lines),
+                });
+            }
+        }
+    }
+
+    for (id, (label, mut lines)) in sections_map {
+        trim_lines(&mut lines);
+        if !lines.is_empty() {
+            sections.push(RenderSection {
+                id,
+                label,
+                content: join_lines(&lines),
+            });
+        }
+    }
+
+    let mut summary_builder = summary_lines;
+    trim_lines(&mut summary_builder);
+
+    if let Some(market_section) = sections.iter().find(|section| section.id == "market") {
+        let extra_lines: Vec<String> = market_section
+            .content
+            .lines()
+            .skip(1)
+            .filter(|line| !line.trim().is_empty())
+            .take(4)
+            .map(|line| line.to_string())
+            .collect();
+        if !extra_lines.is_empty() {
+            if !summary_builder.is_empty() {
+                summary_builder.push(String::new());
+            }
+            summary_builder.extend(extra_lines);
+        }
+    }
+
+    if !summary_builder.is_empty() {
+        summary_builder.push(String::new());
+    }
+    summary_builder.push("🔘 Tap the buttons below for the full breakdown.".to_string());
+
+    let summary = if summary_builder.is_empty() {
+        "No summary available.".to_string()
+    } else {
+        join_lines(&summary_builder)
+    };
+
+    let grouped_sections = regroup_sections(sections.clone(), SOLANA_GROUP_RULES);
+    let api_sections = regroup_sections(sections, SOLANA_API_RULES);
+
+    RenderedAnalysis {
+        summary,
+        sections: grouped_sections,
+        api_sections,
+        image_url,
+    }
+}
+
+fn organize_bnb_sections(full_text: String) -> RenderedAnalysis {
+    const RULES: &[HeadingRule] = &[
+        HeadingRule {
+            prefix: "💰 <b>Price & Market</b>",
+            id: "market",
+            label: "📈 Market & Activity",
+        },
+        HeadingRule {
+            prefix: "📈 <b>Price Changes</b>",
+            id: "market",
+            label: "📈 Market & Activity",
+        },
+        HeadingRule {
+            prefix: "📊 <b>Volume (dex)</b>",
+            id: "market",
+            label: "📈 Market & Activity",
+        },
+        HeadingRule {
+            prefix: "🔄 <b>Transactions (dex)</b>",
+            id: "market",
+            label: "📈 Market & Activity",
+        },
+        HeadingRule {
+            prefix: "💧 <b>Liquidity (dex)</b>",
+            id: "liquidity",
+            label: "💧 Liquidity",
+        },
+        HeadingRule {
+            prefix: "📌 <b>Dex Summary (tokens)</b>",
+            id: "dex_summary",
+            label: "📌 Dex Summary",
+        },
+        HeadingRule {
+            prefix: "👥 <b>Holder Metrics</b>",
+            id: "holders",
+            label: "👥 Holders",
+        },
+        HeadingRule {
+            prefix: "🔗 <b>Pair Metadata (dex)</b>",
+            id: "technical",
+            label: "⚙️ Technical Details",
+        },
+        HeadingRule {
+            prefix: "🔁 <b>Other Pairs (dex)</b>",
+            id: "technical",
+            label: "⚙️ Technical Details",
+        },
+        HeadingRule {
+            prefix: "📣 <b>Socials (dex)</b>",
+            id: "socials",
+            label: "🌐 Socials",
+        },
+        HeadingRule {
+            prefix: "🌐 <b>Websites (dex)</b>",
+            id: "socials",
+            label: "🌐 Socials",
+        },
+        HeadingRule {
+            prefix: "🧾 <b>Dex Orders</b>",
+            id: "orders",
+            label: "📋 Orders",
+        },
+    ];
+
+    let (mut summary_lines, mut sections_map) = collect_sections(full_text.lines(), RULES);
+    trim_lines(&mut summary_lines);
+
+    let order = [
+        "market",
+        "liquidity",
+        "dex_summary",
+        "holders",
+        "technical",
+        "socials",
+        "orders",
+    ];
+
+    let mut sections: Vec<RenderSection> = Vec::new();
+
+    for id in order {
+        if let Some((label, mut lines)) = sections_map.remove(id) {
+            trim_lines(&mut lines);
+            if !lines.is_empty() {
+                sections.push(RenderSection {
+                    id: id.to_string(),
+                    label,
+                    content: join_lines(&lines),
+                });
+            }
+        }
+    }
+
+    for (id, (label, mut lines)) in sections_map {
+        trim_lines(&mut lines);
+        if !lines.is_empty() {
+            sections.push(RenderSection {
+                id,
+                label,
+                content: join_lines(&lines),
+            });
+        }
+    }
+
+    let mut summary_builder = summary_lines;
+    trim_lines(&mut summary_builder);
+
+    if let Some(market_section) = sections.iter().find(|section| section.id == "market") {
+        let extra_lines: Vec<String> = market_section
+            .content
+            .lines()
+            .skip(1)
+            .filter(|line| !line.trim().is_empty())
+            .take(4)
+            .map(|line| line.to_string())
+            .collect();
+        if !extra_lines.is_empty() {
+            if !summary_builder.is_empty() {
+                summary_builder.push(String::new());
+            }
+            summary_builder.extend(extra_lines);
+        }
+    }
+
+    if !summary_builder.is_empty() {
+        summary_builder.push(String::new());
+    }
+    summary_builder.push("🔘 Tap the buttons below for the full breakdown.".to_string());
+
+    let summary = if summary_builder.is_empty() {
+        "No summary available.".to_string()
+    } else {
+        join_lines(&summary_builder)
+    };
+
+    let grouped_sections = regroup_sections(sections.clone(), BNB_GROUP_RULES);
+    let api_sections = regroup_sections(sections, BNB_API_RULES);
+
+    RenderedAnalysis {
+        summary,
+        sections: grouped_sections,
+        api_sections,
+        image_url: None,
+    }
+}
+
+async fn cache_analysis(rendered: RenderedAnalysis) -> String {
+    let id_value = ANALYSIS_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+    let key = format!("{:x}", id_value);
+    let mut cache = ANALYSIS_CACHE.write().await;
+    if cache.len() >= ANALYSIS_CACHE_LIMIT {
+        if let Some(old_key) = cache.keys().next().cloned() {
+            cache.remove(&old_key);
+        }
+    }
+    cache.insert(key.clone(), rendered);
+    key
+}
+
+async fn fetch_analysis(token: &str) -> Option<RenderedAnalysis> {
+    let cache = ANALYSIS_CACHE.read().await;
+    cache.get(token).cloned()
+}
+
+async fn remove_analysis(token: &str) {
+    let mut cache = ANALYSIS_CACHE.write().await;
+    cache.remove(token);
+}
+
+fn button_short_label(label: &str) -> String {
+    label.split_whitespace().next().unwrap_or(label).to_string()
+}
+
+fn build_keyboard(
+    token: &str,
+    sections: &[RenderSection],
+    api_sections: &[RenderSection],
+) -> InlineKeyboardMarkup {
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+
+    if !sections.is_empty() {
+        let mut category_row: Vec<InlineKeyboardButton> = Vec::new();
+        for section in sections.iter().take(5) {
+            category_row.push(InlineKeyboardButton::callback(
+                button_short_label(&section.label),
+                format!("{CALLBACK_PREFIX}:{token}:{}", section.id),
+            ));
+        }
+        if !category_row.is_empty() {
+            rows.push(category_row);
+        }
+    }
+
+    if !api_sections.is_empty() {
+        let mut api_row: Vec<InlineKeyboardButton> = Vec::new();
+        for api_section in api_sections.iter().take(5) {
+            api_row.push(InlineKeyboardButton::callback(
+                button_short_label(&api_section.label),
+                format!("{CALLBACK_PREFIX}:{token}:{}", api_section.id),
+            ));
+        }
+        if !api_row.is_empty() {
+            rows.push(api_row);
+        }
+    }
+
+    rows.push(vec![
+        InlineKeyboardButton::callback(
+            button_short_label("🏠 Overview"),
+            format!("{CALLBACK_PREFIX}:{token}:summary"),
+        ),
+        InlineKeyboardButton::callback(
+            button_short_label("❌ Close"),
+            format!("{CALLBACK_PREFIX}:{token}:close"),
+        ),
+    ]);
+
+    InlineKeyboardMarkup::new(rows)
+}
+
 pub async fn start_bot(
     bot_token: String,
     api_client: Arc<ApiClient>,
@@ -114,7 +919,12 @@ pub async fn start_bot(
 ) -> Result<()> {
     let bot = Bot::new(bot_token);
 
-    let mut listener = update_listeners::polling_default(bot.clone()).await;
+    let mut listener = update_listeners::Polling::builder(bot.clone())
+        .timeout(Duration::from_secs(10))
+        .allowed_updates(vec![AllowedUpdate::Message, AllowedUpdate::CallbackQuery])
+        .delete_webhook()
+        .await
+        .build();
     let stream = listener.as_stream();
 
     tokio::pin!(stream);
@@ -130,12 +940,31 @@ pub async fn start_bot(
             update = stream.next() => {
                 match update {
                     Some(Ok(update)) => {
-                        if let UpdateKind::Message(message) = update.kind {
-                            let bot_clone = bot.clone();
-                            let client = Arc::clone(&api_client);
-                            if let Err(err) = handle_message(bot_clone, message, client).await {
-                                error!("Handler error: {:?}", err);
+                        let update_kind = match &update.kind {
+                            UpdateKind::Message(_) => "message",
+                            UpdateKind::CallbackQuery(_) => "callback_query",
+                            UpdateKind::EditedMessage(_) => "edited_message",
+                            UpdateKind::ChannelPost(_) => "channel_post",
+                            UpdateKind::EditedChannelPost(_) => "edited_channel_post",
+                            _ => "other",
+                        };
+                        tracing::debug!("start_bot: received update kind={}", update_kind);
+
+                        match update.kind {
+                            UpdateKind::Message(message) => {
+                                let bot_clone = bot.clone();
+                                let client = Arc::clone(&api_client);
+                                if let Err(err) = handle_message(bot_clone, message, client).await {
+                                    error!("Handler error: {:?}", err);
+                                }
                             }
+                            UpdateKind::CallbackQuery(query) => {
+                                let bot_clone = bot.clone();
+                                if let Err(err) = handle_callback(bot_clone, query).await {
+                                    error!("Callback handler error: {:?}", err);
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     Some(Err(err)) => {
@@ -159,47 +988,200 @@ async fn handle_message(bot: Bot, msg: Message, api_client: Arc<ApiClient>) -> R
         if let Some(contract) = detect_contract_address(text) {
             // Start timing
             let start_time = Instant::now();
+            tracing::info!(
+                "handle_message: received contract={} chat={}",
+                contract.address,
+                msg.chat.id
+            );
 
             // Analyze token
             match api_client.analyze_token(&contract).await {
                 Ok(analysis) => {
                     let elapsed = start_time.elapsed();
                     let timing_text = format!("⚡ {}ms!", elapsed.as_millis());
-                    let (formatted_text, _image_url) = format_analysis(&analysis);
-                    let final_text = format!("{}\n\n{}", timing_text, formatted_text);
+                    let rendered = format_analysis(&analysis);
+                    let summary_text = clamp_text(&format!(
+                        "{}\n\n{}",
+                        timing_text,
+                        rendered.summary.trim_end()
+                    ));
 
-                    let lines: Vec<&str> = final_text.split('\n').collect();
-                    let mut message_chunk = String::new();
+                    let token = cache_analysis(rendered.clone()).await;
+                    let keyboard =
+                        build_keyboard(&token, &rendered.sections, &rendered.api_sections);
+                    tracing::info!(
+                        "handle_message: cached token={} sections={} apis={} summary_len={}",
+                        token,
+                        rendered.sections.len(),
+                        rendered.api_sections.len(),
+                        summary_text.len()
+                    );
 
-                    for line in lines {
-                        if message_chunk.len() + line.len() + 1 > 4000 {
-                            bot.send_message(msg.chat.id, &message_chunk)
-                                .parse_mode(teloxide::types::ParseMode::Html)
-                                .disable_web_page_preview(true)
-                                .await?;
-                            message_chunk.clear();
-                        }
-                        message_chunk.push_str(line);
-                        message_chunk.push('\n');
-                    }
-
-                    if !message_chunk.is_empty() {
-                        bot.send_message(msg.chat.id, &message_chunk)
-                            .parse_mode(teloxide::types::ParseMode::Html)
-                            .disable_web_page_preview(true)
-                            .await?;
-                    }
+                    bot.send_message(msg.chat.id, summary_text)
+                        .reply_to_message_id(msg.id)
+                        .parse_mode(teloxide::types::ParseMode::Html)
+                        .disable_web_page_preview(true)
+                        .reply_markup(keyboard)
+                        .await?;
                 }
                 Err(e) => {
                     let elapsed = start_time.elapsed();
                     let timing_text = format!("⚡ {}ms!", elapsed.as_millis());
                     let error_text = format!("{}\n\n❌ Error analyzing token: {}", timing_text, e);
 
-                    bot.send_message(msg.chat.id, error_text).await?;
+                    bot.send_message(msg.chat.id, error_text)
+                        .reply_to_message_id(msg.id)
+                        .await?;
                 }
             }
         }
     }
+
+    Ok(())
+}
+
+async fn handle_callback(bot: Bot, query: CallbackQuery) -> ResponseResult<()> {
+    let data = match &query.data {
+        Some(d) if d.starts_with(&format!("{CALLBACK_PREFIX}:")) => d.clone(),
+        _ => {
+            tracing::warn!(
+                "handle_callback: unexpected data {:?} from user={}",
+                query.data,
+                query.from.id
+            );
+            bot.answer_callback_query(query.id.clone()).await.ok();
+            return Ok(());
+        }
+    };
+
+    tracing::debug!(
+        "handle_callback: received query data={} user={}",
+        data,
+        query.from.id
+    );
+
+    let parts: Vec<&str> = data.split(':').collect();
+    if parts.len() < 3 {
+        tracing::warn!(
+            "handle_callback: insufficient segments data={} user={}",
+            data,
+            query.from.id
+        );
+        bot.answer_callback_query(query.id.clone()).await.ok();
+        return Ok(());
+    }
+
+    let token = parts[1];
+    let target = parts[2];
+    let _requested_page = parts
+        .get(3)
+        .and_then(|page| page.parse::<usize>().ok())
+        .unwrap_or(0);
+
+    let query_id = query.id.clone();
+
+    if target == "close" {
+        tracing::info!(
+            "handle_callback: close requested token={} user={}",
+            token,
+            query.from.id
+        );
+        if let Some(message) = &query.message {
+            bot.delete_message(message.chat.id, message.id).await.ok();
+        }
+        remove_analysis(token).await;
+        bot.answer_callback_query(query_id).await.ok();
+        return Ok(());
+    }
+
+    let Some(rendered) = fetch_analysis(token).await else {
+        tracing::warn!(
+            "handle_callback: cache miss token={} user={}",
+            token,
+            query.from.id
+        );
+        bot.answer_callback_query(query.id.clone())
+            .text("Analysis expired. Request a new report.")
+            .show_alert(true)
+            .await
+            .ok();
+        return Ok(());
+    };
+
+    let text = if target == "summary" {
+        tracing::info!(
+            "handle_callback: serving summary token={} user={}",
+            token,
+            query.from.id
+        );
+        rendered.summary.clone()
+    } else if let Some(section) = rendered
+        .sections
+        .iter()
+        .find(|section| section.id == target)
+    {
+        tracing::info!(
+            "handle_callback: serving section token={} section={} user={}",
+            token,
+            target,
+            query.from.id
+        );
+        section.content.clone()
+    } else if let Some(api_section) = rendered
+        .api_sections
+        .iter()
+        .find(|section| section.id == target)
+    {
+        tracing::info!(
+            "handle_callback: serving api section token={} section={} user={}",
+            token,
+            target,
+            query.from.id
+        );
+        api_section.content.clone()
+    } else {
+        tracing::warn!(
+            "handle_callback: unknown section token={} section={} user={}",
+            token,
+            target,
+            query.from.id
+        );
+        bot.answer_callback_query(query.id.clone())
+            .text("Section unavailable.")
+            .show_alert(true)
+            .await
+            .ok();
+        return Ok(());
+    };
+
+    if let Some(message) = &query.message {
+        let display_text = clamp_text(&text);
+        let keyboard = build_keyboard(token, &rendered.sections, &rendered.api_sections);
+        let keyboard_rows = keyboard.inline_keyboard.len();
+        tracing::info!(
+            "handle_callback: editing message chat={} message={} len={} keyboard_rows={}",
+            message.chat.id,
+            message.id,
+            display_text.len(),
+            keyboard_rows
+        );
+        if let Err(err) = bot
+            .edit_message_text(message.chat.id, message.id, display_text)
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .disable_web_page_preview(true)
+            .reply_markup(keyboard)
+            .await
+        {
+            tracing::error!(
+                "handle_callback: edit failed chat={} message={} err={:?}",
+                message.chat.id,
+                message.id,
+                err
+            );
+        }
+    }
+
+    bot.answer_callback_query(query_id).await.ok();
 
     Ok(())
 }
@@ -239,14 +1221,14 @@ fn create_progress_bar(percentage: f64) -> String {
     format!("[{}{}] {:.1}%", filled, empty, percentage)
 }
 
-fn format_analysis(analysis: &TokenAnalysis) -> (String, Option<String>) {
+fn format_analysis(analysis: &TokenAnalysis) -> RenderedAnalysis {
     match analysis {
         TokenAnalysis::Solana(data) => format_solana_token_data(data),
         TokenAnalysis::Bnb(data) => format_bnb_token_data(data),
     }
 }
 
-fn format_solana_token_data(data: &TokenData) -> (String, Option<String>) {
+fn format_solana_token_data(data: &TokenData) -> RenderedAnalysis {
     let ca = &data.mint_address;
     let mut parts = Vec::new();
 
@@ -1327,10 +2309,11 @@ fn format_solana_token_data(data: &TokenData) -> (String, Option<String>) {
         }
     }
 
-    (parts.join("\n"), image_url)
+    let full_text = parts.join("\n");
+    organize_solana_sections(full_text, image_url)
 }
 
-fn format_bnb_token_data(data: &BnbTokenData) -> (String, Option<String>) {
+fn format_bnb_token_data(data: &BnbTokenData) -> RenderedAnalysis {
     let ca = &data.contract_address;
     let mut parts = Vec::new();
 
@@ -1877,11 +2860,6 @@ fn format_bnb_token_data(data: &BnbTokenData) -> (String, Option<String>) {
         parts.push(format!("🚨 <b>Risk Level:</b> {}", risk_level));
     }
 
-    let mut image_url = data.token_logo_url.clone();
-    if image_url.is_none() {
-        image_url = primary_pair
-            .and_then(|pair| pair.info.as_ref())
-            .and_then(|info| info.image_url.clone());
-    }
-    (parts.join("\n"), image_url)
+    let full_text = parts.join("\n");
+    organize_bnb_sections(full_text)
 }

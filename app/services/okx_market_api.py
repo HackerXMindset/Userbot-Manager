@@ -18,6 +18,12 @@ class OkxMarketAPIClient:
     BASE_URL = "https://web3.okx.com/priapi/v1/dx/market/v2/latest/info"
     REQUEST_TIMEOUT = 10
     CACHE_TTL_SECONDS = 30
+    DEFAULT_RATE_PROFILE = "default"
+
+    RATE_LIMITS: Dict[str, Dict[str, float]] = {
+        "default": {"min_interval": 1.0},          # 1 request per second
+        "mc_monitor": {"min_interval": 1.0 / 3.0},  # Up to 3 requests per second
+    }
 
     CHAIN_ID_MAP = {
         "bsc": "56",
@@ -44,6 +50,10 @@ class OkxMarketAPIClient:
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._cache_expiry: Dict[str, datetime] = {}
         self._lock = asyncio.Lock()
+        self._rate_state: Dict[str, Dict[str, Any]] = {
+            profile: {"last_call": 0.0, "lock": asyncio.Lock()}
+            for profile in self.RATE_LIMITS
+        }
 
     async def start(self) -> None:
         if not self.session:
@@ -56,8 +66,18 @@ class OkxMarketAPIClient:
             self.session = None
         self._cache.clear()
         self._cache_expiry.clear()
+        for state in self._rate_state.values():
+            state["last_call"] = 0.0
 
-    async def fetch_token_info(self, address: str, chain_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    async def fetch_token_info(
+        self,
+        address: str,
+        chain_id: Optional[str] = None,
+        rate_profile: str = DEFAULT_RATE_PROFILE,
+        use_cache: bool = True,
+        cache_ttl: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch OKX token data, respecting per-profile rate limits and cache options."""
         await self.start()
 
         normalized_chain = self._normalize_chain(chain_id, address)
@@ -66,10 +86,15 @@ class OkxMarketAPIClient:
             return None
 
         cache_key = f"{normalized_chain}:{address}"
-        async with self._lock:
-            expires_at = self._cache_expiry.get(cache_key)
-            if expires_at and expires_at > datetime.utcnow():
-                return self._cache.get(cache_key)
+        ttl_seconds = cache_ttl if cache_ttl is not None else self.CACHE_TTL_SECONDS
+
+        if use_cache:
+            async with self._lock:
+                expires_at = self._cache_expiry.get(cache_key)
+                if expires_at and expires_at > datetime.utcnow():
+                    return self._cache.get(cache_key)
+
+        await self._apply_rate_limit(rate_profile)
 
         params = {
             "tokenContractAddress": address,
@@ -77,9 +102,6 @@ class OkxMarketAPIClient:
         }
 
         try:
-            # Rate limiting: 200ms delay between requests
-            await asyncio.sleep(0.2)
-
             async with self.session.get(self.BASE_URL, params=params) as response:
                 if response.status != 200:
                     text = await response.text()
@@ -109,7 +131,7 @@ class OkxMarketAPIClient:
 
         async with self._lock:
             self._cache[cache_key] = data
-            self._cache_expiry[cache_key] = datetime.utcnow() + timedelta(seconds=self.CACHE_TTL_SECONDS)
+            self._cache_expiry[cache_key] = datetime.utcnow() + timedelta(seconds=ttl_seconds)
 
         return data
 
@@ -142,6 +164,30 @@ class OkxMarketAPIClient:
             return "56"  # default to BSC for EVM-style addresses
         # Treat other formats (e.g., Solana base58) as Solana
         return "501"
+
+    async def _apply_rate_limit(self, profile: str) -> None:
+        """Throttle outbound OKX requests according to the requested profile."""
+        config = self.RATE_LIMITS.get(profile, self.RATE_LIMITS[self.DEFAULT_RATE_PROFILE])
+
+        if profile not in self._rate_state:
+            self._rate_state[profile] = {"last_call": 0.0, "lock": asyncio.Lock()}
+
+        state = self._rate_state[profile]
+        lock: asyncio.Lock = state["lock"]
+        min_interval = max(config.get("min_interval", 0.0), 0.0)
+
+        async with lock:
+            last_call = state.get("last_call", 0.0)
+            if min_interval > 0 and last_call:
+                now = asyncio.get_running_loop().time()
+                elapsed = now - last_call
+                if elapsed < min_interval:
+                    await asyncio.sleep(min_interval - elapsed)
+                    now = asyncio.get_running_loop().time()
+            else:
+                now = asyncio.get_running_loop().time()
+
+            state["last_call"] = now
 
     @staticmethod
     def _to_decimal(value: Any) -> Optional[Decimal]:

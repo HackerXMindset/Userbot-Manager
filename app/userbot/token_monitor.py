@@ -86,14 +86,23 @@ class TokenMonitor:
 
         if blockchain.upper() == "SOL":
             token_data = await jupiter_service.get_token_data(address, use_cache=False)
+            if token_data:
+                market_cap = self._normalize_decimal(jupiter_service.get_market_cap(token_data))
+                price = self._normalize_decimal(jupiter_service.get_price(token_data))
+                ticker = jupiter_service.get_ticker(token_data)
 
-        okx_info = await self.okx_client.fetch_token_info(address, blockchain)
-        if okx_info:
-            market_cap = self._normalize_decimal(self.okx_client.get_market_cap(okx_info))
-            price = self._normalize_decimal(self.okx_client.get_price(okx_info))
-            ticker = self.okx_client.get_ticker(okx_info)
-
+        okx_info = None
         if market_cap is None:
+            okx_info = await self.okx_client.fetch_token_info(address, blockchain, use_cache=False)
+        elif blockchain.upper() != "SOL":
+            okx_info = await self.okx_client.fetch_token_info(address, blockchain, use_cache=False)
+
+        if okx_info:
+            market_cap = market_cap or self._normalize_decimal(self.okx_client.get_market_cap(okx_info))
+            price = price or self._normalize_decimal(self.okx_client.get_price(okx_info))
+            ticker = ticker or self.okx_client.get_ticker(okx_info)
+
+        if market_cap is None and blockchain.upper() == "SOL":
             if token_data is None:
                 token_data = await jupiter_service.get_token_data(address, use_cache=False)
             if token_data:

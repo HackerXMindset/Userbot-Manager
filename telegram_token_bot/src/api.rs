@@ -7,6 +7,7 @@ use serde_json::json;
 use std::env;
 use std::time::Duration;
 use tokio::time::timeout;
+use tracing::{debug, warn};
 
 pub struct ApiClient {
     client: Client,
@@ -106,18 +107,47 @@ impl ApiClient {
     }
 
     pub async fn analyze_bnb_token(&self, contract_address: &str) -> Result<TokenAnalysis> {
-        let (okx_result, dexscreener_result, token_summary_result, orders_result) = tokio::join!(
-            self.get_okx_latest_info(contract_address),
-            self.get_dexscreener_data(contract_address),
-            self.get_dexscreener_token_summary(contract_address),
-            self.get_dexscreener_orders_data("bsc", contract_address),
+        let dexscreener_data = match self.get_dexscreener_data(contract_address).await {
+            Ok(data) => Some(data),
+            Err(err) => {
+                warn!(
+                    "DexScreener primary fetch failed for {}: {}",
+                    contract_address, err
+                );
+                None
+            }
+        };
+
+        let (dex_slug, okx_chain_id) = Self::resolve_evm_chain_context(dexscreener_data.as_ref());
+        debug!(
+            "evm_chain_context: address={} slug={} okx_chain={}",
+            contract_address, dex_slug, okx_chain_id
         );
+
+        let (token_summary_result, orders_result, okx_result) = tokio::join!(
+            self.get_dexscreener_token_summary(dex_slug, contract_address),
+            self.get_dexscreener_orders_data(dex_slug, contract_address),
+            self.get_okx_latest_info(contract_address, okx_chain_id),
+        );
+
+        if let Err(err) = &token_summary_result {
+            warn!(
+                "DexScreener token summary fetch failed for {} on {}: {}",
+                contract_address, dex_slug, err
+            );
+        }
+        if let Err(err) = &orders_result {
+            warn!(
+                "DexScreener orders fetch failed for {} on {}: {}",
+                contract_address, dex_slug, err
+            );
+        }
 
         let raw_data = okx_result?;
         let normalized = Self::normalize_bnb_data(
             contract_address,
             &raw_data,
-            dexscreener_result.ok(),
+            dexscreener_data,
             token_summary_result.ok(),
             orders_result.ok(),
         );
@@ -183,10 +213,14 @@ impl ApiClient {
         })
     }
 
-    async fn get_okx_latest_info(&self, contract_address: &str) -> Result<OkxTokenData> {
+    async fn get_okx_latest_info(
+        &self,
+        contract_address: &str,
+        chain_id: &str,
+    ) -> Result<OkxTokenData> {
         let url = format!(
-            "https://web3.okx.com/priapi/v1/dx/market/v2/latest/info?tokenContractAddress={}&chainId=56",
-            contract_address
+            "https://web3.okx.com/priapi/v1/dx/market/v2/latest/info?tokenContractAddress={}&chainId={}",
+            contract_address, chain_id
         );
         let response = timeout(Duration::from_secs(5), self.client.get(&url).send()).await??;
         let payload: OkxLatestInfoResponse = response.json().await?;
@@ -209,11 +243,12 @@ impl ApiClient {
 
     async fn get_dexscreener_token_summary(
         &self,
+        chain_slug: &str,
         contract_address: &str,
     ) -> Result<Vec<TokenPair>> {
         let url = format!(
-            "https://api.dexscreener.com/tokens/v1/bsc/{}",
-            contract_address
+            "https://api.dexscreener.com/tokens/v1/{}/{}",
+            chain_slug, contract_address
         );
         let response = timeout(Duration::from_secs(3), self.client.get(&url).send()).await??;
         let data: Vec<TokenPair> = response.json().await?;
@@ -491,6 +526,33 @@ impl ApiClient {
 
         let data: VampedFunData = response.json().await?;
         Ok(data)
+    }
+
+    fn resolve_evm_chain_context(
+        dex_data: Option<&DexScreenerData>,
+    ) -> (&'static str, &'static str) {
+        let chain_hint = dex_data
+            .and_then(|dex| dex.pairs.as_ref())
+            .and_then(|pairs| pairs.iter().find_map(|pair| pair.chain_id.as_deref()));
+
+        if let Some(chain_id) = chain_hint {
+            let normalized = chain_id.trim().to_ascii_lowercase();
+            if normalized.contains("base") || normalized == "8453" {
+                return ("base", "8453");
+            }
+            if normalized.contains("bsc") || normalized.contains("bnb") || normalized == "56" {
+                return ("bsc", "56");
+            }
+            if let Ok(value) = normalized.parse::<u64>() {
+                match value {
+                    8453 => return ("base", "8453"),
+                    56 => return ("bsc", "56"),
+                    _ => {}
+                }
+            }
+        }
+
+        ("bsc", "56")
     }
 
     async fn get_sol_balance(&self, address: &str) -> Result<f64> {

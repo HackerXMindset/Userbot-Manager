@@ -25,6 +25,7 @@ from app.db import db
 from app.models import TokenModel
 from app.models.monitored_source import MonitoredSourceModel
 from app.services.dexscreener_api import get_dexscreener_client
+from app.services.jupiter_api import get_jupiter_service
 from app.services.okx_market_api import get_okx_market_client
 from app.utils.tier_calculator import calculate_next_poll_time, get_poll_interval_for_tier
 from app.gain_alert_templates import (
@@ -210,14 +211,29 @@ class DexScreenerService:
                 market_cap: Optional[Decimal] = None
                 ticker: Optional[str] = None
 
-                okx_data = await self.okx_client.fetch_token_info(address, chain_id)
-                if okx_data:
-                    market_cap = self.okx_client.get_market_cap(okx_data)
-                    ticker = self.okx_client.get_ticker(okx_data)
-                    if market_cap:
-                        logger.debug(
-                            f"[POLL] {address[:8]}... ({chain_id}) MC from OKX: ${float(market_cap):,.2f}"
-                        )
+                if chain_id == "501":
+                    jupiter_service = get_jupiter_service()
+                    jup_data = await jupiter_service.get_token_data(address, use_cache=False)
+                    if jup_data:
+                        market_cap = jupiter_service.get_market_cap(jup_data)
+                        ticker = ticker or jupiter_service.get_ticker(jup_data)
+                        if market_cap:
+                            logger.debug(
+                                f"[POLL] {address[:8]}... ({chain_id}) MC from Jupiter: ${float(market_cap):,.2f}"
+                            )
+
+                if market_cap is None:
+                    okx_data = await self.okx_client.fetch_token_info(
+                        address, chain_id, rate_profile="mc_monitor", use_cache=False
+                    )
+                    if okx_data:
+                        market_cap = self.okx_client.get_market_cap(okx_data)
+                        if ticker is None:
+                            ticker = self.okx_client.get_ticker(okx_data)
+                        if market_cap:
+                            logger.debug(
+                                f"[POLL] {address[:8]}... ({chain_id}) MC from OKX: ${float(market_cap):,.2f}"
+                            )
 
                 if market_cap is None:
                     pairs = await self.dex_client.fetch_token_pairs(

@@ -127,6 +127,9 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
                 "<code>/i &lt;ca&gt;</code> - Inspect token details\n"
                 "Shows 4 pages: Overview, Sources, Targets, Call Activity\n\n"
 
+                "👥 <b>Group Inspector</b>\n"
+                "<code>/ic &lt;group_id&gt;</code> - Full group configuration report\n\n"
+
                 "🎯 <b>Trigger Gain Alert</b>\n"
                 "<code>/tri &lt;ca&gt; [p] [c]</code> - Force gain alert\n"
                 "<code>/tri &lt;group_id&gt; &lt;ca&gt; [p] [c]</code> - To specific group\n"
@@ -142,6 +145,9 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
                 "🎛 <b>Management</b>\n"
                 "<code>/menu</code> or <code>/start</code> - Show main menu\n"
                 "<code>/all</code> - Show this command list\n\n"
+
+                "🧹 <b>Danger Zone</b>\n"
+                "<code>/clean_ca</code> - Wipe every tracked contract address (confirmation required)\n\n"
 
                 "📖 <b>Examples:</b>\n"
                 "• <code>/i HnKk7xPZmL...</code>\n"

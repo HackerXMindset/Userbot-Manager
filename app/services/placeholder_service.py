@@ -1,6 +1,7 @@
 import logging
+import re
 from typing import Dict, Any, Optional, List
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 
 from pydantic import ValidationError
@@ -13,6 +14,10 @@ from app.services.rust_bridge import rust_dex_bridge
 from app.services.models.bnb_payload import BnbTokenPayload
 
 logger = logging.getLogger(__name__)
+
+
+class PlaceholderDataUnavailable(Exception):
+    """Raised when external analytics fail and we should skip posting."""
 
 def format_market_cap(value: float) -> str:
     if value is None:
@@ -212,9 +217,43 @@ class PlaceholderService:
         self.token_model = TokenModel(db)
         self.call_history_service = CallHistoryService()
         self._data_cache: Dict[str, Any] = {}
+        self._raw_values: Dict[str, Decimal] = {}
         blockchain_value = (job_context.get('blockchain') or 'SOL').upper()
         self.blockchain = blockchain_value
         self._data_cache['blockchain'] = blockchain_value
+
+    @staticmethod
+    def _coerce_decimal(value: Any) -> Optional[Decimal]:
+        if value in (None, "", "N/A"):
+            return None
+        if isinstance(value, Decimal):
+            return value
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+
+    def _record_raw_decimal(self, key: str, value: Any) -> None:
+        if key not in {"jup_mcap", "bnb_market_cap", "pf_market_cap_usd"}:
+            return
+        decimal_value = self._coerce_decimal(value)
+        if decimal_value is not None:
+            self._raw_values[key] = decimal_value
+
+    def get_raw_decimal(self, key: str) -> Optional[Decimal]:
+        return self._raw_values.get(key)
+
+    def find_template_market_cap(self, template_text: Optional[str]) -> Optional[Decimal]:
+        if not template_text:
+            return None
+
+        for match in re.finditer(r"{([a-zA-Z0-9_]+)}", template_text):
+            placeholder_key = match.group(1)
+            raw_value = self.get_raw_decimal(placeholder_key)
+            if raw_value is not None:
+                return raw_value
+
+        return None
 
     async def get_all_placeholders(self) -> Dict[str, str]:
         """Fetch all data and return a dictionary of formatted placeholder values."""
@@ -523,6 +562,7 @@ class PlaceholderService:
             placeholders['bnb_change_1h'] = format_number(bnb_payload.change_1h)
             placeholders['bnb_change_5m'] = format_number(bnb_payload.change_5m)
             placeholders['bnb_market_cap'] = format_market_cap(bnb_payload.market_cap)
+            self._record_raw_decimal('bnb_market_cap', bnb_payload.market_cap)
             placeholders['bnb_liquidity'] = format_market_cap(bnb_payload.liquidity)
             placeholders['bnb_volume_24h'] = format_market_cap(bnb_payload.volume_24h)
             placeholders['bnb_holders'] = format_int(bnb_payload.holders)
@@ -891,6 +931,7 @@ class PlaceholderService:
             placeholders['pf_total_supply'] = format_int(pf.get('total_supply'))
             placeholders['pf_market_cap_sol'] = format_number(pf.get('market_cap'))
             placeholders['pf_market_cap_usd'] = format_market_cap(pf.get('usd_market_cap'))
+            self._record_raw_decimal('pf_market_cap_usd', pf.get('usd_market_cap'))
             placeholders['pf_ath_market_cap'] = format_market_cap(pf.get('ath_market_cap'))
             placeholders['pf_real_sol_reserves'] = format_number(pf.get('real_sol_reserves'))
             placeholders['pf_virtual_sol_reserves'] = format_number(pf.get('virtual_sol_reserves'))
@@ -975,7 +1016,9 @@ class PlaceholderService:
             placeholders['jup_circ_supply'] = format_number(get_map_value(jup, 'circ_supply', 'circSupply'), decimals=2)
             placeholders['jup_total_supply'] = format_number(get_map_value(jup, 'total_supply', 'totalSupply'), decimals=2)
             placeholders['jup_usd_price'] = format_number(get_map_value(jup, 'usd_price', 'usdPrice'), decimals=10)
-            placeholders['jup_mcap'] = format_market_cap(get_map_value(jup, 'mcap'))
+            jup_mcap_value = get_map_value(jup, 'mcap')
+            placeholders['jup_mcap'] = format_market_cap(jup_mcap_value)
+            self._record_raw_decimal('jup_mcap', jup_mcap_value)
             placeholders['jup_fdv'] = format_market_cap(get_map_value(jup, 'fdv'))
             placeholders['jup_liquidity'] = format_market_cap(get_map_value(jup, 'liquidity'))
             placeholders['jup_bonding_curve'] = format_number(get_map_value(jup, 'bonding_curve', 'bondingCurve'))
@@ -1270,6 +1313,11 @@ class PlaceholderService:
         for key, value in list(placeholders.items()):
             if isinstance(value, str) and value == 'N/A':
                 placeholders[key] = ''
+
+        if self.blockchain == 'BNB' and bnb_payload is None and not dex_pairs:
+            raise PlaceholderDataUnavailable(
+                f"BNB analytics unavailable for {self.token_address}; skipping template render."
+            )
 
         return placeholders
 
