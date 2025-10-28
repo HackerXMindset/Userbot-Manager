@@ -8,18 +8,18 @@ from pydantic import BaseModel, Field
 class BnbTokenSummary(BaseModel):
     chain_id: Optional[str] = Field(None, alias="chainId")
     dex_id: Optional[str] = Field(None, alias="dexId")
-    url: Optional[str]
+    url: Optional[str] = None
     pair_address: Optional[str] = Field(None, alias="pairAddress")
-    labels: Optional[List[str]]
+    labels: Optional[List[str]] = None
     base_token: Optional[dict] = Field(None, alias="baseToken")
     quote_token: Optional[dict] = Field(None, alias="quoteToken")
     price_native: Optional[str] = Field(None, alias="priceNative")
     price_usd: Optional[str] = Field(None, alias="priceUsd")
-    txns: Optional[dict]
-    volume: Optional[dict]
+    txns: Optional[dict] = None
+    volume: Optional[dict] = None
     price_change: Optional[dict] = Field(None, alias="priceChange")
-    liquidity: Optional[dict]
-    fdv: Optional[float]
+    liquidity: Optional[dict] = None
+    fdv: Optional[float] = None
     market_cap: Optional[float] = Field(None, alias="marketCap")
     pair_created_at: Optional[int] = Field(None, alias="pairCreatedAt")
 
@@ -27,22 +27,22 @@ class BnbTokenSummary(BaseModel):
 class BnbDexPair(BaseModel):
     chain_id: Optional[str] = Field(None, alias="chainId")
     dex_id: Optional[str] = Field(None, alias="dexId")
-    url: Optional[str]
+    url: Optional[str] = None
     pair_address: Optional[str] = Field(None, alias="pairAddress")
-    labels: Optional[List[str]]
+    labels: Optional[List[str]] = None
     base_token: Optional[dict] = Field(None, alias="baseToken")
     quote_token: Optional[dict] = Field(None, alias="quoteToken")
     price_native: Optional[str] = Field(None, alias="priceNative")
     price_usd: Optional[str] = Field(None, alias="priceUsd")
-    txns: Optional[dict]
-    volume: Optional[dict]
+    txns: Optional[dict] = None
+    volume: Optional[dict] = None
     price_change: Optional[dict] = Field(None, alias="priceChange")
-    liquidity: Optional[dict]
-    fdv: Optional[float]
+    liquidity: Optional[dict] = None
+    fdv: Optional[float] = None
     market_cap: Optional[float] = Field(None, alias="marketCap")
     pair_created_at: Optional[int] = Field(None, alias="pairCreatedAt")
-    info: Optional[dict]
-    boosts: Optional[dict]
+    info: Optional[dict] = None
+    boosts: Optional[dict] = None
 
 
 class BnbTokenPayload(BaseModel):

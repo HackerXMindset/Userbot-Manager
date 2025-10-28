@@ -160,10 +160,8 @@ class OkxMarketAPIClient:
             key = chain_id.lower()
             if key in self.CHAIN_ID_MAP:
                 return self.CHAIN_ID_MAP[key]
-        if address.lower().startswith("0x"):
-            return "56"  # default to BSC for EVM-style addresses
-        # Treat other formats (e.g., Solana base58) as Solana
-        return "501"
+        # Without an explicit chain hint we can't safely infer the network.
+        return None
 
     async def _apply_rate_limit(self, profile: str) -> None:
         """Throttle outbound OKX requests according to the requested profile."""
