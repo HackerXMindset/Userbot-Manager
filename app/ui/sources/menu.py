@@ -119,7 +119,13 @@ async def show_manage_global_sources(service, query: types.CallbackQuery, page: 
         keyboard_rows.append([InlineKeyboardButton(text="🔙 Back", callback_data="menu:sources")])
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
-        await query.message.edit_text(text, reply_markup=keyboard)
+        try:
+            await query.message.edit_text(text, reply_markup=keyboard)
+        except Exception as edit_error:  # pragma: no cover - API quirk handling
+            if "message is not modified" in str(edit_error):
+                await query.answer()
+            else:
+                raise
 
     except Exception as exc:  # pragma: no cover
         logger.error("Error showing manage sources: %s", exc, exc_info=True)

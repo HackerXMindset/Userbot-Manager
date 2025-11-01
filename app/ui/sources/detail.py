@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Optional
 
@@ -158,8 +159,8 @@ async def show_source_details(service, query: types.CallbackQuery, source_id: in
         # Get source details with bot information
         source = await service.db.fetchrow("""
             SELECT sc.*,
-                   mb.session_name as monitoring_bot_name,
-                   fb.session_name as forwarding_bot_name
+                   COALESCE(mb.display_name, mb.session_name) as monitoring_bot_name,
+                   COALESCE(fb.display_name, fb.session_name) as forwarding_bot_name
             FROM source_chats sc
             LEFT JOIN bots mb ON mb.id = sc.default_monitoring_userbot_id
             LEFT JOIN bots fb ON fb.id = sc.default_forwarding_userbot_id
@@ -198,22 +199,80 @@ async def show_source_details(service, query: types.CallbackQuery, source_id: in
 
                 # Format blockchain filter
                 allowed_chains = route.get('allowed_chains', ['SOL'])
+                if isinstance(allowed_chains, str):
+                    try:
+                        allowed_chains = json.loads(allowed_chains)
+                    except Exception:
+                        allowed_chains = ['SOL']
                 chain_emojis = service.keyboards.format_blockchain_emojis(allowed_chains)
 
+                forwarding_mode = (route.get('forwarding_mode') or 'tokens').lower()
+                keyword_filters = route.get('keyword_filters', [])
+                if isinstance(keyword_filters, str):
+                    try:
+                        keyword_filters = json.loads(keyword_filters)
+                    except Exception:
+                        keyword_filters = []
+                keyword_filters = keyword_filters or []
+
                 text += f"{route_status} → <b>{group_name}</b>\n"
-                text += f"     {chain_emojis}\n"
+                if forwarding_mode == 'tokens':
+                    text += f"     Mode: 🔗 Token calls\n"
+                    text += f"     Chains: {chain_emojis}\n"
+                elif forwarding_mode == 'keywords':
+                    text += f"     Mode: 📝 Keyword match\n"
+                    if keyword_filters:
+                        formatted_keywords = ", ".join(f"<code>{kw}</code>" for kw in keyword_filters)
+                        text += f"     Keywords: {formatted_keywords}\n"
+                    else:
+                        text += "     Keywords: <i>None configured</i>\n"
+                elif forwarding_mode == 'everything':
+                    text += f"     Mode: 📬 Forward everything\n"
+                else:
+                    text += f"     Mode: {forwarding_mode}\n"
+
+                rewrite_rules = route.get('forward_rewrite_rules') or []
+                if rewrite_rules:
+                    if isinstance(rewrite_rules, str):
+                        try:
+                            rewrite_rules = json.loads(rewrite_rules)
+                        except Exception:
+                            rewrite_rules = []
+                    replacements_display = []
+                    for rewrite in rewrite_rules:
+                        if not isinstance(rewrite, dict):
+                            continue
+                        source_val = rewrite.get('source') or ''
+                        target_val = rewrite.get('target') or ''
+                        if not source_val:
+                            continue
+                        if target_val:
+                            replacements_display.append(f"{source_val} → {target_val}")
+                        else:
+                            replacements_display.append(f"{source_val} → (removed)")
+                    if replacements_display:
+                        text += "     Replacements:\n"
+                        for entry in replacements_display[:3]:
+                            text += f"         • {entry}\n"
+                        if len(replacements_display) > 3:
+                            text += "         • …\n"
 
                 # Add userbot assignments if present
                 userbot_info = []
-                if route['monitoring_userbot_name']:
-                    userbot_info.append(f"👁️ {route['monitoring_userbot_name']}")
-                if route['forwarding_userbot_name']:
-                    userbot_info.append(f"📤 {route['forwarding_userbot_name']}")
+                monitor_name = route.get('monitoring_userbot_name')
+                forward_name = route.get('forwarding_userbot_name')
+                if monitor_name:
+                    userbot_info.append(f"👁️ {monitor_name}")
+                if forward_name:
+                    userbot_info.append(f"📤 {forward_name}")
 
                 if userbot_info:
                     text += f"     {' | '.join(userbot_info)}\n"
                 else:
                     text += f"     🤖 Auto-assigned\n"
+
+                media_status = "📸 Media forwarding enabled" if route.get('forward_media', True) else "🚫 Media forwarding disabled"
+                text += f"     {media_status}\n"
         else:
             text += "📭 <b>No routing rules configured</b>\n"
             text += "Add routes to forward tokens to target groups."
@@ -254,8 +313,8 @@ async def show_source_details(service, query: types.CallbackQuery, source_id: in
                     callback_data=f"sources:create_route:{source_id}:{route['target_group_id']}"
                 ),
                 InlineKeyboardButton(
-                    text=f"⛓️ Chains",
-                    callback_data=f"routing:edit_chains:{route['id']}"
+                    text="🎛️ Filters",
+                    callback_data=f"sources:route_filters:{route['id']}"
                 ),
                 InlineKeyboardButton(
                     text="🗑️",

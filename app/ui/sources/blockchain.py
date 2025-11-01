@@ -116,9 +116,11 @@ async def confirm_blockchain_selection(service, query: types.CallbackQuery, rule
     logger.info(f"[BLOCKCHAIN_DEBUG] confirm_blockchain_selection called: rule_id={rule_id}")
     try:
         # Get selected chains from state
+        return_to_filters = None
         if state:
             data = await state.get_data()
             selected_chains = data.get('blockchain_edit_chains', ['SOL'])
+            return_to_filters = data.get('route_filters_return')
             logger.info(f"[BLOCKCHAIN_DEBUG] Selected chains from FSM state: {selected_chains}")
         else:
             logger.warning(f"[BLOCKCHAIN_DEBUG] No FSM state provided, fetching from DB")
@@ -133,6 +135,9 @@ async def confirm_blockchain_selection(service, query: types.CallbackQuery, rule
             else:
                 selected_chains = ['SOL']
             logger.info(f"[BLOCKCHAIN_DEBUG] Selected chains from DB: {selected_chains}")
+
+        # Normalize chain values to uppercase identifiers
+        selected_chains = [chain.upper() for chain in selected_chains]
 
         # Validate: at least one chain must be selected
         if not selected_chains:
@@ -150,8 +155,13 @@ async def confirm_blockchain_selection(service, query: types.CallbackQuery, rule
         logger.info(f"[BLOCKCHAIN_DEBUG] Fetched source_chat_id: {rule['source_chat_id'] if rule else None}")
         if rule:
             await query.answer("✅ Blockchain filter updated!")
-            logger.info(f"[BLOCKCHAIN_DEBUG] Redirecting to source details for source_id={rule['source_chat_id']}")
-            await service.show_source_details(query, rule['source_chat_id'])
+            if return_to_filters == rule_id and state:
+                logger.info(f"[BLOCKCHAIN_DEBUG] Returning to route filters for rule {rule_id}")
+                await state.update_data(route_filters_return=None)
+                await service.show_route_filters(query, rule_id, state)
+            else:
+                logger.info(f"[BLOCKCHAIN_DEBUG] Redirecting to source details for source_id={rule['source_chat_id']}")
+                await service.show_source_details(query, rule['source_chat_id'])
         else:
             logger.error(f"[BLOCKCHAIN_DEBUG] Rule {rule_id} not found after update")
             await query.answer("❌ Rule not found")

@@ -26,6 +26,8 @@ class ManagementStates(StatesGroup):
     adding_source_chat_id = State()
     adding_source_user_id = State()
     source_set_name = State()
+    route_keywords_input = State()
+    route_rewrite_input = State()
 
     # PNL Forwarding
     pnl_waiting_for_source_forward = State()

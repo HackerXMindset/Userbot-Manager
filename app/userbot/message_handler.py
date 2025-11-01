@@ -50,6 +50,7 @@ class MessageHandler:
         self.monitored_source_model = MonitoredSourceModel(db)
 
         # Initialize components
+        self._album_guard: Dict[tuple, float] = {}
         self.token_monitor = TokenMonitor(userbot_id)
         self.call_executor = CallExecutor(userbot_id, session_manager)
         self.source_manager = SourceManager(userbot_id)
@@ -320,7 +321,7 @@ class MessageHandler:
             return await self.call_executor.send_call_message(
                 target_chat_id=target_chat_id,
                 token_address=token_address,
-                source_info=source_info
+                message=token_address,
             )
         except Exception as e:
             logger.error(f"Error sending manual call: {e}")
@@ -351,7 +352,7 @@ class MessageHandler:
                     result = await self.call_executor.send_call_message(
                         target_chat_id=call['dest_chat_id'],
                         token_address=call['address'],
-                        source_info="Scheduled call"
+                        message=call['address'],
                     )
                     
                     if result['success']:

@@ -62,3 +62,15 @@ def register(dispatcher: Dispatcher, context: ManagementRouterContext) -> None:
         ManagementStates.source_set_name,
         F.from_user.id.in_(settings.admin_telegram_ids_list),
     )
+
+    dispatcher.message.register(
+        manager.sources_handler.process_route_keywords_input,
+        ManagementStates.route_keywords_input,
+        F.from_user.id.in_(settings.admin_telegram_ids_list),
+    )
+
+    dispatcher.message.register(
+        manager.sources_handler.process_route_rewrite_input,
+        ManagementStates.route_rewrite_input,
+        F.from_user.id.in_(settings.admin_telegram_ids_list),
+    )

@@ -111,6 +111,15 @@ class SourceService:
                 elif action == 'view':
                     # Back button from blockchain selector
                     rule_id = int(parts[2])
+                    if state:
+                        data = await state.get_data()
+                        return_route_id = data.get('route_filters_return')
+                        if return_route_id == rule_id:
+                            logger.info(f"[BLOCKCHAIN_DEBUG] view - returning to filters for rule {rule_id}")
+                            await state.update_data(route_filters_return=None)
+                            await self.show_route_filters(query, rule_id, state)
+                            return
+
                     logger.info(f"[BLOCKCHAIN_DEBUG] view - redirecting to source details for rule {rule_id}")
                     rule = await self.db.fetchrow("SELECT source_chat_id FROM routing_rules WHERE id = $1", rule_id)
                     if rule:
@@ -154,6 +163,64 @@ class SourceService:
             return
 
         action = parts[1]
+        if action == 'route':
+            try:
+                route_id = int(parts[2])
+            except (IndexError, ValueError):
+                logger.warning('[ROUTING_UI] Invalid route reference user=%s data=%s', query.from_user.id if query.from_user else None, query.data)
+                await query.answer("❌ Invalid route reference", show_alert=True)
+                return
+
+            subaction = parts[3] if len(parts) > 3 else 'overview'
+            logger.info('[ROUTING_UI] route_action route_id=%s subaction=%s data=%s', route_id, subaction, query.data)
+
+            if subaction == 'overview':
+                await self.open_route_filters(query, route_id, state)
+            elif subaction == 'toggle':
+                await routing.toggle_route_enabled(self, query, route_id, state)
+            elif subaction == 'chains':
+                if len(parts) > 4 and parts[4] == 'toggle' and len(parts) > 5:
+                    await routing.toggle_route_chain(self, query, route_id, parts[5], state)
+                else:
+                    await routing.show_route_chain_editor(self, query, route_id, state)
+            elif subaction == 'keywords':
+                if len(parts) > 4:
+                    action_tail = parts[4]
+                    if action_tail == 'add':
+                        await routing.prompt_route_keywords(self, query, route_id, state)
+                    elif action_tail == 'remove' and len(parts) > 5:
+                        await routing.remove_route_keyword(self, query, route_id, int(parts[5]), state)
+                    elif action_tail == 'clear':
+                        await routing.clear_route_keywords(self, query, route_id, state)
+                    else:
+                        await routing.show_route_keywords_editor(self, query, route_id, state)
+                else:
+                    await routing.show_route_keywords_editor(self, query, route_id, state)
+            elif subaction == 'rewrites':
+                if len(parts) > 4:
+                    action_tail = parts[4]
+                    if action_tail == 'add':
+                        await routing.prompt_route_rewrites(self, query, route_id, state)
+                    elif action_tail == 'remove' and len(parts) > 5:
+                        await routing.remove_route_rewrite(self, query, route_id, int(parts[5]), state)
+                    elif action_tail == 'clear':
+                        await routing.clear_route_rewrites(self, query, route_id, state)
+                    else:
+                        await routing.show_route_rewrite_editor(self, query, route_id, state)
+                else:
+                    await routing.show_route_rewrite_editor(self, query, route_id, state)
+            elif subaction == 'summary' and len(parts) > 4:
+                await routing.toggle_route_summary(self, query, route_id, parts[4] == '1', state)
+            elif subaction == 'media' and len(parts) > 4:
+                await routing.toggle_route_media(self, query, route_id, parts[4] == '1', state)
+            else:
+                await self.open_route_filters(query, route_id, state)
+            # Legacy handlers kept for backwards compatibility
+            return
+        elif action == 'assign_route_bots':
+            source_id, group_id = int(parts[2]), int(parts[3])
+            await self.show_userbot_selection(query, source_id, group_id)
+            return
         
         if action == 'add_global':
             await self.start_add_global_source(query, state)
@@ -176,9 +243,49 @@ class SourceService:
         elif action == 'create_route':
             source_id, group_id = int(parts[2]), int(parts[3])
             await self.show_userbot_selection(query, source_id, group_id)
+        elif action == 'route_filters':
+            route_id = int(parts[2])
+            await self.open_route_filters(query, route_id, state)
+        elif action == 'set_route_mode':
+            route_id = int(parts[2])
+            mode = parts[3]
+            await self.set_route_forwarding_mode(query, route_id, mode, state)
+        elif action == 'route_keywords_prompt':
+            route_id = int(parts[2])
+            await self.prompt_route_keywords(query, route_id, state)
+        elif action == 'route_keywords_remove':
+            route_id, index = int(parts[2]), int(parts[3])
+            await self.remove_route_keyword(query, route_id, index, state)
+        elif action == 'route_keywords_clear':
+            route_id = int(parts[2])
+            await self.clear_route_keywords(query, route_id, state)
+        elif action == 'route_filter_chains':
+            route_id = int(parts[2])
+            await self.show_route_blockchain_editor(query, route_id, state)
+        elif action == 'route_summary_toggle':
+            route_id = int(parts[2])
+            enabled_flag = parts[3]
+            await self.toggle_route_summary(query, route_id, enabled_flag == '1', state)
+        elif action == 'route_media_toggle':
+            route_id = int(parts[2])
+            enabled_flag = parts[3]
+            await self.toggle_route_media(query, route_id, enabled_flag == '1', state)
+        # Legacy handlers kept for backwards compatibility
+        elif action == 'route_rewrite_prompt':
+            route_id = int(parts[2])
+            await self.prompt_route_rewrites(query, route_id, state)
+        elif action == 'route_rewrite_remove':
+            route_id, index = int(parts[2]), int(parts[3])
+            await self.remove_route_rewrite(query, route_id, index, state)
+        elif action == 'route_rewrite_clear':
+            route_id = int(parts[2])
+            await self.clear_route_rewrites(query, route_id, state)
         elif action == 'select_role':
             source_id, group_id, role, monitor_bot_id, forward_bot_id = int(parts[2]), int(parts[3]), parts[4], int(parts[5]), int(parts[6])
             await self.show_bot_picker(query, source_id, group_id, role, monitor_bot_id, forward_bot_id)
+        elif action == 'route_filters':
+            route_id = int(parts[2])
+            await self.open_route_filters(query, route_id, state)
         elif action == 'set_bot':
             source_id, group_id, monitor_bot_id, forward_bot_id = int(parts[2]), int(parts[3]), int(parts[4]), int(parts[5])
             await self.show_userbot_selection(query, source_id, group_id, monitor_bot_id if monitor_bot_id != 0 else None, forward_bot_id if forward_bot_id != 0 else None)
@@ -257,6 +364,90 @@ class SourceService:
     async def show_userbot_selection(self, query: types.CallbackQuery, source_id: int, group_id: int, monitor_bot_id: Optional[int] = None, forward_bot_id: Optional[int] = None):
         """Show userbot assignment UI for a route."""
         return await routing.show_userbot_selection(self, query, source_id, group_id, monitor_bot_id, forward_bot_id)
+
+    async def show_route_filters(self, query: types.CallbackQuery, route_id: int, state: FSMContext):
+        """Display forwarding filters for a routing rule."""
+        return await routing.show_route_filters(self, query, route_id, state)
+
+    async def open_route_filters(self, query: types.CallbackQuery, route_id: int, state: FSMContext):
+        """Open the most relevant filter editor for a routing rule."""
+        try:
+            route = await self.db.fetchrow(
+                """
+                SELECT forwarding_mode,
+                       allowed_chains,
+                       keyword_filters
+                FROM routing_rules
+                WHERE id = $1
+                """,
+                route_id,
+            )
+            if not route:
+                await query.answer("❌ Route not found", show_alert=True)
+                return
+
+            mode = (route.get('forwarding_mode') or 'tokens').lower()
+
+            if mode == 'tokens':
+                if state:
+                    await state.update_data(route_filters_return=route_id)
+                await self.show_route_blockchain_editor(query, route_id, state)
+            elif mode == 'keywords':
+                # Pass along keyword context to the editor so chips render correctly.
+                await routing.show_route_keywords_editor(self, query, route_id, state)
+            else:
+                await self.show_route_filters(query, route_id, state)
+        except Exception as exc:
+            logger.error("[ROUTING_UI] open_route_filters_failed route_id=%s exc=%s", route_id, exc, exc_info=True)
+            await query.answer("❌ Error opening filters", show_alert=True)
+
+    async def set_route_forwarding_mode(self, query: types.CallbackQuery, route_id: int, mode: str, state: FSMContext):
+        """Update forwarding mode for a routing rule."""
+        return await routing.set_route_forwarding_mode(self, query, route_id, mode, state)
+
+    async def prompt_route_keywords(self, query: types.CallbackQuery, route_id: int, state: FSMContext):
+        """Prompt operator to enter keywords for a routing rule."""
+        return await routing.prompt_route_keywords(self, query, route_id, state)
+
+    async def prompt_route_rewrites(self, query: types.CallbackQuery, route_id: int, state: FSMContext):
+        """Prompt operator to enter rewrite rules for a routing rule."""
+        return await routing.prompt_route_rewrites(self, query, route_id, state)
+
+    async def remove_route_keyword(self, query: types.CallbackQuery, route_id: int, index: int, state: FSMContext):
+        """Remove a keyword from a routing rule."""
+        return await routing.remove_route_keyword(self, query, route_id, index, state)
+
+    async def clear_route_keywords(self, query: types.CallbackQuery, route_id: int, state: FSMContext):
+        """Clear all keywords for a routing rule."""
+        return await routing.clear_route_keywords(self, query, route_id, state)
+
+    async def remove_route_rewrite(self, query: types.CallbackQuery, route_id: int, index: int, state: FSMContext):
+        """Remove a rewrite rule from a routing rule."""
+        return await routing.remove_route_rewrite(self, query, route_id, index, state)
+
+    async def clear_route_rewrites(self, query: types.CallbackQuery, route_id: int, state: FSMContext):
+        """Clear all rewrite rules for a routing rule."""
+        return await routing.clear_route_rewrites(self, query, route_id, state)
+
+    async def show_route_blockchain_editor(self, query: types.CallbackQuery, route_id: int, state: FSMContext):
+        """Open blockchain selector for a routing rule returning to filters."""
+        return await routing.show_route_blockchain_editor(self, query, route_id, state)
+
+    async def process_route_keywords_input(self, message: types.Message, state: FSMContext):
+        """Handle keyword list input from operator."""
+        return await routing.process_route_keywords_input(self, message, state)
+
+    async def process_route_rewrite_input(self, message: types.Message, state: FSMContext):
+        """Handle rewrite rule input from operator."""
+        return await routing.process_route_rewrite_input(self, message, state)
+
+    async def toggle_route_summary(self, query: types.CallbackQuery, route_id: int, enabled: bool, state: FSMContext):
+        """Toggle summary reply option for a routing rule."""
+        return await routing.toggle_route_summary(self, query, route_id, enabled, state)
+
+    async def toggle_route_media(self, query: types.CallbackQuery, route_id: int, enabled: bool, state: FSMContext):
+        """Toggle media forwarding option for a routing rule."""
+        return await routing.toggle_route_media(self, query, route_id, enabled, state)
 
     async def show_bot_picker(self, query: types.CallbackQuery, source_id: int, group_id: int, role: str, monitor_bot_id: int, forward_bot_id: int):
         """Show a list of userbots to choose for a role."""

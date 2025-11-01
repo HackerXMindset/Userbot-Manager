@@ -1,11 +1,19 @@
 import json
 import logging
+import os
+import shutil
 import time
 import traceback
+from pathlib import Path
 from typing import Dict, Any, List, Tuple
+import tempfile
+
+from telethon import utils as telethon_utils
 
 logger = logging.getLogger(__name__)
 
+MEDIA_CACHE_ROOT = Path(tempfile.gettempdir()) / "callbot_media"
+MEDIA_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 
 async def can_group_accept_calls(handler, tg_chat_id: int) -> bool:
     """Check if group can accept calls at current time/day"""
@@ -58,6 +66,105 @@ async def can_group_accept_calls(handler, tg_chat_id: int) -> bool:
         return True
 
 
+def apply_rewrite_rules(text: str, rewrite_rules: List[Dict[str, str]]) -> tuple[str, bool]:
+    """Apply rewrite rules to text, returning modified text and change flag."""
+    if not text or not rewrite_rules:
+        return text, False
+
+    modified = text
+    changed = False
+    for rule in rewrite_rules:
+        source_value = rule.get("source")
+        target_value = rule.get("target", "")
+        if not source_value:
+            continue
+        if source_value in modified:
+            modified = modified.replace(source_value, target_value)
+            changed = True
+    return modified, changed
+
+
+async def _cache_media_for_forwarding(client, source_chat_id: int, source_message_id: int) -> Dict[str, Any]:
+    """Download media to a cache directory and return metadata for dispatcher."""
+    if client is None:
+        return {}
+
+    try:
+        message = await client.get_messages(source_chat_id, ids=source_message_id)
+        if isinstance(message, list):
+            message = message[0] if message else None
+        if not message or not getattr(message, "media", None):
+            return {}
+
+        media_messages = [message]
+
+        if getattr(message, "grouped_id", None):
+            grouped_id = message.grouped_id
+            related: List[Any] = []
+            async for sibling in client.iter_messages(
+                source_chat_id,
+                min_id=message.id - 20,
+                max_id=message.id + 20,
+            ):
+                if sibling.id == message.id:
+                    continue
+                if getattr(sibling, "grouped_id", None) == grouped_id and getattr(sibling, "media", None):
+                    related.append(sibling)
+            media_messages.extend(related)
+            media_messages = sorted(media_messages, key=lambda msg: msg.id)
+
+        cache_key = f"{source_chat_id}_{source_message_id}_{int(time.time())}"
+        cache_dir = MEDIA_CACHE_ROOT / cache_key
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        files: List[Dict[str, str]] = []
+        for msg in media_messages:
+            if not getattr(msg, "media", None):
+                continue
+
+            extension = ""
+            try:
+                extension = telethon_utils.get_extension(msg.media) or ""
+            except Exception:
+                extension = ""
+            if extension and not extension.startswith("."):
+                extension = f".{extension}"
+
+            filename = f"{msg.id}{extension or '.bin'}"
+            file_path = cache_dir / filename
+            try:
+                await client.download_media(msg, file=str(file_path))
+            except Exception as download_error:
+                logger.warning(
+                    f"[FORWARD] Failed to download media {source_chat_id}:{msg.id} - {download_error}"
+                )
+                continue
+
+            if not file_path.exists() or file_path.stat().st_size == 0:
+                continue
+
+            files.append({"name": filename})
+
+        if not files:
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            return {}
+
+        logger.debug(
+            "[FORWARD] Cached %d media attachment(s) for %s:%s at %s",
+            len(files),
+            source_chat_id,
+            source_message_id,
+            cache_dir,
+        )
+
+        return {"dir": cache_key, "files": files}
+    except Exception as media_error:
+        logger.warning(
+            f"[FORWARD] Failed to cache media for {source_chat_id}:{source_message_id} - {media_error}"
+        )
+        return {}
+
+
 async def handle_source_message(handler, event, is_edit: bool = False):
     """Handle messages from source chats - extract tokens and route to targets"""
     try:
@@ -97,8 +204,62 @@ async def handle_source_message(handler, event, is_edit: bool = False):
             f"{live_source_name or source.get('display_name') or source.get('name', 'N/A')}"
         )
 
-        routing_rules: List[Dict[str, Any]] = await handler.source_model.get_routing_rules(source["id"])
-        logger.info(f"[SPLIT-RESP] Found {len(routing_rules)} routing rules for source {source['id']}")
+        routing_rules_raw: List[Dict[str, Any]] = await handler.source_model.get_routing_rules(source["id"])
+        logger.info(f"[SPLIT-RESP] Found {len(routing_rules_raw)} routing rules for source {source['id']}")
+
+        routing_rules: List[Dict[str, Any]] = []
+        route_by_group_id: Dict[int, Dict[str, Any]] = {}
+        keyword_route_ids: List[int] = []
+        everything_route_ids: List[int] = []
+
+        for raw_rule in routing_rules_raw:
+            if not raw_rule["enabled"]:
+                continue
+
+            rule = dict(raw_rule)
+            forwarding_mode = (rule.get("forwarding_mode") or "tokens").lower()
+            allowed_chains = rule.get("allowed_chains", ["SOL"])
+            if isinstance(allowed_chains, str):
+                try:
+                    allowed_chains = json.loads(allowed_chains)
+                except Exception:
+                    allowed_chains = ["SOL"]
+            keyword_filters = rule.get("keyword_filters", [])
+            if isinstance(keyword_filters, str):
+                try:
+                    keyword_filters = json.loads(keyword_filters)
+                except Exception:
+                    keyword_filters = []
+            keyword_filters = [kw.strip().lower() for kw in keyword_filters if kw]
+
+            rewrite_rules = rule.get("forward_rewrite_rules", [])
+            if isinstance(rewrite_rules, str):
+                try:
+                    rewrite_rules = json.loads(rewrite_rules)
+                except Exception:
+                    rewrite_rules = []
+            normalized_rewrites: List[Dict[str, str]] = []
+            for entry in rewrite_rules:
+                if not isinstance(entry, dict):
+                    continue
+                source_value = (entry.get("source") or "").strip()
+                target_value = (entry.get("target") or "").strip()
+                if not source_value:
+                    continue
+                normalized_rewrites.append({"source": source_value, "target": target_value})
+
+            rule["forwarding_mode"] = forwarding_mode
+            rule["allowed_chains"] = allowed_chains
+            rule["keyword_filters"] = keyword_filters
+            rule["forward_rewrite_rules"] = normalized_rewrites
+
+            routing_rules.append(rule)
+            route_by_group_id[rule["target_group_id"]] = rule
+
+            if forwarding_mode == "keywords":
+                keyword_route_ids.append(rule["id"])
+            elif forwarding_mode == "everything":
+                everything_route_ids.append(rule["id"])
 
         source_monitor_bot = source.get("default_monitoring_userbot_id")
         source_forward_bot = source.get("default_forwarding_userbot_id")
@@ -165,6 +326,25 @@ async def handle_source_message(handler, event, is_edit: bool = False):
             return
         logger.debug(f"[SPLIT-RESP] ✅ Userbot {handler.userbot_id} IS designated monitor for source {event.chat_id}")
 
+        message_obj = event.message if hasattr(event, "message") else event
+        grouped_id = getattr(message_obj, "grouped_id", None)
+        if grouped_id:
+            album_guard = getattr(handler, "_album_guard", {})
+            now = time.time()
+            # evict stale entries (>120s)
+            stale_cutoff = now - 120
+            for key, ts in list(album_guard.items()):
+                if ts < stale_cutoff:
+                    album_guard.pop(key, None)
+            album_key = (event.chat_id, grouped_id)
+            if album_key in album_guard:
+                logger.debug(
+                    f"[SPLIT-RESP] Skipping duplicate album message for source {event.chat_id} group {grouped_id}"
+                )
+                return
+            album_guard[album_key] = now
+            handler._album_guard = album_guard
+
         # Get all target groups for this source using routing rules
         target_groups = await handler.source_manager.get_target_groups_for_source(event.chat_id)
 
@@ -189,6 +369,213 @@ async def handle_source_message(handler, event, is_edit: bool = False):
             len(target_groups),
             [f"{g['title']}({g['id']})" for g in target_groups],
         )
+
+        forwarded_groups = set()
+        target_groups_by_id = {group["id"]: group for group in target_groups}
+        message_text = handler.utils.get_message_text(event.message) if hasattr(event, "message") else ""
+        message_text_lower = message_text.lower() if message_text else ""
+
+        async def forward_full_message(route: Dict[str, Any], group: Dict[str, Any], reason: str) -> None:
+            if not group:
+                return
+            if route["target_group_id"] in forwarded_groups:
+                return
+
+            forwarding_userbot_id = (
+                route.get("forwarding_userbot_id")
+                or source_forward_bot
+                or handler.userbot_id
+            )
+
+            chat_username = None
+            chat_obj = getattr(event, "chat", None)
+            if chat_obj and getattr(chat_obj, "username", None):
+                chat_username = chat_obj.username
+
+            rewrite_rules = route.get("forward_rewrite_rules", [])
+            message_for_delivery = message_text
+            apply_rewrite = False
+            if rewrite_rules and message_text:
+                message_for_delivery, apply_rewrite = apply_rewrite_rules(message_text, rewrite_rules)
+
+            raw_media = getattr(event, "media", None)
+            message_media = getattr(getattr(event, "message", None), "media", None)
+            has_media = bool(raw_media or message_media)
+            client = handler.session_manager.get_client()
+
+            logger.debug(
+                f"[FORWARD] Route {route['id']} media detection: raw_media={'yes' if raw_media else 'no'}, "
+                f"message_media={'yes' if message_media else 'no'}, has_media={has_media}, "
+                f"forward_bot={forwarding_userbot_id}, monitor_bot={handler.userbot_id}"
+            )
+
+            if not await can_group_accept_calls(handler, group["tg_chat_id"]):
+                logger.info(
+                    f"[FORWARD] Skipping group {group['tg_chat_id']} for route {route['id']} ({reason}) - outside schedule window"
+                )
+                return
+
+            if forwarding_userbot_id != handler.userbot_id:
+                logger.debug(
+                    f"[FORWARD] Queueing forward job for route {route['id']} via forwarding userbot {forwarding_userbot_id}"
+                )
+            else:
+                logger.debug(
+                    f"[FORWARD] No dedicated forward bot assigned for route {route['id']} — using monitoring userbot {handler.userbot_id}"
+                )
+
+            display_source_name = (
+                live_source_name or source.get("display_name") or source.get("name") or source.get("title")
+            )
+            source_info = f"From {display_source_name or event.chat_id}"
+            allow_media = bool(route.get("forward_media", True))
+
+            additional_info_dict = {
+                "message_text": message_for_delivery,
+                "caller_name": handler.utils.get_user_name(event.sender),
+                "source_name": display_source_name,
+                "source_type": source_type_value,
+                "source_chat_id": event.chat_id,
+                "source_chat_username": chat_username,
+                "seen_sources": [
+                    {
+                        "chat_id": event.chat_id,
+                        "name": display_source_name,
+                        "source_type": source_type_value,
+                        "caller_name": handler.utils.get_user_name(event.sender),
+                        "caller_user_id": event.sender_id,
+                    }
+                ],
+                "caller_user_id": event.sender_id,
+                "forward_original": True,
+                "forward_reason": reason,
+                "monitor_userbot_id": handler.userbot_id,
+                "source_message_id": event.id,
+            }
+            if route.get("forward_summary"):
+                additional_info_dict["forward_summary"] = True
+
+            queue_source_chat_id = event.chat_id
+            queue_source_message_id = event.id
+            forward_original_flag = (
+                forwarding_userbot_id == handler.userbot_id and not apply_rewrite and allow_media
+            )
+            copy_message_flag = not forward_original_flag
+            copy_media_flag = has_media and not forward_original_flag and allow_media
+
+            if forward_original_flag:
+                additional_info_dict["forward_original"] = True
+            else:
+                additional_info_dict.pop("forward_original", None)
+            additional_info_dict["copy_message"] = copy_message_flag
+            additional_info_dict.pop("message_override", None)
+            if apply_rewrite:
+                additional_info_dict["message_override"] = message_for_delivery
+                copy_media_flag = has_media and allow_media
+            
+            if copy_media_flag and has_media and forwarding_userbot_id != handler.userbot_id:
+                try:
+                    media_cache_info = await _cache_media_for_forwarding(
+                        client,
+                        event.chat_id,
+                        event.id,
+                    )
+                    if media_cache_info:
+                        additional_info_dict["media_cache"] = media_cache_info
+                except Exception as cache_error:
+                    logger.warning(
+                        f"[FORWARD] Failed to cache media for route {route['id']}: {cache_error}"
+                    )
+            
+            additional_info_dict["copy_media"] = copy_media_flag
+
+            token_stub = f"MSG-{event.id}-{route['id']}"
+            job = None
+            try:
+                job = await handler.call_queue_model.add_job(
+                    routing_rule_id=route["id"],
+                    token_address=token_stub,
+                    source_message_id=queue_source_message_id,
+                    source_chat_id=queue_source_chat_id,
+                    source_user_id=event.sender_id,
+                    target_group_id=group["id"],
+                    target_chat_id=group["tg_chat_id"],
+                    forwarding_userbot_id=forwarding_userbot_id,
+                    source_info=json.dumps(source_info),
+                    additional_info=json.dumps(additional_info_dict),
+                    priority=5,
+                )
+            except Exception as queue_error:
+                logger.error(
+                    f"[FORWARD] ❌ Failed to enqueue forward job for route {route['id']} (reason: {reason}): {queue_error}"
+                )
+                job = None
+
+            if job:
+                forwarded_groups.add(route["target_group_id"])
+                logger.info(
+                    f"[FORWARD] Queued message forward job {job['id']} for route {route['id']} → target {group['tg_chat_id']} ({reason})"
+                )
+            else:
+                logger.warning(
+                    f"[FORWARD] ❌ Call queue returned no job for route {route['id']} ({reason})"
+                )
+                if forwarding_userbot_id != handler.userbot_id:
+                    logger.warning(
+                        f"[FORWARD] Attempting direct forward fallback via monitoring userbot {handler.userbot_id}"
+                    )
+                client = handler.session_manager.get_client()
+                if not client:
+                    logger.error(f"[FORWARD] No client available for fallback forward on route {route['id']}")
+                    return
+                if not hasattr(event, "message") or event.message is None:
+                    logger.debug(f"[FORWARD] Event has no message to forward during fallback for route {route['id']}")
+                    return
+                try:
+                    if allow_media:
+                        await client.forward_messages(group["tg_chat_id"], event.message)
+                    else:
+                        if message_for_delivery:
+                            await client.send_message(group["tg_chat_id"], message_for_delivery)
+                        else:
+                            logger.info(
+                                f"[FORWARD] Skipping media-only fallback for route {route['id']} (media disabled and no text)"
+                            )
+                            return
+                    forwarded_groups.add(route["target_group_id"])
+                    logger.info(
+                        f"[FORWARD] ✅ Fallback forward succeeded via monitoring userbot {handler.userbot_id}"
+                    )
+                except Exception as forward_error:
+                    logger.error(
+                        f"[FORWARD] ❌ Fallback forward failed for route {route['id']} to {group['tg_chat_id']}: {forward_error}"
+                    )
+
+        # Forward-everything routes
+        for route_id in everything_route_ids:
+            route = next((r for r in routing_rules if r["id"] == route_id), None)
+            if not route:
+                continue
+            group = target_groups_by_id.get(route["target_group_id"])
+            await forward_full_message(route, group, "forward_everything")
+
+        # Keyword routes
+        if message_text_lower:
+            for route_id in keyword_route_ids:
+                route = next((r for r in routing_rules if r["id"] == route_id), None)
+                if not route:
+                    continue
+                keywords = route.get("keyword_filters") or []
+                if not keywords:
+                    logger.debug(f"[FORWARD] Route {route_id} set to keyword mode without keywords")
+                    continue
+                if any(keyword in message_text_lower for keyword in keywords):
+                    group = target_groups_by_id.get(route["target_group_id"])
+                    await forward_full_message(route, group, "keyword_match")
+                else:
+                    logger.debug(
+                        f"[FORWARD] Keyword route {route_id} did not match message text in source {event.chat_id}"
+                    )
 
         if not tagged_addresses:
             logger.debug("[SPLIT-RESP] No token addresses found in message")
@@ -238,7 +625,19 @@ async def handle_source_message(handler, event, is_edit: bool = False):
         for target_group in target_groups:
             logger.debug(f"[SPLIT-RESP] Processing target group: {target_group['title']}({target_group['id']})")
 
-            # Check if group can accept calls at current time/day
+            route = route_by_group_id.get(target_group["id"])
+            if not route:
+                logger.warning(
+                    f"[SPLIT-RESP] No routing rule found for target group {target_group['id']} - SKIPPING"
+                )
+                continue
+
+            if route["forwarding_mode"] != "tokens":
+                logger.debug(
+                    f"[SPLIT-RESP] Skipping token queue for group {target_group['id']} (mode={route['forwarding_mode']})"
+                )
+                continue
+
             if not await can_group_accept_calls(handler, target_group["tg_chat_id"]):
                 logger.info(
                     f"[SPLIT-RESP] Skipping group {target_group['tg_chat_id']} - outside schedule window"
@@ -248,26 +647,7 @@ async def handle_source_message(handler, event, is_edit: bool = False):
             group_queued = 0
             group_failed = 0
 
-            # Find routing rule and forwarding userbot for this target group
-            routing_rule = None
-            forwarding_userbot_id = None
-
-            for rule in routing_rules:
-                if rule["target_group_id"] == target_group["id"] and rule["enabled"]:
-                    routing_rule = rule
-                    forwarding_userbot_id = rule["forwarding_userbot_id"]
-                    logger.debug(
-                        f"[SPLIT-RESP] Matched routing rule {rule['id']} for group {target_group['id']}, "
-                        f"forwarding_userbot: {forwarding_userbot_id}"
-                    )
-                    break
-
-            if not routing_rule:
-                logger.warning(
-                    f"[SPLIT-RESP] No routing rule found for target group {target_group['id']} - SKIPPING"
-                )
-                continue
-
+            forwarding_userbot_id = route.get("forwarding_userbot_id")
             if not forwarding_userbot_id:
                 forwarding_userbot_id = handler.userbot_id
                 logger.info(
@@ -277,22 +657,19 @@ async def handle_source_message(handler, event, is_edit: bool = False):
             else:
                 logger.info(f"[SPLIT-RESP] Using assigned forwarding userbot {forwarding_userbot_id}")
 
-            # Queue each token for this target group
             for address, blockchain in addresses_to_forward:
                 try:
-                    # Check blockchain filter
-                    allowed_chains = routing_rule.get("allowed_chains", ["SOL"])
+                    allowed_chains = route.get("allowed_chains", ["SOL"])
                     if blockchain not in allowed_chains:
                         logger.info(
-                            f"[CHAIN_FILTER] Rule {routing_rule['id']} allows {allowed_chains}, token is {blockchain} - SKIPPED"
+                            f"[CHAIN_FILTER] Rule {route['id']} allows {allowed_chains}, token is {blockchain} - SKIPPED"
                         )
                         continue
 
                     logger.debug(
-                        f"[CHAIN_FILTER] Rule {routing_rule['id']} allows {allowed_chains}, token is {blockchain} - ALLOWED"
+                        f"[CHAIN_FILTER] Rule {route['id']} allows {allowed_chains}, token is {blockchain} - ALLOWED"
                     )
 
-                    # Get source info for the call
                     display_source_name = (
                         live_source_name or source.get("display_name") or source.get("name") or source.get("title")
                     )
@@ -323,9 +700,8 @@ async def handle_source_message(handler, event, is_edit: bool = False):
                         f"{target_group['id']} via userbot {forwarding_userbot_id}"
                     )
 
-                    # Add job to call queue with blockchain info
                     job = await handler.call_queue_model.add_job(
-                        routing_rule_id=routing_rule["id"],
+                        routing_rule_id=route["id"],
                         token_address=address,
                         blockchain=blockchain,
                         source_message_id=event.id,
