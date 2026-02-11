@@ -179,7 +179,6 @@ class EventProcessor:
             
             # Here you could add additional processing logic, such as:
             # - Updating statistics
-            # - Triggering alerts
             # - Logging to external systems
             
         except Exception as e:

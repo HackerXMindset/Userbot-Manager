@@ -22,16 +22,12 @@ class ManagementStates(StatesGroup):
     userbot_login_2fa = State()
     userbot_set_name = State()
     
-    
-    # Targets
-    target_edit_alert_mode = State()
-    target_edit_sensitivity = State()
-    target_edit_thresholds = State()
-    
     # Sources
     adding_source_chat_id = State()
     adding_source_user_id = State()
     source_set_name = State()
+    route_keywords_input = State()
+    route_rewrite_input = State()
 
     # PNL Forwarding
     pnl_waiting_for_source_forward = State()
@@ -101,4 +97,26 @@ class ManagementStates(StatesGroup):
     template_edit_text = State()
     template_assign_select_groups = State()
     
-    
+    # Gain Alerts
+    gain_alerts_add_type = State()
+    gain_alerts_add_chat_id = State()
+    gain_alerts_add_user_id = State()
+    gain_alerts_confirm_add = State()
+    gain_alerts_edit_name = State()
+    gain_alerts_edit_sensitivity = State()
+    gain_alerts_edit_template = State()
+    gain_alerts_edit_chart_threshold = State()
+    gain_alerts_edit_chart_bot = State()
+    chart_groups_add_chat_id = State()
+
+    # Chart Guardrails
+    awaiting_guardrail_value = State()
+    awaiting_source_guardrail_override = State()
+
+    # Settings
+    awaiting_gain_threshold = State()
+    awaiting_drop_threshold = State()
+    awaiting_drop_floor = State()
+    awaiting_global_chart_threshold = State()
+    awaiting_global_chart_bot = State()
+    awaiting_gain_template = State()

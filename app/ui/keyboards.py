@@ -34,26 +34,26 @@ class Keyboards:
         return InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="🧾 Overview", callback_data="menu:status"),
-                InlineKeyboardButton(text="📈 Tracking", callback_data="menu:tracking")
+                InlineKeyboardButton(text="🎯 Target", callback_data="menu:groups")
             ],
             [
-                InlineKeyboardButton(text="🎯 Target", callback_data="menu:groups"),
                 InlineKeyboardButton(text="👤 Agents", callback_data="menu:userbots")
             ],
             [
                 InlineKeyboardButton(text="📡 Sources", callback_data="menu:sources"),
-                InlineKeyboardButton(text="🚨 Alerts", callback_data="menu:alerts")
+                InlineKeyboardButton(text="💹 Profit Logs", callback_data="menu:pnl")
             ],
             [
-                InlineKeyboardButton(text="💹 Profit Logs", callback_data="menu:pnl"),
                 InlineKeyboardButton(text="📬 Inbox", callback_data="menu:notifications"),
-            ],
-            [
-                InlineKeyboardButton(text="✨ Curate Alpha", callback_data="menu:curate_alpha"),
                 InlineKeyboardButton(text="📡 Auto-Tap", callback_data="menu:auto_click")
             ],
             [
+                InlineKeyboardButton(text="✨ Curate Alpha", callback_data="menu:curate_alpha"),
                 InlineKeyboardButton(text="📝 Templates", callback_data="menu:templates")
+            ],
+            [
+                InlineKeyboardButton(text="⚙️ Settings", callback_data="menu:settings"),
+                InlineKeyboardButton(text="📚 Commands", callback_data="menu:commands")
             ],
             [
                 InlineKeyboardButton(text="🔻 Collapse", callback_data="menu:close")
@@ -86,26 +86,37 @@ class Keyboards:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
     
     @staticmethod
-    def group_details(group: Dict) -> InlineKeyboardMarkup:
+    def group_details(group: Dict, inspector_page: Optional[int] = None) -> InlineKeyboardMarkup:
         """Single group details menu"""
+        suffix = f":ginsp-{inspector_page}" if inspector_page is not None else ""
+
+        def with_suffix(base: str) -> str:
+            return f"{base}{suffix}"
+
         status_btn = InlineKeyboardButton(
             text="🔴 Disable" if group['enabled'] else "🟢 Enable",
-            callback_data=f"group:toggle:{group['id']}"
+            callback_data=with_suffix(f"group:toggle:{group['id']}")
         )
-        
+
+        back_callback = (
+            f"ginsp:return:{group['id']}:{inspector_page}"
+            if inspector_page is not None
+            else "menu:groups"
+        )
+
         return InlineKeyboardMarkup(inline_keyboard=[
             [status_btn],
             [
-                InlineKeyboardButton(text="✏️ Set Name", callback_data=f"group:set_name:{group['id']}"),
-                InlineKeyboardButton(text="📅 Schedules", callback_data=f"group:schedules:{group['id']}")
+                InlineKeyboardButton(text="✏️ Set Name", callback_data=with_suffix(f"group:set_name:{group['id']}")),
+                InlineKeyboardButton(text="📅 Schedules", callback_data=with_suffix(f"group:schedules:{group['id']}"))
             ],
             [
-                InlineKeyboardButton(text="🤖 Assign Bot", callback_data=f"group:assign:{group['id']}"),
-                InlineKeyboardButton(text="📊 Stats", callback_data=f"group:stats:{group['id']}")
+                InlineKeyboardButton(text="🤖 Assign Bot", callback_data=with_suffix(f"group:assign:{group['id']}")),
+                InlineKeyboardButton(text="📊 Stats", callback_data=with_suffix(f"group:stats:{group['id']}"))
             ],
             [
-                InlineKeyboardButton(text="🗑 Delete", callback_data=f"group:delete:{group['id']}"),
-                InlineKeyboardButton(text="🔙 Back", callback_data="menu:groups")
+                InlineKeyboardButton(text="🗑 Delete", callback_data=with_suffix(f"group:delete:{group['id']}")),
+                InlineKeyboardButton(text="🔙 Back", callback_data=back_callback)
             ]
         ])
     
@@ -656,153 +667,6 @@ class Keyboards:
         return text
 
     @staticmethod
-    def target_alerts_menu(target, back_callback: str = "menu:targets") -> InlineKeyboardMarkup:
-        """Target alerts configuration menu - context-aware based on enabled status - LEGACY"""
-        enabled = target.get('alerts_enabled', True)
-        target_id = target['id']
-
-        if enabled:
-            # When enabled: show disable + config options
-            keyboard = [
-                [InlineKeyboardButton(text="🔴 Disable All", callback_data=f"targets:alerts_enable:{target_id}")],
-                [InlineKeyboardButton(text="🎛️ Modes", callback_data=f"targets:alerts_modes:{target_id}")],
-                [
-                    InlineKeyboardButton(text="⚡ Sensitivity", callback_data=f"targets:alerts_set_sensitivity:{target_id}"),
-                    InlineKeyboardButton(text="🎚️ Thresholds", callback_data=f"targets:alerts_set_thresholds:{target_id}")
-                ],
-                [InlineKeyboardButton(text="🔙 Back", callback_data=back_callback)]
-            ]
-        else:
-            # When disabled: only show enable button
-            keyboard = [
-                [InlineKeyboardButton(text="🟢 Enable Alerts", callback_data=f"targets:alerts_enable:{target_id}")],
-                [InlineKeyboardButton(text="🔙 Back", callback_data=back_callback)]
-            ]
-
-        return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-    @staticmethod
-    def target_alerts_config_clean(target, back_callback: str = "targets:select_for_alerts") -> InlineKeyboardMarkup:
-        """
-        Clean all-in-one alerts configuration keyboard - REDESIGNED
-
-        All modes visible with inline toggles, no separate screens needed
-        """
-        from app.models import TargetModel
-
-        enabled = target.get('alerts_enabled', True)
-        target_id = target['id']
-
-        keyboard = []
-
-        # Row 1: Master enable/disable toggle
-        if enabled:
-            keyboard.append([
-                InlineKeyboardButton(
-                    text="🔴 Disable All Alerts",
-                    callback_data=f"targets:alerts_enable:{target_id}"
-                )
-            ])
-
-            # Row 2-5: Individual mode toggles with inline status
-            target_model = TargetModel(None)
-            modes = target_model.parse_alert_modes(target)
-
-            # PNL mode
-            pnl_status = "✅" if modes.get('pnl', True) else "❌"
-            keyboard.append([
-                InlineKeyboardButton(
-                    text=f"📈 PNL          {pnl_status}",
-                    callback_data=f"targets:alerts_toggle:{target_id}:pnl"
-                )
-            ])
-
-            # Threshold mode with edit button
-            thresh_status = "✅" if modes.get('threshold', True) else "❌"
-            keyboard.append([
-                InlineKeyboardButton(
-                    text=f"🎚️ Threshold   {thresh_status}",
-                    callback_data=f"targets:alerts_toggle:{target_id}:threshold"
-                ),
-                InlineKeyboardButton(
-                    text="⚙️ Edit",
-                    callback_data=f"targets:alerts_set_thresholds:{target_id}"
-                )
-            ])
-
-            # Sensitivity mode with edit button
-            sens_status = "✅" if modes.get('sensitivity', True) else "❌"
-            keyboard.append([
-                InlineKeyboardButton(
-                    text=f"⚡ Sensitivity {sens_status}",
-                    callback_data=f"targets:alerts_toggle:{target_id}:sensitivity"
-                ),
-                InlineKeyboardButton(
-                    text="⚙️ Edit",
-                    callback_data=f"targets:alerts_set_sensitivity:{target_id}"
-                )
-            ])
-
-            # Dynamic mode (now visible!)
-            dynamic_status = "✅" if modes.get('dynamic', False) else "❌"
-            keyboard.append([
-                InlineKeyboardButton(
-                    text=f"🔄 Dynamic     {dynamic_status}",
-                    callback_data=f"targets:alerts_toggle:{target_id}:dynamic"
-                )
-            ])
-
-        else:
-            # When disabled: only show enable button
-            keyboard.append([
-                InlineKeyboardButton(
-                    text="🟢 Enable Alerts",
-                    callback_data=f"targets:alerts_enable:{target_id}"
-                )
-            ])
-
-        # Back button
-        keyboard.append([
-            InlineKeyboardButton(text="🔙 Back", callback_data=back_callback)
-        ])
-
-        return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-    @staticmethod
-    def target_alerts_mode_keyboard(target) -> InlineKeyboardMarkup:
-        """Target alert modes toggle keyboard - vertical button list"""
-        from app.models import TargetModel
-
-        # Parse current modes
-        target_model = TargetModel(None)
-        modes = target_model.parse_alert_modes(target)
-
-        mode_icons = {"pnl": "📈", "dynamic": "🔄", "threshold": "🎚️", "sensitivity": "⚡"}
-        mode_names = {"pnl": "PNL", "dynamic": "Dynamic", "threshold": "Threshold", "sensitivity": "Sensitivity"}
-
-        keyboard = []
-
-        # Only show main modes (skip dynamic - legacy)
-        for mode in ["pnl", "threshold", "sensitivity"]:
-            if mode in modes:
-                icon = mode_icons[mode]
-                name = mode_names[mode]
-                status = "✅" if modes[mode] else "❌"
-
-                # Format: [📈 PNL          ✅]
-                button_text = f"{icon} {name:<12} {status}"
-                keyboard.append([
-                    InlineKeyboardButton(
-                        text=button_text,
-                        callback_data=f"targets:alerts_toggle:{target['id']}:{mode}"
-                    )
-                ])
-
-        keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data=f"targets:alerts_menu:{target['id']}")])
-
-        return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-    @staticmethod
     def auto_click_menu(rules: List[Dict]) -> InlineKeyboardMarkup:
         """Auto click main menu (clean - no rule list)"""
         keyboard = [
@@ -1054,6 +918,176 @@ class Keyboards:
             keyboard.append(nav_buttons)
 
         keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data="dynamic_reply:menu")])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def settings_menu() -> InlineKeyboardMarkup:
+        """Settings main menu"""
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📈 Gain Alerts", callback_data="gain_alerts:menu")],
+            [InlineKeyboardButton(text="🌙 Gain Alert Settings", callback_data="settings:gain_alerts")],
+            [InlineKeyboardButton(text="📊 Token Status", callback_data="settings:token_status")],
+            [InlineKeyboardButton(text="🔙 Back", callback_data="menu:main")]
+        ])
+
+    @staticmethod
+    def gain_alert_settings_menu(
+        gain_threshold: float,
+        drop_threshold: float,
+        drop_floor: float,
+        chart_group_count: int,
+        chart_threshold_label: str,
+        chart_bot_label: str,
+        guardrail_labels: Dict[str, str],
+    ) -> InlineKeyboardMarkup:
+        """Gain alert settings menu with current values"""
+        keyboard = [
+            [InlineKeyboardButton(
+                text=f"📈 Gain Threshold: {gain_threshold*100:.0f}%",
+                callback_data="settings:edit_gain_threshold"
+            )],
+            [InlineKeyboardButton(
+                text=f"📉 Drop Threshold: {drop_threshold*100:.0f}%",
+                callback_data="settings:edit_drop_threshold"
+            )],
+            [InlineKeyboardButton(
+                text=f"💰 Minimum MC: ${drop_floor:,.0f}",
+                callback_data="settings:edit_drop_floor"
+            )],
+            [InlineKeyboardButton(
+                text=f"💰 Set MC Threshold ({chart_threshold_label})",
+                callback_data="settings:edit_chart_threshold"
+            )],
+            [InlineKeyboardButton(
+                text=f"🤖 Set Chart Bot ID ({chart_bot_label})",
+                callback_data="settings:edit_chart_bot"
+            )],
+            [
+                InlineKeyboardButton(
+                    text=f"Age: {guardrail_labels['min_age_minutes']}",
+                    callback_data="settings:edit_guardrail:min_age_minutes"
+                ),
+                InlineKeyboardButton(
+                    text=f"Liq: {guardrail_labels['min_liquidity_usd']}",
+                    callback_data="settings:edit_guardrail:min_liquidity_usd"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Vol: {guardrail_labels['min_volume_usd']}",
+                    callback_data="settings:edit_guardrail:min_volume_usd"
+                ),
+                InlineKeyboardButton(
+                    text=f"MC x: {guardrail_labels['min_multiplier']}",
+                    callback_data="settings:edit_guardrail:min_multiplier"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Price Δ: {guardrail_labels['max_price_change_pct']}",
+                    callback_data="settings:edit_guardrail:max_price_change_pct"
+                ),
+                InlineKeyboardButton(
+                    text=f"Strat: {guardrail_labels['checks_required']}",
+                    callback_data="settings:edit_guardrail:checks_required"
+                ),
+            ],
+            [InlineKeyboardButton(
+                text="📝 Edit Alert Template",
+                callback_data="settings:edit_gain_template"
+            )],
+            [InlineKeyboardButton(
+                text=f"⚙️ Chart Request Groups ({chart_group_count})",
+                callback_data="gain_alerts:chart_groups:menu"
+            )],
+            [InlineKeyboardButton(text="🔙 Back", callback_data="settings:main")]
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def token_status_menu() -> InlineKeyboardMarkup:
+        """Token status menu"""
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📊 Scheduler Overview", callback_data="settings:scheduler_overview")],
+            [InlineKeyboardButton(text="🪙 Active Tokens", callback_data="settings:tokens_list:active:1")],
+            [InlineKeyboardButton(text="⛔ Stopped Tokens", callback_data="settings:tokens_list:stopped:1")],
+            [InlineKeyboardButton(text="🔙 Back", callback_data="settings:main")]
+        ])
+
+    @staticmethod
+    def gain_alerts_main_menu(entries: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
+        """Main menu for gain alerts monitored sources."""
+        keyboard: List[List[InlineKeyboardButton]] = [
+            [InlineKeyboardButton(text="➕ Add Monitored Source", callback_data="gain_alerts:add")]
+        ]
+
+        for entry in entries:
+            chat_id = entry.get("chat_id")
+            button_text = entry.get("button_text") or f"{chat_id}"
+            keyboard.append([
+                InlineKeyboardButton(text=button_text, callback_data=f"gain_alerts:view:{chat_id}")
+            ])
+
+        keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data="settings:main")])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def gain_alerts_type_selector() -> InlineKeyboardMarkup:
+        """Type selection keyboard for monitored sources."""
+        keyboard = [
+            [InlineKeyboardButton(text="📢 Channel", callback_data="gain_alerts:add:type:channel")],
+            [InlineKeyboardButton(text="👥 Group", callback_data="gain_alerts:add:type:group")],
+            [InlineKeyboardButton(text="💬 DM", callback_data="gain_alerts:add:type:dm")],
+            [InlineKeyboardButton(text="❌ Cancel", callback_data="gain_alerts:cancel")],
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def gain_alerts_add_confirm() -> InlineKeyboardMarkup:
+        """Confirmation keyboard for adding monitored sources."""
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Confirm", callback_data="gain_alerts:add:confirm")],
+            [InlineKeyboardButton(text="❌ Cancel", callback_data="gain_alerts:cancel")]
+        ])
+
+    @staticmethod
+    def chart_groups_menu(groups: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
+        """Chart request groups menu."""
+        keyboard: List[List[InlineKeyboardButton]] = [
+            [InlineKeyboardButton(text="➕ Add Group", callback_data="gain_alerts:chart_groups:add")]
+        ]
+
+        for group in groups:
+            chat_id = group.get("chat_id")
+            label = group.get("label")
+            if label:
+                button_text = f"🗑️ Remove {chat_id} ({label})"
+            else:
+                button_text = f"🗑️ Remove {chat_id}"
+
+            keyboard.append([
+                InlineKeyboardButton(text=button_text, callback_data=f"gain_alerts:chart_groups:remove:{chat_id}")
+            ])
+
+        keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data="gain_alerts:menu")])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def token_list_navigation(status: str, page: int, total_pages: int) -> InlineKeyboardMarkup:
+        """Token list with pagination"""
+        keyboard = []
+
+        # Pagination
+        if total_pages > 1:
+            nav_buttons = []
+            if page > 1:
+                nav_buttons.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"settings:tokens_list:{status}:{page-1}"))
+            nav_buttons.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="noop"))
+            if page < total_pages:
+                nav_buttons.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"settings:tokens_list:{status}:{page+1}"))
+            keyboard.append(nav_buttons)
+
+        keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data="settings:token_status")])
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod

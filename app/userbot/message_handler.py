@@ -5,23 +5,20 @@ Message Handler - Handles message processing and event routing
 
 import logging
 import time
-import traceback
-import json
-import asyncio
 from typing import Dict, Any, List, Optional
 from telethon import events
 
 from app.db import db
+from app.dex import get_dex_service
 from app.models import BotModel, GroupModel, ScheduleModel, PnlForwardingRuleModel, CommandForwardingRuleModel, CommandTrackedMessageModel, AutoButtonClickRuleModel, CuratedAlphaRuleModel, CuratedAlphaTokenStateModel
 from app.models.source_chat import SourceChatModel
 from app.models.call_queue import CallQueueModel
+from app.models.monitored_source import MonitoredSourceModel
 from .token_monitor import TokenMonitor
 from .call_executor import CallExecutor
 from .source_manager import SourceManager
 from .utils import UserbotUtils
 from .notification_handler import NotificationHandler
-from telethon.tl.types import PeerChannel, PeerChat, PeerUser
-from telethon.errors import MessageIdInvalidError
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +47,10 @@ class MessageHandler:
         self.call_queue_model = CallQueueModel(db)
         self.curated_alpha_rule_model = CuratedAlphaRuleModel(db)
         self.curated_alpha_token_state_model = CuratedAlphaTokenStateModel(db)
+        self.monitored_source_model = MonitoredSourceModel(db)
 
         # Initialize components
+        self._album_guard: Dict[tuple, float] = {}
         self.token_monitor = TokenMonitor(userbot_id)
         self.call_executor = CallExecutor(userbot_id, session_manager)
         self.source_manager = SourceManager(userbot_id)
@@ -78,6 +77,18 @@ class MessageHandler:
     async def _process_event(self, event, is_edit=False):
         direction = "outgoing" if event.out else "incoming"
         logger.debug(f"[MessageHandler] Processing {direction} event - Chat: {event.chat_id}, Userbot: {self.userbot_id}, Edit: {is_edit}, Sender: {event.sender_id}")
+
+        if not is_edit and direction == "incoming":
+            try:
+                dex_service = get_dex_service()
+                chart_fetcher = getattr(dex_service, "chart_fetcher", None)
+                if chart_fetcher:
+                    await chart_fetcher.handle_chart_bot_reply(event.message)
+            except Exception as exc:
+                logger.debug(f"[CHART_FETCH] Error handling potential chart reply: {exc}")
+
+        if not is_edit and direction == "incoming":
+            await self._handle_monitored_gain_alert(event)
 
         if direction == "incoming":
             is_dm = event.is_private
@@ -145,1056 +156,152 @@ class MessageHandler:
     
     async def _can_group_accept_calls(self, tg_chat_id: int) -> bool:
         """Check if group can accept calls at current time/day"""
-        try:
-            # Get current time info for cache key
-            from app.config import settings
-            now = settings.get_local_time()
-            current_day = now.weekday() + 1  # Monday = 1
-            current_hour = now.hour
-            
-            # Check cache first
-            cache_key = f"schedule_{tg_chat_id}_{current_day}_{current_hour}"
-            if self.is_fresh(cache_key):
-                return self.cache[cache_key]
-            
-            # Get group record
-            group = await self.group_model.get_by_chat_id(tg_chat_id)
-            if not group or not group['enabled']:
-                result = False
-                self.cache[cache_key] = result
-                self.cache_time[cache_key] = time.time()
-                return result
-            
-            current_time = now.time()
-            
-            # Check if group has any schedules at all
-            all_schedules = await self.schedule_model.get_by_group(group['id'])
-            
-            # If no schedules defined, allow by default (schedules are optional)
-            if not all_schedules:
-                result = True
-            else:
-                # Group has schedules - check if any are currently active
-                active_schedules = await self.schedule_model.get_active_schedules(current_day, current_time)
-                result = False
-                for schedule in active_schedules:
-                    if schedule['tg_chat_id'] == tg_chat_id:
-                        result = True
-                        break
-            
-            # Cache result for 10 minutes
-            self.cache[cache_key] = result
-            self.cache_time[cache_key] = time.time()
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error checking schedule for group {tg_chat_id}: {e}")
-            # Default to allow if schedule check fails
-            return True
-    
+        from app.userbot.source_handler import can_group_accept_calls
+
+        return await can_group_accept_calls(self, tg_chat_id)
+
+
     async def _handle_source_message(self, event, is_edit: bool = False):
         """Handle messages from source chats - extract tokens and route to targets"""
-        try:
-            logger.info(f"[SPLIT-RESP] Processing source message - Chat: {event.chat_id}, Userbot: {self.userbot_id}, Edit: {is_edit}")
+        from app.userbot.source_handler import handle_source_message
 
-            # Validate source permissions
-            permission_check = await self.source_manager.validate_source_permissions(event)
-            logger.debug(f"[SPLIT-RESP] Source permission check result: {permission_check}")
+        return await handle_source_message(self, event, is_edit=is_edit)
 
-            if not permission_check['allowed']:
-                logger.debug(f"[SPLIT-RESP] Source message rejected: {permission_check['reason']}")
-                return
-
-            source = permission_check['source']
-            live_source_name = self.utils.get_chat_title(getattr(event, 'chat', None))
-
-            source_type_value = source.get('source_type')
-            if not source_type_value:
-                if event.is_private:
-                    source_type_value = 'dm'
-                elif event.is_channel:
-                    source_type_value = 'channel'
-                else:
-                    source_type_value = 'group'
-
-            if live_source_name:
-                try:
-                    await self.source_model.update(source['id'], {'display_name': live_source_name})
-                    source['display_name'] = live_source_name
-                except Exception as update_error:
-                    logger.debug(f"[SPLIT-RESP] Unable to update source display name: {update_error}")
-
-            logger.info(
-                f"[SPLIT-RESP] Source validated - ID: {source['id']}, Name: {live_source_name or source.get('display_name') or source.get('name', 'N/A')}"
-            )
-
-            # Check if this userbot is assigned to monitor this source
-            routing_rules = await self.source_model.get_routing_rules(source['id'])
-            logger.info(f"[SPLIT-RESP] Found {len(routing_rules)} routing rules for source {source['id']}")
-
-            # Check source-level bot assignments first (NEW FEATURE)
-            source_monitor_bot = source.get('default_monitoring_userbot_id')
-            source_forward_bot = source.get('default_forwarding_userbot_id')
-
-            monitoring_allowed = False
-            primary_monitor_id = None
-            designated_monitors = set()  # Initialize to avoid UnboundLocalError
-
-            if source_monitor_bot:
-                # Source has a designated monitor bot - use it
-                primary_monitor_id = source_monitor_bot
-                if self.userbot_id == source_monitor_bot:
-                    monitoring_allowed = True
-                    logger.info(f"[SPLIT-RESP] Userbot {self.userbot_id} is the source-level designated monitor for source {source['id']}")
-                else:
-                    logger.debug(f"[SPLIT-RESP] Userbot {self.userbot_id} not source-level monitor (assigned: {source_monitor_bot})")
-            else:
-                # Fallback to routing rules logic
-                designated_monitors = {rule['monitoring_userbot_id'] for rule in routing_rules if rule['monitoring_userbot_id'] is not None}
-                logger.debug(f"[SPLIT-RESP] Designated monitors for source {source['id']}: {designated_monitors}")
-
-                if designated_monitors:
-                    # If there are explicit assignments, only ONE bot should monitor.
-                    # By convention, we'll deterministically pick the one with the lowest ID.
-                    primary_monitor_id = min(designated_monitors)
-                    if self.userbot_id == primary_monitor_id:
-                        monitoring_allowed = True
-                        logger.info(f"[SPLIT-RESP] Userbot {self.userbot_id} is the designated primary monitor (min ID) for source {source['id']}")
-                    else:
-                        logger.debug(f"[SPLIT-RESP] Userbot {self.userbot_id} not primary monitor (primary: {primary_monitor_id})")
-                else:
-                    # BACKWARD COMPATIBILITY: No explicit monitor is set.
-                    # To prevent a race condition, we'll deterministically assign monitoring duty
-                    # to the forwarding bot of the *first* routing rule found.
-                    if routing_rules and routing_rules[0]['forwarding_userbot_id']:
-                        primary_monitor_id = routing_rules[0]['forwarding_userbot_id']
-                        if self.userbot_id == primary_monitor_id:
-                            monitoring_allowed = True
-                            logger.info(f"[SPLIT-RESP] Userbot {self.userbot_id} assigned as monitor by backward compatibility rule (first forwarder) for source {source['id']}")
-                        else:
-                            logger.debug(f"[SPLIT-RESP] Userbot {self.userbot_id} not assigned as backward compatibility monitor (assigned: {primary_monitor_id})")
-                    else:
-                        logger.warning(f"[SPLIT-RESP] No routing rules or forwarding userbot found for source {source['id']}")
-
-            if not monitoring_allowed:
-                logger.debug(f"[SPLIT-RESP] ⏭️ Userbot {self.userbot_id} SKIPPING - not designated monitor for source {event.chat_id}")
-                logger.debug(f"[SPLIT-RESP] Designated monitors: {designated_monitors}, Primary: {primary_monitor_id if designated_monitors else 'source-level or backward compatibility'}")
-                return
-            else:
-                logger.debug(f"[SPLIT-RESP] ✅ Userbot {self.userbot_id} IS designated monitor for source {event.chat_id}")
-
-            # Get all target groups for this source using routing rules
-            target_groups = await self.source_manager.get_target_groups_for_source(event.chat_id)
-
-            # Process message for tokens regardless of routing rules (needed for curated alpha)
-            # Returns list of tuples: [(address, blockchain), ...]
-            tagged_addresses = await self.token_monitor.process_source_message(event, event.chat_id, target_groups or [])
-
-            # Handle Curated Alpha logic independently (works without routing rules)
-            if tagged_addresses:
-                await self._handle_curated_alpha(tagged_addresses, event.chat_id, event)
-
-            # Early return if no routing rules for regular forwarding
-            if not target_groups:
-                logger.warning(f"[SPLIT-RESP] No target groups found for source {event.chat_id} - skipping regular forwarding")
-                return
-
-            logger.info(f"[SPLIT-RESP] Found {len(target_groups)} target groups: {[f'{g['title']}({g['id']})' for g in target_groups]}")
-
-            if not tagged_addresses:
-                logger.debug(f"[SPLIT-RESP] No token addresses found in message")
-                return
-
-            logger.info(f"[SPLIT-RESP] Extracted {len(tagged_addresses)} token addresses: {[(addr[:8] + '...', chain) for addr, chain in tagged_addresses]}")
-
-            # Filter out recently forwarded tokens
-            unseen_tagged_addresses = []
-            for address, blockchain in tagged_addresses:
-                recently_forwarded = await db.fetchval("""
-                    SELECT 1 FROM forwarded_tokens_log
-                    WHERE token_address = $1 AND source_chat_id = $2 AND blockchain = $3
-                    AND forwarded_at > NOW() - INTERVAL '24 hours'
-                    LIMIT 1
-                """, address, event.chat_id, blockchain)
-
-                if recently_forwarded:
-                    logger.info(f"Token {address[:8]}... ({blockchain}) from source {event.chat_id} was already forwarded recently. Skipping.")
-                else:
-                    unseen_tagged_addresses.append((address, blockchain))
-
-            if not unseen_tagged_addresses:
-                logger.info("All extracted tokens were recently forwarded. Nothing to do.")
-                return
-
-            addresses_to_forward = unseen_tagged_addresses
-            logger.info(f"[SPLIT-RESP] Starting job queue population for {len(addresses_to_forward)} new tokens across {len(target_groups)} target groups")
-
-            # Queue tokens for all target groups
-            total_queued = 0
-            total_failed = 0
-
-            for target_group in target_groups:
-                logger.debug(f"[SPLIT-RESP] Processing target group: {target_group['title']}({target_group['id']})")
-
-                # Check if group can accept calls at current time/day
-                if not await self._can_group_accept_calls(target_group['tg_chat_id']):
-                    logger.info(f"[SPLIT-RESP] Skipping group {target_group['tg_chat_id']} - outside schedule window")
-                    continue
-
-                group_queued = 0
-                group_failed = 0
-
-                # Find routing rule and forwarding userbot for this target group
-                routing_rule = None
-                forwarding_userbot_id = None
-
-                for rule in routing_rules:
-                    if rule['target_group_id'] == target_group['id'] and rule['enabled']:
-                        routing_rule = rule
-                        forwarding_userbot_id = rule['forwarding_userbot_id']
-                        logger.debug(f"[SPLIT-RESP] Matched routing rule {rule['id']} for group {target_group['id']}, forwarding_userbot: {forwarding_userbot_id}")
-                        break
-
-                if not routing_rule:
-                    logger.warning(f"[SPLIT-RESP] No routing rule found for target group {target_group['id']} - SKIPPING")
-                    continue
-
-                # Use any active userbot if no forwarding userbot assigned (backward compatibility)
-                if not forwarding_userbot_id:
-                    forwarding_userbot_id = self.userbot_id
-                    logger.info(f"[SPLIT-RESP] No forwarding userbot assigned, using current userbot {self.userbot_id} (backward compatibility)")
-                else:
-                    logger.info(f"[SPLIT-RESP] Using assigned forwarding userbot {forwarding_userbot_id}")
-
-                # Queue each token for this target group
-                for address, blockchain in addresses_to_forward:
-                    try:
-                        # Check blockchain filter
-                        allowed_chains = routing_rule.get('allowed_chains', ['SOL'])
-                        if blockchain not in allowed_chains:
-                            logger.info(f"[CHAIN_FILTER] Rule {routing_rule['id']} allows {allowed_chains}, token is {blockchain} - SKIPPED")
-                            continue
-
-                        logger.debug(f"[CHAIN_FILTER] Rule {routing_rule['id']} allows {allowed_chains}, token is {blockchain} - ALLOWED")
-
-                        # Get source info for the call
-                        display_source_name = live_source_name or source.get('display_name') or source.get('name') or source.get('title')
-                        source_info = f"From {display_source_name or event.chat_id}"
-                        additional_info_dict = {
-                            "message_text": self.utils.get_message_text(event.message) if hasattr(event, 'message') else "",
-                            "caller_name": self.utils.get_user_name(event.sender),
-                            "source_name": display_source_name,
-                            "source_type": source_type_value,
-                            "source_chat_id": event.chat_id,
-                            "seen_sources": [
-                                {
-                                    'chat_id': event.chat_id,
-                                    'name': display_source_name,
-                                    'source_type': source_type_value,
-                                    'caller_name': self.utils.get_user_name(event.sender),
-                                    'caller_user_id': event.sender_id,
-                                }
-                            ],
-                            "caller_user_id": event.sender_id,
-                        }
-
-                        logger.debug(f"[SPLIT-RESP] Queueing token {address[:8]}... ({blockchain}) for target {target_group['id']} via userbot {forwarding_userbot_id}")
-
-                        # Add job to call queue with blockchain info
-                        job = await self.call_queue_model.add_job(
-                            routing_rule_id=routing_rule['id'],
-                            token_address=address,
-                            blockchain=blockchain,
-                            source_message_id=event.id,
-                            source_chat_id=event.chat_id,
-                            source_user_id=event.sender_id,
-                            target_group_id=target_group['id'],
-                            target_chat_id=target_group['tg_chat_id'],
-                            forwarding_userbot_id=forwarding_userbot_id,
-                            source_info=json.dumps(source_info),
-                            additional_info=json.dumps(additional_info_dict)
-                        )
-
-                        if job:
-                            group_queued += 1
-                            total_queued += 1
-                            logger.debug(f"[SPLIT-RESP] ✅ Job {job['id']} created for {address[:8]}... ({blockchain}) → {target_group['title']}")
-                        else:
-                            group_failed += 1
-                            total_failed += 1
-                            logger.warning(f"[SPLIT-RESP] ❌ Failed to queue {address[:8]}... ({blockchain}) for {target_group['title'] or target_group['tg_chat_id']}")
-
-                    except Exception as token_error:
-                        group_failed += 1
-                        total_failed += 1
-                        logger.error(f"[SPLIT-RESP] ❌ Error queuing token {address[:8]}... ({blockchain}) for target {target_group['tg_chat_id']} via userbot {self.userbot_id}: {token_error}")
-                        import traceback
-                        logger.error(f"[SPLIT-RESP] Full traceback: {traceback.format_exc()}")
-
-                if group_queued > 0:
-                    logger.info(f"[SPLIT-RESP] ✅ Group {target_group['title']}: {group_queued} tokens queued")
-                if group_failed > 0:
-                    logger.warning(f"[SPLIT-RESP] ❌ Group {target_group['title']}: {group_failed} tokens failed")
-
-            logger.info(f"[SPLIT-RESP] 🎯 QUEUE SUMMARY: {total_queued} jobs created, {total_failed} failed across {len(target_groups)} target groups by userbot {self.userbot_id}")
-            
-            # After successfully queuing the jobs, log the new tokens as forwarded
-            if total_queued > 0:
-                try:
-                    # Use executemany for efficiency if available, otherwise loop
-                    if hasattr(db.pool, 'executemany'):
-                        await db.pool.executemany("""
-                            INSERT INTO forwarded_tokens_log (token_address, source_chat_id, blockchain)
-                            VALUES ($1, $2, $3)
-                        """, [(addr, event.chat_id, blockchain) for addr, blockchain in addresses_to_forward])
-                    else: # Fallback for pools that don't support it
-                        for addr, blockchain in addresses_to_forward:
-                             await db.execute("""
-                                INSERT INTO forwarded_tokens_log (token_address, source_chat_id, blockchain)
-                                VALUES ($1, $2, $3)
-                            """, addr, event.chat_id, blockchain)
-                    logger.info(f"Logged {len(addresses_to_forward)} new tokens to forwarded_tokens_log for source {event.chat_id}")
-                except Exception as log_error:
-                    logger.error(f"Failed to log forwarded tokens: {log_error}")
-
-            # Update bot last seen
-            await self.bot_model.update_last_seen(self.userbot_id)
-            
-        except Exception as e:
-            logger.error(f"[SPLIT-RESP] ❌ Critical error handling source message in chat {event.chat_id} by userbot {self.userbot_id}: {e}")
-            import traceback
-            logger.error(f"[SPLIT-RESP] Full traceback: {traceback.format_exc()}")
 
     async def _handle_auto_click(self, event):
-        if not event.is_reply:
-            return
-
-        reply_to_msg_id = event.message.reply_to_msg_id
-        if not reply_to_msg_id:
-            return
-
-        # Check if this is a reply to a message we are tracking for auto-click
-        tracked_msgs = await db.fetch(
-            "SELECT * FROM autoclick_tracked_messages WHERE original_message_id = $1 AND chat_id = $2 AND status = 'tracking'",
-            reply_to_msg_id, event.chat_id
-        )
-        if not tracked_msgs:
-            return
-
-        for tracked_msg in tracked_msgs:
-            # Ensure this userbot is the one that should be clicking
-            if tracked_msg.get('userbot_id') and tracked_msg['userbot_id'] != self.userbot_id:
-                logger.debug(f"Ignoring auto-click for rule {tracked_msg['rule_id']}; userbot {self.userbot_id} is not the designated clicker.")
-                continue
-
-            # Get the rule associated with this tracked message
-            rule = await self.rule_model.get_by_id(tracked_msg['rule_id'])
-            if not rule or not rule['enabled']:
-                continue
-
-            # Check if the reply is from the correct bot
-            if rule['bot_id'] != event.sender_id:
-                continue
-                
-            logger.info(f"Valid auto-click reply detected for rule {rule['id']}. Searching for button...")
-
-            # Get our client to perform the click
-            client = self.session_manager.get_client()
-            if not client:
-                logger.error(f"Client not available for button click on rule {rule['id']}")
-                await db.execute("UPDATE autoclick_tracked_messages SET status = 'failed' WHERE id = $1", tracked_msg['id'])
-                continue
-
-            # Click the button with retry logic
-            max_retries = 3
-            retry_delay = 2  # seconds
-            button_found_and_clicked = False
-
-            if event.buttons:
-                for row in event.buttons:
-                    for button in row:
-                        if hasattr(button, 'text') and rule['button_text'] in button.text:
-                            # Try clicking with retries using our client
-                            click_success = False
-                            for attempt in range(max_retries):
-                                try:
-                                    # Refetch the message using our client to get fresh button reference
-                                    fresh_msg = await client.get_messages(event.chat_id, ids=event.message.id)
-                                    if not fresh_msg or not fresh_msg.buttons:
-                                        logger.error(f"Could not refetch message with buttons for rule {rule['id']}")
-                                        break
-
-                                    # Find the matching button in the fresh message
-                                    fresh_button = None
-                                    for fresh_row in fresh_msg.buttons:
-                                        for fb in fresh_row:
-                                            if hasattr(fb, 'text') and rule['button_text'] in fb.text:
-                                                fresh_button = fb
-                                                break
-                                        if fresh_button:
-                                            break
-
-                                    if not fresh_button:
-                                        logger.error(f"Button not found in refetched message for rule {rule['id']}")
-                                        break
-
-                                    # Click using our client
-                                    await fresh_button.click()
-                                    logger.info(f"✅ Auto-clicked button '{rule['button_text']}' in chat {event.chat_id} for rule {rule['id']} (attempt {attempt + 1})")
-                                    click_success = True
-                                    break  # Success, exit retry loop
-                                except Exception as e:
-                                    logger.error(f"❌ Button click attempt {attempt + 1}/{max_retries} failed for rule {rule['id']}: {e}")
-                                    if attempt < max_retries - 1:
-                                        logger.info(f"Retrying button click in {retry_delay} seconds...")
-                                        await asyncio.sleep(retry_delay)
-                                    else:
-                                        logger.error(f"All {max_retries} button click attempts failed for rule {rule['id']}")
-
-                            # Update status based on result
-                            if click_success:
-                                await db.execute("UPDATE autoclick_tracked_messages SET status = 'processed' WHERE id = $1", tracked_msg['id'])
-                            else:
-                                await db.execute("UPDATE autoclick_tracked_messages SET status = 'failed' WHERE id = $1", tracked_msg['id'])
-                            
-                            button_found_and_clicked = True
-                            break # Found and processed button for this rule, move to next rule
-                    if button_found_and_clicked:
-                        break
-
-            if not button_found_and_clicked:
-                # If we reach here, the button was not found
-                logger.warning(f"Reply from bot {event.sender_id} received, but button '{rule['button_text']}' not found for rule {rule['id']}.")
+        """Handle auto-click for tracked messages with button replies."""
+        from app.userbot.auto_click_handler import handle_auto_click
+        return await handle_auto_click(self, event)
 
     async def _handle_dynamic_click(self, event):
         """Handle dynamic button clicking for monitored users"""
-        # Only process messages with buttons
-        if not event.buttons:
-            return
-
-        # Get dynamic rules for this chat and sender
-        rules = await self.rule_model.get_dynamic_rules_for_chat_and_user(
-            event.chat_id,
-            event.sender_id
-        )
-
-        if not rules:
-            return
-
-        # Get our client to perform clicks
-        client = self.session_manager.get_client()
-        if not client:
-            logger.error(f"[DYNAMIC_CLICK] Client not available for button clicks")
-            return
-
-        for rule in rules:
-            # clicking_userbot_ids may be a JSON string or already a list.
-            clicking_userbot_ids_raw = rule.get('clicking_userbot_ids')
-            clicking_userbot_ids = []
-            if isinstance(clicking_userbot_ids_raw, str):
-                try:
-                    clicking_userbot_ids = json.loads(clicking_userbot_ids_raw)
-                except json.JSONDecodeError:
-                    logger.warning(f"[DYNAMIC_CLICK] Could not decode clicking_userbot_ids JSON: {clicking_userbot_ids_raw}")
-            elif isinstance(clicking_userbot_ids_raw, list):
-                clicking_userbot_ids = clicking_userbot_ids_raw
-
-            if not clicking_userbot_ids or self.userbot_id not in clicking_userbot_ids:
-                continue
-
-            message_id = event.message.id
-
-            # Calculate position in sequence for time-based delay
-            sorted_ids = sorted(clicking_userbot_ids)
-            try:
-                my_position = sorted_ids.index(self.userbot_id)
-            except ValueError:
-                my_position = 0
-                logger.warning(f"[DYNAMIC_CLICK] Could not find userbot {self.userbot_id} in clicking list")
-
-            # Create auto-reply session if enabled
-            session_id = None
-            if rule.get('auto_reply_enabled'):
-                from app.models.auto_reply_session import AutoReplySessionModel
-                session_model = AutoReplySessionModel(self.db)
-
-                # Get the bot that created the buttons
-                bot_user_id = None
-                if hasattr(event.message, 'via_bot_id') and event.message.via_bot_id:
-                    bot_user_id = event.message.via_bot_id
-                elif hasattr(event.message, 'via_bot') and event.message.via_bot:
-                    bot_user_id = event.message.via_bot.id
-                else:
-                    bot_user_id = event.sender_id
-
-                if bot_user_id:
-                    ticker_value = rule.get('ticker_value', '')
-                    # Create session in WAITING state
-                    session_id = await session_model.create_session(
-                        rule_id=rule['id'],
-                        message_id=message_id,
-                        userbot_id=self.userbot_id,
-                        bot_user_id=bot_user_id,
-                        ticker_value=ticker_value
-                    )
-                    logger.info(f"[AUTO_REPLY] Created session {session_id} for userbot={self.userbot_id}, position={my_position}")
-                else:
-                    logger.warning(f"[AUTO_REPLY] Could not determine bot ID for rule {rule['id']}")
-
-            # Time-based sequential delay: position * 5 seconds
-            delay = my_position * 5
-            if delay > 0:
-                logger.info(f"[DYNAMIC_CLICK] Userbot {self.userbot_id} waiting {delay}s (position {my_position}) before clicking")
-                await asyncio.sleep(delay)
-
-            # Mark session as ready to click
-            if session_id:
-                await session_model.mark_ready(session_id)
-
-            button_texts = rule['button_texts']  # JSONB array
-            if not button_texts:
-                continue
-
-            matched_button_texts = []
-
-            # Find all matching button texts (exact match)
-            for row in event.buttons:
-                for button in row:
-                    if hasattr(button, 'text') and button.text in button_texts:
-                        matched_button_texts.append(button.text)
-
-            if not matched_button_texts:
-                continue
-
-            # Click all matched buttons with retry logic and 1 sec delay between buttons
-            max_retries = 3
-            retry_delay = 2  # seconds
-            clicked_count = 0
-
-            for button_text in set(matched_button_texts): # Use set to avoid clicking the same button twice
-                click_success = False
-                for attempt in range(max_retries):
-                    try:
-                        # Refetch the message using our client to get fresh button reference
-                        fresh_msg = await client.get_messages(event.chat_id, ids=event.message.id)
-                        if not fresh_msg or not fresh_msg.buttons:
-                            logger.debug(f"[DYNAMIC_CLICK] Button '{button_text}' disappeared for rule {rule['id']}, likely already clicked.")
-                            break
-
-                        # Find the matching button in the fresh message
-                        fresh_button = None
-                        for fresh_row in fresh_msg.buttons:
-                            for fb in fresh_row:
-                                if hasattr(fb, 'text') and fb.text == button_text:
-                                    fresh_button = fb
-                                    break
-                            if fresh_button:
-                                break
-
-                        if not fresh_button:
-                            logger.debug(f"[DYNAMIC_CLICK] Button '{button_text}' not found in refetched message for rule {rule['id']}.")
-                            break
-
-                        # Click using our client
-                        await fresh_button.click()
-                        click_success = True
-                        break  # Success, exit retry loop
-                    except Exception as e:
-                        logger.error(f"[DYNAMIC_CLICK] Button click attempt {attempt + 1}/{max_retries} failed for rule {rule['id']}: {e}")
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(retry_delay)
-
-                if click_success:
-                    clicked_count += 1
-                    # Delay before next button (if there are more buttons)
-                    if clicked_count < len(matched_button_texts):
-                        await asyncio.sleep(1)
-                else:
-                    # This is not necessarily an error if another bot clicked first
-                    logger.debug(f"[DYNAMIC_CLICK] Could not click button '{button_text}' for rule {rule['id']}. It might have been clicked by another bot.")
-
-            if clicked_count > 0:
-                logger.info(f"[DYNAMIC_CLICK] Userbot {self.userbot_id} successfully clicked {clicked_count}/{len(set(matched_button_texts))} matched buttons for rule {rule['id']} in chat {event.chat_id}")
-
-                # Mark session as clicked
-                if session_id:
-                    await session_model.mark_clicked(session_id)
+        from app.userbot.auto_click_handler import handle_dynamic_click
+        return await handle_dynamic_click(self, event)
 
     async def _handle_dm_auto_reply(self, event):
         """Handle incoming DMs and auto-reply if we're expecting a DM from this bot."""
-        try:
-            # Only process if it's a DM (private chat)
-            if not event.is_private:
-                return
-
-            sender_id = event.sender_id
-            logger.info(f"[AUTO_REPLY] Processing DM from sender {sender_id} for userbot {self.userbot_id}")
-
-            # Look up active session for this DM
-            from app.models.auto_reply_session import AutoReplySessionModel
-            from app.models.dynamic_reply import DynamicReplyModel
-
-            session_model = AutoReplySessionModel(self.db)
-            reply_model = DynamicReplyModel(self.db)
-
-            session = await session_model.get_session_for_dm(self.userbot_id, sender_id)
-
-            if not session:
-                logger.debug(f"[AUTO_REPLY] No active session for DM from bot {sender_id} -> userbot {self.userbot_id}")
-                return
-
-            logger.info(f"[AUTO_REPLY] Found session {session['id']} for DM (state={session['state']}, rule={session['rule_id']})")
-
-            # Mark DM as received
-            await session_model.mark_dm_received(session['id'])
-
-            # Wait 5 seconds before replying (human-like behavior)
-            logger.info(f"[AUTO_REPLY] Waiting 5s before replying to session {session['id']}")
-            await asyncio.sleep(5)
-
-            # Get random reply message
-            reply_data = await reply_model.get_random_reply_for_rule(session['rule_id'])
-
-            if not reply_data:
-                logger.warning(f"[AUTO_REPLY] No replies configured for rule {session['rule_id']}")
-                await session_model.mark_failed(session['id'], "No reply messages configured")
-                return
-
-            # Replace {ticker} placeholder
-            ticker_value = session.get('ticker_value', '')
-            reply_text = reply_data['message_text'].replace('{ticker}', ticker_value)
-
-            # Send reply
-            await event.reply(reply_text)
-            logger.info(f"[AUTO_REPLY] Replied to bot {sender_id}: {reply_text[:50]}... (session={session['id']}, rule={session['rule_id']})")
-
-            # Mark session as replied
-            await session_model.mark_replied(session['id'])
-
-        except Exception as e:
-            logger.error(f"[AUTO_REPLY] Error handling DM auto-reply: {e}", exc_info=True)
+        from app.userbot.auto_click_handler import handle_dm_auto_reply
+        return await handle_dm_auto_reply(self, event)
 
     async def _get_cached_pnl_rules(self, group_id: int, seconds: int = 60) -> List[Dict[str, Any]]:
         """Get PNL forwarding rules for a group, with caching."""
-        cache_key = f"pnl_rules_{group_id}"
-        if self.is_fresh(cache_key, seconds=seconds):
-            return self.cache[cache_key]
-
-        rules = await self.pnl_model.get_enabled_rules_for_group(group_id)
-        self.cache[cache_key] = rules
-        self.cache_time[cache_key] = time.time()
-        return rules
+        from app.userbot.pnl_handler import get_cached_pnl_rules
+        return await get_cached_pnl_rules(self, group_id, seconds)
 
     async def _handle_pnl_command(self, event):
         """Handle /pnl commands in monitored source groups with comprehensive debugging."""
-        try:
-            logger.debug(f"[MessageHandler] PNL command received: chat_id={event.chat_id}, "
-                        f"sender_id={event.sender_id}, message_id={event.message.id}, "
-                        f"text='{event.message.text[:100]}'")
-            
-            group = await self.group_model.get_by_chat_id(event.chat_id)
-            if not group:
-                logger.debug(f"[MessageHandler] No group found for chat {event.chat_id}, ignoring /pnl command")
-                return
-
-            rules = await self._get_cached_pnl_rules(group['id'])
-            logger.debug(f"[MessageHandler] Found {len(rules)} enabled rules for chat {event.chat_id}")
-            
-            if not rules:
-                logger.debug(f"[MessageHandler] No rules found for chat {event.chat_id}, ignoring /pnl command")
-                return
-
-            for rule in rules:
-                logger.debug(f"[MessageHandler] Processing rule {rule['id']} for /pnl command")
-                allowed_users = rule.get('allowed_pnl_command_user_ids', [])
-                logger.debug(f"[MessageHandler] Rule {rule['id']} allowed users: {allowed_users}")
-                
-                if not allowed_users or event.sender_id in allowed_users:
-                    logger.info(f"[MessageHandler] User {event.sender_id} authorized for rule {rule['id']}, tracking /pnl command")
-                    
-                    try:
-                        # This command is from an authorized user, track it.
-                        await db.execute("""
-                            INSERT INTO pnl_tracked_messages (rule_id, original_message_id, chat_id, sender_id, status)
-                            VALUES ($1, $2, $3, $4, 'tracking')
-                            ON CONFLICT (original_message_id, chat_id, rule_id) DO NOTHING
-                        """, rule['id'], event.message.id, event.chat_id, event.sender_id)
-                        
-                        logger.info(f"[MessageHandler] Successfully tracking /pnl command: "
-                                   f"message_id={event.message.id}, rule_id={rule['id']}, "
-                                   f"chat_id={event.chat_id}, sender_id={event.sender_id}")
-                    except Exception as db_err:
-                        logger.error(f"[MessageHandler] Database error tracking /pnl command: {db_err}")
-                        logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
-                else:
-                    logger.debug(f"[MessageHandler] User {event.sender_id} not authorized for rule {rule['id']} "
-                               f"(allowed: {allowed_users})")
-
-        except Exception as e:
-            logger.error(f"[MessageHandler] Error handling /pnl command: {e}")
-            logger.error(f"[MessageHandler] Event details: chat_id={event.chat_id}, "
-                        f"sender_id={event.sender_id}, message_id={event.message.id}")
-            logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
+        from app.userbot.pnl_handler import handle_pnl_command
+        return await handle_pnl_command(self, event)
 
     async def _handle_potential_pnl_reply(self, event):
         """Handle potential replies to /pnl commands in real-time."""
-        try:
-            if not event.message.reply_to_msg_id:
-                return  # Not a reply
-            
-            logger.debug(f"[MessageHandler] Potential PNL reply: chat_id={event.chat_id}, "
-                        f"sender_id={event.sender_id}, reply_to={event.message.reply_to_msg_id}")
-            
-            # Check if this is a reply to a tracked /pnl message
-            tracked_messages = await db.fetch("""
-                SELECT * FROM pnl_tracked_messages 
-                WHERE original_message_id = $1 AND chat_id = $2 AND status = 'tracking'
-                AND created_at > NOW() - INTERVAL '3 minutes'
-            """, event.message.reply_to_msg_id, event.chat_id)
-            
-            if not tracked_messages:
-                return  # Not replying to a tracked /pnl message
-            
-            logger.debug(f"[MessageHandler] Found {len(tracked_messages)} tracked PNL messages for reply")
-            
-            for tracked in tracked_messages:
-                # Get the rule
-                rule = await self.pnl_model.get_by_id(tracked['rule_id'])
-                if not rule or not rule['enabled']:
-                    continue
-                
-                # Only designated userbot should attempt forwarding
-                if self.userbot_id != rule.get('forwarding_userbot_id'):
-                    logger.debug(f"[MessageHandler] Userbot {self.userbot_id} not designated for rule {rule['id']} (need {rule.get('forwarding_userbot_id')})")
-                    continue
-                
-                # Filter out flex generation messages
-                if "💪 Generating flex.." in event.message.text:
-                    logger.debug(f"[MessageHandler] Skipping flex generation message {event.message.id}")
-                    continue
-                
-                allowed_reply_users = rule.get('allowed_reply_user_ids', [])
-                
-                if not allowed_reply_users or event.sender_id in allowed_reply_users:
-                    logger.info(f"[MessageHandler] Valid PNL reply detected from user {event.sender_id}, forwarding immediately for rule {rule['id']}")
-                    
-                    # Forward the message using the designated forwarding userbot
-                    success = await self._forward_pnl_reply(rule, event.message, tracked['id'])
-                    if success:
-                        logger.info(f"[MessageHandler] Successfully forwarded PNL reply {event.message.id} for tracking {tracked['id']}")
-                    else:
-                        logger.error(f"[MessageHandler] Failed to forward PNL reply {event.message.id} for tracking {tracked['id']}")
-                    
-        except Exception as e:
-            logger.error(f"[MessageHandler] Error handling potential PNL reply: {e}")
-            logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
+        from app.userbot.pnl_handler import handle_potential_pnl_reply
+        return await handle_potential_pnl_reply(self, event)
 
     async def _forward_pnl_reply(self, rule: dict, message, tracked_id: int) -> bool:
         """Forward a PNL reply message to the destination channel."""
-        try:
-            # Check if this userbot is the designated forwarding userbot
-            if self.userbot_id != rule.get('forwarding_userbot_id'):
-                logger.debug(f"[MessageHandler] Userbot {self.userbot_id} not designated for forwarding (need {rule.get('forwarding_userbot_id')})")
-                return False
-            
-            client = self.session_manager.get_client()
-            if not client:
-                logger.error("[MessageHandler] No client available for PNL forwarding")
-                return False
-            
-            logger.debug(f"[MessageHandler] Forwarding PNL reply message {message.id} to channel {rule['destination_channel_id']}")
-            
-            # Resolve entity using same pattern as call_executor.py
-            entity = await self._resolve_entity_safely(client, rule['destination_channel_id'])
-            
-            await client.forward_messages(
-                entity=entity,
-                messages=message
-            )
-            
-            logger.info(f"[MessageHandler] Successfully forwarded PNL reply to channel {rule['destination_channel_id']}")
-            if tracked_id:
-                await db.execute(
-                    """
-                    UPDATE pnl_tracked_messages
-                    SET status = 'forwarded',
-                        reply_sender_id = $1,
-                        last_reply_message_id = $2,
-                        updated_at = NOW()
-                    WHERE id = $3
-                    """,
-                    message.sender_id,
-                    message.id,
-                    tracked_id
-                )
-            return True
-            
-        except Exception as e:
-            logger.error(f"[MessageHandler] Error forwarding PNL reply: {e}")
-            logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
-            return False
+        from app.userbot.pnl_handler import forward_pnl_reply
+        return await forward_pnl_reply(self, rule, message, tracked_id)
 
     # ===== COMMAND FORWARDING METHODS =====
 
     async def _get_cached_command_rules(self, group_id: int, seconds: int = 60) -> List[Dict[str, Any]]:
         """Get command forwarding rules for a group, with caching."""
-        cache_key = f"cmd_fwd_rules_{group_id}"
-        if self.is_fresh(cache_key, seconds=seconds):
-            return self.cache[cache_key]
-
-        rules = await self.cmd_fwd_model.get_enabled_rules_for_group(group_id)
-        self.cache[cache_key] = rules
-        self.cache_time[cache_key] = time.time()
-        return rules
+        from app.userbot.command_handler import get_cached_command_rules
+        return await get_cached_command_rules(self, group_id, seconds)
 
     async def _handle_custom_command(self, event):
         """Handle custom commands in monitored source groups with comprehensive debugging."""
+        from app.userbot.command_handler import handle_custom_command
+        return await handle_custom_command(self, event)
+
+    async def _handle_monitored_gain_alert(self, event) -> None:
+        """Handle gain alert monitoring for configured chats/people."""
+        chat_id = event.chat_id
+        sender_id = event.sender_id if hasattr(event, "sender_id") else None
+
         try:
-            logger.debug(f"[MessageHandler] Custom command check: chat_id={event.chat_id}, "
-                        f"sender_id={event.sender_id}, message_id={event.message.id}, "
-                        f"text='{event.message.text[:100]}'")
+            monitored = None
 
-            group = await self.group_model.get_by_chat_id(event.chat_id)
-            if not group:
-                logger.debug(f"[MessageHandler] No group found for chat {event.chat_id}, ignoring custom command")
+            if sender_id is not None:
+                monitored = await self.monitored_source_model.is_monitored(chat_id, sender_id)
+
+            if not monitored:
+                monitored = await self.monitored_source_model.is_monitored(chat_id, None)
+
+            if not monitored:
                 return
 
-            rules = await self._get_cached_command_rules(group['id'])
-            logger.debug(f"[MessageHandler] Found {len(rules)} enabled command rules for chat {event.chat_id}")
-
-            if not rules:
-                logger.debug(f"[MessageHandler] No command rules found for chat {event.chat_id}, ignoring command")
+            if monitored["chat_type"] == "group" and monitored["user_id"] != sender_id:
+                logger.debug(
+                    f"[MONITOR_DETECT] Skipping chat {chat_id} user {sender_id} – monitored entry expects {monitored['user_id']}"
+                )
                 return
 
-            for rule in rules:
-                logger.debug(f"[MessageHandler] Processing rule {rule['id']} for command '{rule['command_text']}'")
+            message = event.message
+            text = self.utils.get_message_text(message)
 
-                # Check if message matches this rule's command exactly
-                if event.message.text.strip() == rule['command_text']:
-                    logger.debug(f"[MessageHandler] Message matches command '{rule['command_text']}' for rule {rule['id']}")
+            if not text:
+                logger.debug(f"[MONITOR_DETECT] Chat {chat_id} message has no text/content, skipping")
+                return
 
-                    allowed_users = rule.get('allowed_command_user_ids', [])
-                    logger.debug(f"[MessageHandler] Rule {rule['id']} allowed users: {allowed_users}")
+            addresses = self.utils.extract_token_addresses(text)
+            if not addresses:
+                logger.debug(f"[MONITOR_DETECT] Chat {chat_id} message from {sender_id} has no contract addresses")
+                return
 
-                    if not allowed_users or event.sender_id in allowed_users:
-                        logger.info(f"[MessageHandler] User {event.sender_id} authorized for rule {rule['id']}, tracking command '{rule['command_text']}'")
+            logger.info(
+                "[MONITOR_DETECT] Chat %s matched monitored %s entry %s; found %d address(es)",
+                chat_id,
+                monitored["chat_type"],
+                monitored["id"],
+                len(addresses),
+            )
 
-                        try:
-                            # Track this command
-                            tracked = await self.cmd_tracked_model.track_command(
-                                rule['id'], event.message.id, event.chat_id,
-                                event.sender_id, rule['command_text']
-                            )
+            # Persist the user ID exactly as configured on the monitored source so
+            # channel/DM entries that track whole chats continue to store NULL and
+            # keep downstream joins (e.g. dispatch routing) aligned with that schema.
+            tracked_user_id = monitored.get("user_id")
 
-                            if tracked:
-                                logger.info(f"[MessageHandler] Successfully tracking command: "
-                                           f"message_id={event.message.id}, rule_id={rule['id']}, "
-                                           f"chat_id={event.chat_id}, sender_id={event.sender_id}, "
-                                           f"command='{rule['command_text']}'")
-                        except Exception as db_err:
-                            logger.error(f"[MessageHandler] Database error tracking command: {db_err}")
-                            logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
-                    else:
-                        logger.debug(f"[MessageHandler] User {event.sender_id} not authorized for rule {rule['id']} "
-                                   f"(allowed: {allowed_users})")
+            for address, blockchain in addresses:
+                await self.token_monitor.process_monitored_token(
+                    address=address,
+                    blockchain=blockchain,
+                    chat_id=chat_id,
+                    message_id=message.id if message else None,
+                    user_id=tracked_user_id,
+                    chat_type=monitored["chat_type"],
+                )
 
-        except Exception as e:
-            logger.error(f"[MessageHandler] Error handling custom command: {e}")
-            logger.error(f"[MessageHandler] Event details: chat_id={event.chat_id}, "
-                        f"sender_id={event.sender_id}, message_id={event.message.id}")
-            logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
+        except Exception as exc:
+            logger.error(
+                f"[MONITOR_DETECT] Error handling monitored source message in chat {chat_id}: {exc}",
+                exc_info=True,
+            )
 
     async def _handle_potential_custom_reply(self, event):
         """Handle potential replies to custom commands in real-time."""
-        try:
-            if not event.message.reply_to_msg_id:
-                return  # Not a reply
-
-            logger.debug(f"[MessageHandler] Potential custom command reply: chat_id={event.chat_id}, "
-                        f"sender_id={event.sender_id}, reply_to={event.message.reply_to_msg_id}")
-
-            # Check if this is a reply to a tracked custom command
-            tracked_messages = await self.cmd_tracked_model.get_tracked_messages_for_reply(
-                event.message.reply_to_msg_id, event.chat_id
-            )
-
-            if not tracked_messages:
-                return  # Not replying to a tracked custom command
-
-            logger.debug(f"[MessageHandler] Found {len(tracked_messages)} tracked custom messages for reply")
-
-            for tracked in tracked_messages:
-                # Get the rule
-                rule = await self.cmd_fwd_model.get_by_id(tracked['rule_id'])
-                if not rule or not rule['enabled']:
-                    continue
-
-                # Only designated userbot should attempt forwarding
-                if self.userbot_id != rule.get('forwarding_userbot_id'):
-                    logger.debug(f"[MessageHandler] Userbot {self.userbot_id} not designated for rule {rule['id']} (need {rule.get('forwarding_userbot_id')})")
-                    continue
-
-                # Filter out automated messages
-                if "🔎Fetching leader board..." in event.message.text:
-                    logger.debug(f"[MessageHandler] Skipping fetching leader board message {event.message.id}")
-                    continue
-
-                allowed_reply_users = rule.get('allowed_reply_user_ids', [])
-
-                if not allowed_reply_users or event.sender_id in allowed_reply_users:
-                    logger.info(f"[MessageHandler] Valid custom command reply detected from user {event.sender_id}, forwarding immediately for rule {rule['id']}")
-
-                    # Forward the message using the designated forwarding userbot
-                    success = await self._forward_custom_reply(rule, event.message, tracked['id'])
-                    if success:
-                        logger.info(f"[MessageHandler] Successfully forwarded custom command reply {event.message.id} for tracking {tracked['id']}")
-                    else:
-                        logger.error(f"[MessageHandler] Failed to forward custom command reply {event.message.id} for tracking {tracked['id']}")
-
-        except Exception as e:
-            logger.error(f"[MessageHandler] Error handling potential custom reply: {e}")
-            logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
+        from app.userbot.command_handler import handle_potential_custom_reply
+        return await handle_potential_custom_reply(self, event)
 
     async def _forward_custom_reply(self, rule: dict, message, tracked_id: int) -> bool:
         """Forward a custom command reply message to the destination channel."""
-        try:
-            # Check if this userbot is the designated forwarding userbot
-            if self.userbot_id != rule.get('forwarding_userbot_id'):
-                logger.debug(f"[MessageHandler] Userbot {self.userbot_id} not designated for forwarding (need {rule.get('forwarding_userbot_id')})")
-                return False
-
-            client = self.session_manager.get_client()
-            if not client:
-                logger.error("[MessageHandler] No client available for custom command forwarding")
-                return False
-
-            logger.debug(f"[MessageHandler] Forwarding custom command reply message {message.id} to channel {rule['destination_channel_id']}")
-
-            # Check if message text is excluded (blacklisted)
-            excluded_texts = rule.get('excluded_message_texts', []) or []
-            if message.text and excluded_texts and message.text in excluded_texts:
-                logger.debug(f"[CMD_FWD] Message excluded by blacklist for rule {rule['id']}: \"{message.text[:50]}\"")
-                return False
-
-            # Resolve entity using same pattern as call_executor.py
-            entity = await self._resolve_entity_safely(client, rule['destination_channel_id'])
-
-            try:
-                await client.forward_messages(
-                    entity=entity,
-                    messages=message
-                )
-            except MessageIdInvalidError:
-                logger.warning(f"[MessageHandler] Could not forward message {message.id}: message ID is invalid or message was deleted.")
-                return False
-
-            logger.info(f"[MessageHandler] Successfully forwarded custom command reply to channel {rule['destination_channel_id']}")
-
-            # Post timestamp if enabled
-            if rule.get('post_timestamp', False):
-                timezone = rule.get('timestamp_timezone', 'IST')
-                await self._post_forward_timestamp(client, entity, rule['destination_channel_id'], timezone)
-
-            # Don't mark as forwarded - keep tracking status for multiple replies
-            return True
-
-        except Exception as e:
-            logger.error(f"[MessageHandler] Error forwarding custom command reply: {e}")
-            logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
-            return False
+        from app.userbot.command_handler import forward_custom_reply
+        return await forward_custom_reply(self, rule, message, tracked_id)
 
     async def _post_forward_timestamp(self, client, entity, destination_channel_id: int, timezone_name: str):
         """Post timestamp after forwarding a message in specified timezone."""
-        try:
-            from datetime import datetime, timezone, timedelta
-
-            # Timezone offsets mapping
-            timezone_offsets = {
-                'IST': timedelta(hours=5, minutes=30),
-                'UTC': timedelta(hours=0),
-                'GMT': timedelta(hours=0),
-                'EST': timedelta(hours=-5),
-                'PST': timedelta(hours=-8),
-                'CST': timedelta(hours=-6),
-                'JST': timedelta(hours=9),
-                'AEST': timedelta(hours=10),
-                'CET': timedelta(hours=1)
-            }
-
-            offset = timezone_offsets.get(timezone_name, timedelta(hours=5, minutes=30))  # Default to IST
-            tz = timezone(offset)
-            local_time = datetime.now(tz)
-
-            timestamp_text = f"⏰ Forwarded at: {local_time.strftime('%d/%m/%Y %H:%M:%S')} {timezone_name}"
-
-            await client.send_message(
-                entity=entity,
-                message=timestamp_text
-            )
-
-            logger.info(f"[MessageHandler] Posted {timezone_name} timestamp to channel {destination_channel_id}")
-
-        except Exception as e:
-            logger.error(f"[MessageHandler] Error posting timestamp: {e}")
-            logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
+        from app.userbot.entity_utils import post_forward_timestamp
+        return await post_forward_timestamp(self, client, entity, destination_channel_id, timezone_name)
 
     async def track_outgoing_command(self, chat_id: int, message_id: int, command_text: str):
         """Track an outgoing command sent by the scheduler."""
-        try:
-            logger.info(f"[MessageHandler] Tracking outgoing command '{command_text}' in chat {chat_id}")
-            group = await self.group_model.get_by_chat_id(chat_id)
-            if not group:
-                logger.warning(f"[MessageHandler] No group found for chat {chat_id}, cannot track outgoing command")
-                return
-
-            rules = await self._get_cached_command_rules(group['id'])
-            if not rules:
-                logger.warning(f"[MessageHandler] No command rules found for chat {chat_id}, cannot track outgoing command")
-                return
-
-            for rule in rules:
-                if rule['command_text'] == command_text:
-                    me = await self.session_manager.get_me()
-                    if me:
-                        await self.cmd_tracked_model.track_command(
-                            rule['id'], message_id, chat_id,
-                            me.id, command_text
-                        )
-                        logger.info(f"[MessageHandler] Successfully tracked outgoing command '{command_text}' in chat {chat_id}")
-                    else:
-                        logger.error("[MessageHandler] Could not get userbot's own user ID, cannot track outgoing command")
-                    break
-        except Exception as e:
-            logger.error(f"[MessageHandler] Error tracking outgoing command: {e}")
-            logger.error(f"[MessageHandler] Full traceback: {traceback.format_exc()}")
+        from app.userbot.command_handler import track_outgoing_command
+        return await track_outgoing_command(self, chat_id, message_id, command_text)
     async def _resolve_entity_safely(self, client, target_chat_id: int):
         """Safely resolve entity with fallback strategies"""
-        try:
-            # First try: Direct entity resolution
-            entity = await client.get_entity(target_chat_id)
-            return entity
-        except Exception as resolve_error:
-            # Log as debug since this isn't a real error if sending still works
-            logger.debug(f"Entity resolution failed for {target_chat_id}: {resolve_error}")
-            
-            # Fallback: Construct peer directly based on chat ID pattern
-            try:
-                if target_chat_id < 0:
-                    # Supergroup/channel (starts with -100)
-                    if str(target_chat_id).startswith('-100'):
-                        channel_id = abs(target_chat_id) - 1000000000000
-                        return PeerChannel(channel_id)
-                    # Regular group (negative but not starting with -100)
-                    else:
-                        chat_id = abs(target_chat_id)
-                        return PeerChat(chat_id)
-                else:
-                    # User
-                    return PeerUser(target_chat_id)
-            except Exception as peer_error:
-                logger.debug(f"Peer construction failed for {target_chat_id}: {peer_error}")
-                # Return original ID as final fallback
-                return target_chat_id
+        from app.userbot.entity_utils import resolve_entity_safely
+        return await resolve_entity_safely(self, client, target_chat_id)
     
     async def _track_outgoing_message(self, event):
         """Track outgoing messages for reply detection"""
@@ -1214,7 +321,7 @@ class MessageHandler:
             return await self.call_executor.send_call_message(
                 target_chat_id=target_chat_id,
                 token_address=token_address,
-                source_info=source_info
+                message=token_address,
             )
         except Exception as e:
             logger.error(f"Error sending manual call: {e}")
@@ -1245,7 +352,7 @@ class MessageHandler:
                     result = await self.call_executor.send_call_message(
                         target_chat_id=call['dest_chat_id'],
                         token_address=call['address'],
-                        source_info="Scheduled call"
+                        message=call['address'],
                     )
                     
                     if result['success']:
@@ -1339,215 +446,6 @@ class MessageHandler:
         Args:
             tagged_addresses: List of (address, blockchain) tuples
         """
-        try:
-            logger.debug(f"[CuratedAlpha] Processing event for source chat ID: {source_chat_id}")
-            # Find all enabled rules that require this source chat
-            rules = await self.curated_alpha_rule_model.db.fetch("""
-                SELECT * FROM curated_alpha_rules
-                WHERE $1 = ANY(required_source_chat_ids) AND enabled = true
-            """, source_chat_id)
+        from app.userbot.curated_alpha_handler import handle_curated_alpha
 
-            if not rules:
-                logger.debug(f"[CuratedAlpha] No active rules found for source_chat_id: {source_chat_id}")
-                return # No rules care about this source
-
-            logger.debug(f"[CuratedAlpha] Source {source_chat_id} is part of {len(rules)} rule(s).")
-
-            source_record = await self.source_model.get_source_by_chat_id(source_chat_id)
-            source_type_value = source_record.get('source_type') if source_record and source_record.get('source_type') else (
-                'dm' if event.is_private else 'channel' if event.is_channel else 'group'
-            )
-            current_source_name = self.utils.get_chat_title(getattr(event, 'chat', None))
-
-            for address, blockchain in tagged_addresses:
-                for rule in rules:
-                    # Check blockchain filter
-                    allowed_chains = rule.get('allowed_chains', ['SOL'])
-                    if blockchain not in allowed_chains:
-                        logger.debug(f"[CuratedAlpha] Rule {rule['id']} allows {allowed_chains}, token is {blockchain} - SKIPPED")
-                        continue
-                    rule_id = rule['id']
-                    logger.debug(f"[CuratedAlpha] Checking token {address[:8]} against rule {rule_id} ('{rule['name']}')")
-                    logger.debug(f"[CuratedAlpha] Rule requirements: Mentions={rule.get('required_mentions', 'All')}, Sources={rule['required_source_chat_ids']}")
-                    
-                    # Check if this token has already been triggered for this rule
-                    existing_state = await self.curated_alpha_token_state_model.db.fetchrow("""
-                        SELECT * FROM curated_alpha_token_state
-                        WHERE rule_id = $1 AND token_address = $2
-                    """, rule_id, address)
-
-                    if existing_state and existing_state['status'] in ('triggered', 'expired'):
-                        logger.debug(f"[CuratedAlpha] Found existing state for token: {dict(existing_state)}")
-                        logger.debug(f"[CuratedAlpha] Token {address[:8]} already '{existing_state['status']}' for rule {rule_id}. Skipping.")
-                        continue
-
-                    if existing_state:
-                        logger.debug(f"[CuratedAlpha] Found existing 'tracking' state for token {address[:8]} in rule {rule_id}.")
-                        # It's being tracked, let's update it
-                        if source_chat_id in existing_state['seen_in_source_chat_ids']:
-                            logger.debug(f"[CuratedAlpha] Token {address[:8]} already seen in this source for rule {rule_id}. Skipping.")
-                            continue
-
-                        # Check if time window has expired
-                        from datetime import datetime, timezone
-                        time_since_first_seen = (datetime.now(timezone.utc) - existing_state['first_seen_at']).total_seconds()
-                        if time_since_first_seen > rule['time_window_seconds']:
-                            await self.curated_alpha_token_state_model.update(existing_state['id'], {'status': 'expired'})
-                            logger.info(f"[CuratedAlpha] Token {address[:8]}... expired for rule {rule_id}.")
-                            continue
-
-                        # Add the new source and get the updated list
-                        updated_seen_sources = existing_state['seen_in_source_chat_ids'] + [source_chat_id]
-                        await self.curated_alpha_token_state_model.update(existing_state['id'], {
-                            'seen_in_source_chat_ids': updated_seen_sources
-                        })
-                        logger.debug(f"[CuratedAlpha] Updated token {address[:8]} state for rule {rule_id}. Seen in: {updated_seen_sources}")
-                        
-                        seen_sources_set = set(updated_seen_sources)
-                        required_sources_set = set(rule['required_source_chat_ids'])
-
-                    else:
-                        # First time seeing this token for this rule
-                        logger.debug(f"[CuratedAlpha] Creating new tracking state for token {address[:8]} in rule {rule_id}.")
-                        try:
-                            await self.curated_alpha_token_state_model.create({
-                                'rule_id': rule_id,
-                                'token_address': address,
-                                'seen_in_source_chat_ids': [source_chat_id]
-                            })
-                            seen_sources_set = {source_chat_id}
-                            required_sources_set = set(rule['required_source_chat_ids'])
-                        except asyncpg.UniqueViolationError:
-                            # Race condition - another message already created this. Refetch and update.
-                            logger.debug(f"[CuratedAlpha] Race condition detected, refetching state for token {address[:8]} in rule {rule_id}")
-                            existing_state = await self.db.fetchrow("""
-                                SELECT * FROM curated_alpha_token_state
-                                WHERE rule_id = $1 AND token_address = $2
-                            """, rule_id, address)
-
-                            if existing_state and existing_state['status'] == 'tracking':
-                                if source_chat_id not in existing_state['seen_in_source_chat_ids']:
-                                    updated_seen_sources = existing_state['seen_in_source_chat_ids'] + [source_chat_id]
-                                    await self.curated_alpha_token_state_model.update(existing_state['id'], {
-                                        'seen_in_source_chat_ids': updated_seen_sources
-                                    })
-                                    logger.debug(f"[CuratedAlpha] Updated token {address[:8]} after race condition. Seen in: {updated_seen_sources}")
-                                    seen_sources_set = set(updated_seen_sources)
-                                else:
-                                    seen_sources_set = set(existing_state['seen_in_source_chat_ids'])
-                            else:
-                                # State exists but not tracking anymore, skip
-                                logger.debug(f"[CuratedAlpha] Token {address[:8]} state exists but status is {existing_state['status'] if existing_state else 'unknown'}. Skipping.")
-                                continue
-                            required_sources_set = set(rule['required_source_chat_ids'])
-
-                    # Check if the condition is now met
-                    required_sources_set = set(rule['required_source_chat_ids'])
-                    seen_in_rule_sources = seen_sources_set.intersection(required_sources_set)
-                    
-                    required_mentions = rule.get('required_mentions')
-                    # Default to all if not set, 0, or invalid
-                    if not required_mentions or required_mentions <= 0:
-                        required_mentions = len(required_sources_set)
-
-                    logger.debug(f"[CuratedAlpha] Rule {rule_id} check: Seen {len(seen_in_rule_sources)}/{required_mentions} required sources.")
-
-                    if len(seen_in_rule_sources) >= required_mentions:
-                        logger.info(f"[CuratedAlpha] ✅ Condition MET for token {address[:8]}... on rule {rule_id}!")
-                        
-                        # Mark as triggered to prevent re-processing
-                        state_id_to_update = existing_state['id'] if existing_state else \
-                            (await self.curated_alpha_token_state_model.db.fetchrow(
-                                "SELECT id FROM curated_alpha_token_state WHERE rule_id = $1 AND token_address = $2",
-                                rule_id, address))['id']
-                        await self.curated_alpha_token_state_model.update(state_id_to_update, {'status': 'triggered'})
-
-                        source_info = f"Curated Alpha: Rule '{rule.get('name', rule_id)}'"
-
-                        # Gather friendly names for all contributing sources
-                        seen_source_details = [
-                            {
-                                'chat_id': source_chat_id,
-                                'name': current_source_name,
-                                'source_type': source_type_value,
-                                'caller_name': self.utils.get_user_name(event.sender),
-                                'caller_user_id': event.sender_id,
-                            }
-                        ]
-                        try:
-                            ordered_seen_sources = sorted(seen_in_rule_sources)
-                        except TypeError:
-                            ordered_seen_sources = list(seen_in_rule_sources)
-
-                        for seen_chat_id in ordered_seen_sources:
-                            try:
-                                seen_chat_id_int = int(seen_chat_id)
-                            except (TypeError, ValueError):
-                                seen_chat_id_int = seen_chat_id
-
-                            if seen_chat_id_int == source_chat_id:
-                                continue
-
-                            seen_source_record = await self.source_model.get_source_by_chat_id(seen_chat_id_int)
-                            if seen_source_record:
-                                display_name = (
-                                    seen_source_record.get('display_name')
-                                    or seen_source_record.get('name')
-                                    or seen_source_record.get('title')
-                                )
-                                seen_source_type = seen_source_record.get('source_type')
-                            else:
-                                display_name = f"Chat {seen_chat_id_int}"
-                                seen_source_type = 'group'
-
-                            seen_source_details.append(
-                                {
-                                    'chat_id': seen_chat_id_int,
-                                    'name': display_name,
-                                    'source_type': seen_source_type,
-                                }
-                            )
-
-                        # Look up target group ID for template support
-                        target_group_id = None
-                        try:
-                            group_record = await self.db.fetchrow(
-                                "SELECT id FROM groups WHERE tg_chat_id = $1",
-                                rule['destination_chat_id']
-                            )
-                            if group_record:
-                                target_group_id = group_record['id']
-                        except Exception as group_lookup_error:
-                            logger.debug(f"Could not find group for destination chat {rule['destination_chat_id']}: {group_lookup_error}")
-
-                        # Get source object to pass its details
-                        additional_info_dict = {
-                            "message_text": self.utils.get_message_text(event.message) if hasattr(event, 'message') else "",
-                            "target_group_id_fallback": target_group_id,
-                            "caller_name": self.utils.get_user_name(event.sender),
-                            "source_name": current_source_name,
-                            "source_type": source_type_value,
-                            "source_chat_id": source_chat_id,
-                            "seen_sources": seen_source_details,
-                            "caller_user_id": event.sender_id,
-                        }
-                        additional_info = json.dumps(additional_info_dict)
-
-                        await self.call_queue_model.add_job(
-                            curated_alpha_rule_id=rule_id,
-                            token_address=address,
-                            blockchain=blockchain,
-                            source_message_id=event.id,
-                            source_chat_id=source_chat_id,
-                            source_user_id=event.sender_id,
-                            target_group_id=target_group_id,
-                            target_chat_id=rule['destination_chat_id'],
-                            forwarding_userbot_id=rule['forwarding_userbot_id'],
-                            source_info=json.dumps(source_info),
-                            additional_info=additional_info,
-                            priority=10 # Higher priority for curated calls
-                        )
-                        logger.info(f"[CuratedAlpha] Queued call for {address[:8]}... ({blockchain}) to {rule['destination_chat_id']}")
-
-        except Exception as e:
-            logger.error(f"Error in _handle_curated_alpha: {e}", exc_info=True)
+        return await handle_curated_alpha(self, tagged_addresses, source_chat_id, event)

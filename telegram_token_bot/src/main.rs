@@ -9,6 +9,7 @@ use tracing::info;
 mod api;
 mod bot;
 mod http_server;
+mod social;
 mod types;
 
 #[tokio::main]

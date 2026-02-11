@@ -1,0 +1,124 @@
+    async def show_source_details(self, query: types.CallbackQuery, source_id: int):
+        """Show detailed source information and routing management"""
+        try:
+            # Get source details with bot information
+            source = await self.db.fetchrow("""
+                SELECT sc.*,
+                       mb.session_name as monitoring_bot_name,
+                       fb.session_name as forwarding_bot_name
+                FROM source_chats sc
+                LEFT JOIN bots mb ON mb.id = sc.default_monitoring_userbot_id
+                LEFT JOIN bots fb ON fb.id = sc.default_forwarding_userbot_id
+                WHERE sc.id = $1
+            """, source_id)
+            if not source:
+                await query.answer("❌ Source not found")
+                return
+
+            # Get routing rules
+            routes = await self.source_model.get_routing_rules(source_id)
+            
+            type_emojis = {'channel': '📢', 'group': '👥', 'dm': '💬'}
+            status = "✅" if source['enabled'] else "❌"
+            type_emoji = type_emojis.get(source['source_type'], '📡')
+            name = source.get('display_name') or source['name'] or source['title'] or f"ID: {source['source_chat_id']}"
+            
+            text = f"<b>⚙️ {type_emoji} Source Details</b>\n\n"
+            text += f"<b>Name:</b> {name}\n"
+            text += f"<b>Chat/User ID:</b> <code>{source['source_chat_id']}</code>\n"
+            text += f"<b>Type:</b> {source['source_type'].title()}\n"
+            text += f"<b>Status:</b> {status}\n\n"
+
+            # Show source-level bot assignments
+            monitor_bot = source.get('monitoring_bot_name') or 'None'
+            forward_bot = source.get('forwarding_bot_name') or 'None'
+            text += f"<b>🤖 Source-Level Bots:</b>\n"
+            text += f"   Monitor: <code>{monitor_bot}</code>\n"
+            text += f"   Forward: <code>{forward_bot}</code>\n\n"
+            
+            if routes:
+                text += f"<b>🔄 Routing Rules ({len(routes)}):</b>\n"
+                for route in routes:
+                    route_status = "✅" if route['enabled'] else "❌"
+                    group_name = route['group_title'] or f"Chat {route['tg_chat_id']}"
+
+                    # Format blockchain filter
+                    allowed_chains = route.get('allowed_chains', ['SOL'])
+                    chain_emojis = self.keyboards.format_blockchain_emojis(allowed_chains)
+
+                    text += f"{route_status} → <b>{group_name}</b>\n"
+                    text += f"     {chain_emojis}\n"
+
+                    # Add userbot assignments if present
+                    userbot_info = []
+                    if route['monitoring_userbot_name']:
+                        userbot_info.append(f"👁️ {route['monitoring_userbot_name']}")
+                    if route['forwarding_userbot_name']:
+                        userbot_info.append(f"📤 {route['forwarding_userbot_name']}")
+
+                    if userbot_info:
+                        text += f"     {' | '.join(userbot_info)}\n"
+                    else:
+                        text += f"     🤖 Auto-assigned\n"
+            else:
+                text += "📭 <b>No routing rules configured</b>\n"
+                text += "Add routes to forward tokens to target groups."
+            
+            # Build keyboard
+            keyboard_rows = [
+                [
+                    InlineKeyboardButton(text="✏️ Set Name", callback_data=f"sources:set_name:{source_id}"),
+                    InlineKeyboardButton(
+                        text="🔴 Disable" if source['enabled'] else "🟢 Enable",
+                        callback_data=f"sources:toggle:{source_id}"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(text="🤖 Set Monitor Bot", callback_data=f"sources:set_monitor:{source_id}"),
+                    InlineKeyboardButton(text="📤 Set Forward Bot", callback_data=f"sources:set_forward:{source_id}")
+                ],
+                [
+                    InlineKeyboardButton(text="❌ Clear Bots", callback_data=f"sources:clear_bots:{source_id}"),
+                    InlineKeyboardButton(
+                        text="➕ Add Route",
+                        callback_data=f"sources:add_route:{source_id}"
+                    )
+                ]
+            ]
+            
+            if source['source_type'] == 'group':
+                keyboard_rows.append([
+                    InlineKeyboardButton(text="👥 Manage Users", callback_data=f"sources:users:{source_id}")
+                ])
+            
+            # Add edit/remove route buttons for existing routes
+            for route in routes:
+                group_name = (route['group_title'] or f"Chat {route['tg_chat_id']}")[:20]
+                keyboard_rows.append([
+                    InlineKeyboardButton(
+                        text=f"🤖 Bots → {group_name}",
+                        callback_data=f"sources:create_route:{source_id}:{route['target_group_id']}"
+                    ),
+                    InlineKeyboardButton(
+                        text=f"⛓️ Chains",
+                        callback_data=f"routing:edit_chains:{route['id']}"
+                    ),
+                    InlineKeyboardButton(
+                        text="🗑️",
+                        callback_data=f"sources:remove_route:{source_id}:{route['target_group_id']}"
+                    )
+                ])
+            
+            keyboard_rows.extend([
+                [InlineKeyboardButton(text="🗑️ Delete Source", callback_data=f"sources:delete:{source_id}")],
+                [InlineKeyboardButton(text="🔙 Back", callback_data="sources:manage_global")],
+                [InlineKeyboardButton(text="🏠 Main Menu", callback_data="menu:main")]]
+            )
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error showing source details: {e}")
+            await query.answer("❌ Error loading source details")
+    

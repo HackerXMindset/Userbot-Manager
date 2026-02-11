@@ -4,7 +4,6 @@ from .base import BaseModel
 from .bot import BotModel
 from .group import GroupModel, ScheduleModel
 from .target import TargetModel
-from .target_alert_state import TargetAlertStateModel
 from .token import TokenModel
 from .event import EventModel
 from .pnl_forwarding import PnlForwardingRuleModel
@@ -21,7 +20,6 @@ __all__ = [
     "GroupModel",
     "ScheduleModel",
     "TargetModel",
-    "TargetAlertStateModel",
     "TokenModel",
     "EventModel",
     "PnlForwardingRuleModel",

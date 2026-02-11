@@ -54,16 +54,24 @@ class SourceChatModel(BaseModel):
         """
         return await self.db.fetchrow(query, source_chat_id, source_type, name, title)
     
-    async def add_routing_rule(self, source_id: int, target_group_id: int,
-                              monitoring_userbot_id: int = None, forwarding_userbot_id: int = None,
-                              allowed_chains: List[str] = None) -> asyncpg.Record:
-        """Add a routing rule from source to target group with userbot assignments and blockchain filter"""
+    async def add_routing_rule(
+        self,
+        source_id: int,
+        target_group_id: int,
+        monitoring_userbot_id: int = None,
+        forwarding_userbot_id: int = None,
+        allowed_chains: List[str] = None,
+        forwarding_mode: str = "tokens",
+        keyword_filters: List[str] = None,
+        forward_summary: bool = False,
+        forward_media: bool = True,
+        forward_rewrite_rules: Optional[List[Dict[str, str]]] = None,
+    ) -> asyncpg.Record:
+        """Add a routing rule from source to target group with userbot assignments, blockchain filter, and forwarding mode."""
         if allowed_chains is None:
             allowed_chains = ["SOL", "BNB"]  # Default to both chains for new rules
 
-        # Validate blockchain identifiers
         VALID_CHAINS = {"SOL", "BNB"}
-
         if not allowed_chains:
             raise ValueError("At least one blockchain must be selected")
 
@@ -71,17 +79,53 @@ class SourceChatModel(BaseModel):
         if invalid_chains:
             raise ValueError(f"Invalid blockchain identifiers: {invalid_chains}. Valid options: {VALID_CHAINS}")
 
+        VALID_FORWARDING_MODES = {"tokens", "keywords", "everything"}
+        forwarding_mode = (forwarding_mode or "tokens").lower()
+        if forwarding_mode not in VALID_FORWARDING_MODES:
+            raise ValueError(f"Invalid forwarding mode '{forwarding_mode}'. Valid options: {VALID_FORWARDING_MODES}")
+
+        normalized_keywords = self._normalize_keywords(keyword_filters or [])
+        normalized_rewrites = self._normalize_rewrite_rules(forward_rewrite_rules or [])
+
         query = """
-            INSERT INTO routing_rules (source_chat_id, target_group_id, monitoring_userbot_id, forwarding_userbot_id, allowed_chains)
-            VALUES ($1, $2, $3, $4, $5::jsonb)
+            INSERT INTO routing_rules (
+                source_chat_id,
+                target_group_id,
+                monitoring_userbot_id,
+                forwarding_userbot_id,
+                allowed_chains,
+                forwarding_mode,
+                keyword_filters,
+                forward_summary,
+                forward_media,
+                forward_rewrite_rules
+            )
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, $8, $9, $10::jsonb)
             ON CONFLICT (source_chat_id, target_group_id) DO UPDATE SET
                 enabled = true,
-                monitoring_userbot_id = $3,
-                forwarding_userbot_id = $4,
-                allowed_chains = $5::jsonb
+                monitoring_userbot_id = EXCLUDED.monitoring_userbot_id,
+                forwarding_userbot_id = EXCLUDED.forwarding_userbot_id,
+                allowed_chains = EXCLUDED.allowed_chains,
+                forwarding_mode = EXCLUDED.forwarding_mode,
+                keyword_filters = EXCLUDED.keyword_filters,
+                forward_summary = EXCLUDED.forward_summary,
+                forward_media = EXCLUDED.forward_media,
+                forward_rewrite_rules = EXCLUDED.forward_rewrite_rules
             RETURNING *
         """
-        return await self.db.fetchrow(query, source_id, target_group_id, monitoring_userbot_id, forwarding_userbot_id, json.dumps(allowed_chains))
+        return await self.db.fetchrow(
+            query,
+            source_id,
+            target_group_id,
+            monitoring_userbot_id,
+            forwarding_userbot_id,
+            json.dumps(allowed_chains),
+            forwarding_mode,
+            json.dumps(normalized_keywords),
+            forward_summary,
+            forward_media,
+            json.dumps(normalized_rewrites),
+        )
     
     async def get_routing_rules(self, source_id: int) -> List[asyncpg.Record]:
         """Get all routing rules for a source with userbot assignments"""
@@ -89,8 +133,8 @@ class SourceChatModel(BaseModel):
             SELECT rr.*,
                    COALESCE(g.display_name, g.title) as group_title,
                    g.tg_chat_id,
-                   mb.session_name as monitoring_userbot_name,
-                   fb.session_name as forwarding_userbot_name
+                   COALESCE(mb.display_name, mb.session_name) as monitoring_userbot_name,
+                   COALESCE(fb.display_name, fb.session_name) as forwarding_userbot_name
             FROM routing_rules rr
             JOIN groups g ON g.id = rr.target_group_id
             LEFT JOIN bots mb ON mb.id = rr.monitoring_userbot_id
@@ -125,7 +169,151 @@ class SourceChatModel(BaseModel):
             RETURNING *
         """
         return await self.db.fetchrow(query, json.dumps(allowed_chains), rule_id)
-    
+
+    async def update_routing_rule_forwarding(
+        self,
+        rule_id: int,
+        forwarding_mode: str,
+        keyword_filters: Optional[List[str]] = None,
+    ) -> asyncpg.Record:
+        """Update forwarding mode and keywords for a routing rule."""
+        VALID_FORWARDING_MODES = {"tokens", "keywords", "everything"}
+        forwarding_mode = (forwarding_mode or "tokens").lower()
+        if forwarding_mode not in VALID_FORWARDING_MODES:
+            raise ValueError(f"Invalid forwarding mode '{forwarding_mode}'. Valid options: {VALID_FORWARDING_MODES}")
+
+        normalized_keywords = self._normalize_keywords(keyword_filters or [])
+
+        query = """
+            UPDATE routing_rules
+            SET forwarding_mode = $1,
+                keyword_filters = $2::jsonb
+            WHERE id = $3
+            RETURNING *
+        """
+        return await self.db.fetchrow(query, forwarding_mode, json.dumps(normalized_keywords), rule_id)
+
+    async def set_routing_rule_summary(self, rule_id: int, enabled: bool) -> asyncpg.Record:
+        """Toggle summary reply for a routing rule."""
+        query = """
+            UPDATE routing_rules
+            SET forward_summary = $1
+            WHERE id = $2
+            RETURNING *
+        """
+        return await self.db.fetchrow(query, enabled, rule_id)
+
+    async def set_routing_rule_media(self, rule_id: int, enabled: bool) -> asyncpg.Record:
+        """Toggle media forwarding for a routing rule."""
+        query = """
+            UPDATE routing_rules
+            SET forward_media = $1
+            WHERE id = $2
+            RETURNING *
+        """
+        return await self.db.fetchrow(query, enabled, rule_id)
+
+    async def set_routing_rule_rewrites(self, rule_id: int, rewrite_rules: List[Dict[str, str]]) -> asyncpg.Record:
+        """Replace rewrite rules for a routing rule."""
+        normalized = self._normalize_rewrite_rules(rewrite_rules)
+        query = """
+            UPDATE routing_rules
+            SET forward_rewrite_rules = $1::jsonb
+            WHERE id = $2
+            RETURNING *
+        """
+        return await self.db.fetchrow(query, json.dumps(normalized), rule_id)
+
+    async def remove_routing_rule_rewrite(self, rule_id: int, index: int) -> asyncpg.Record:
+        """Remove a single rewrite rule by index."""
+        query = """
+            UPDATE routing_rules
+            SET forward_rewrite_rules = (
+                SELECT COALESCE(jsonb_agg(value), '[]'::jsonb)
+                FROM (
+                    SELECT value, row_number() OVER () AS idx
+                    FROM jsonb_array_elements(forward_rewrite_rules) AS value
+                ) sub
+                WHERE sub.idx <> $1
+            )
+            WHERE id = $2
+            RETURNING *
+        """
+        return await self.db.fetchrow(query, index + 1, rule_id)
+
+    async def set_routing_rule_keywords(self, rule_id: int, keyword_filters: List[str]) -> asyncpg.Record:
+        """Replace keyword filters for a routing rule."""
+        normalized_keywords = self._normalize_keywords(keyword_filters)
+        query = """
+            UPDATE routing_rules
+            SET keyword_filters = $1::jsonb
+            WHERE id = $2
+            RETURNING *
+        """
+        return await self.db.fetchrow(query, json.dumps(normalized_keywords), rule_id)
+
+    async def remove_routing_rule_keyword(self, rule_id: int, keyword: str) -> asyncpg.Record:
+        """Remove a single keyword from the routing rule."""
+        keyword = keyword.strip().lower()
+        if not keyword:
+            raise ValueError("Keyword cannot be empty")
+
+        query = """
+            UPDATE routing_rules
+            SET keyword_filters = (
+                SELECT COALESCE(
+                    jsonb_agg(value),
+                    '[]'::jsonb
+                )
+                FROM jsonb_array_elements_text(keyword_filters) AS value
+                WHERE lower(value) <> $1
+            )
+            WHERE id = $2
+            RETURNING *
+        """
+        return await self.db.fetchrow(query, keyword, rule_id)
+
+    async def get_routing_rule(self, rule_id: int) -> Optional[asyncpg.Record]:
+        """Fetch a routing rule by id."""
+        query = "SELECT * FROM routing_rules WHERE id = $1"
+        return await self.db.fetchrow(query, rule_id)
+
+    async def get_routing_rule_for_pair(self, source_id: int, group_id: int) -> Optional[asyncpg.Record]:
+        """Fetch routing rule for a specific source / group pair."""
+        query = """
+            SELECT * FROM routing_rules
+            WHERE source_chat_id = $1 AND target_group_id = $2
+        """
+        return await self.db.fetchrow(query, source_id, group_id)
+
+    @staticmethod
+    def _normalize_keywords(keyword_filters: List[str]) -> List[str]:
+        """Normalize keyword filters to lowercase unique values."""
+        seen = set()
+        normalized: List[str] = []
+        for keyword in keyword_filters:
+            if not keyword:
+                continue
+            cleaned = keyword.strip().lower()
+            if cleaned and cleaned not in seen:
+                normalized.append(cleaned)
+                seen.add(cleaned)
+        return normalized
+
+    @staticmethod
+    def _normalize_rewrite_rules(rewrite_rules: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        """Normalize rewrite rules by stripping whitespace and removing empties."""
+        normalized: List[Dict[str, str]] = []
+        for rule in rewrite_rules:
+            if not isinstance(rule, dict):
+                continue
+            source_value = (rule.get("source") or "").strip()
+            target_value = (rule.get("target") or "").strip()
+            if not source_value:
+                continue
+            normalized.append({"source": source_value, "target": target_value})
+        return normalized
+
     async def toggle_enabled(self, source_id: int) -> bool:
         """Toggle source chat enabled status"""
         query = """

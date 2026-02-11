@@ -1,0 +1,28 @@
+    async def start_set_source_name(self, query: types.CallbackQuery, source_id: int, state: FSMContext):
+        """Start source name setting process"""
+        try:
+            source = await self.source_model.get_by_id(source_id)
+            if not source:
+                await query.answer("Source not found!")
+                return
+            
+            current_name = source.get('display_name') or source['name'] or source['title'] or f"Source {source['source_chat_id']}"
+            
+            await query.message.edit_text(
+                f"<b>✏️ Set Source Name</b>\n\n"
+                f"Current name: <b>{current_name}</b>\n\n"
+                f"Enter a new custom name for this source:\n\n"
+                f"Type /cancel to abort.",
+                reply_markup=self.keyboards.cancel_button(f"sources:source_details:{source_id}")
+            )
+            
+            await state.set_state(ManagementStates.source_set_name)
+            await state.update_data(
+                source_id=source_id,
+                message_id=query.message.message_id
+            )
+            
+        except Exception as e:
+            logger.error(f"Error starting source name setting: {e}")
+            await query.answer("❌ Error starting name setting")
+    

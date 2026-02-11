@@ -24,8 +24,8 @@ class BotModel(BaseModel):
     async def get_active_userbots(self) -> List[asyncpg.Record]:
         """Get all active userbots"""
         query = """
-            SELECT * FROM bots 
-            WHERE kind = 'userbot' AND status = 'active'
+            SELECT * FROM bots
+            WHERE kind = 'userbot'
             ORDER BY last_seen DESC
         """
         return await self.db.fetch(query)

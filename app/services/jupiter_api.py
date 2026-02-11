@@ -79,49 +79,52 @@ class JupiterAPIService:
 
                     # API returns array, find exact match
                     if isinstance(data, list) and len(data) > 0:
-                        # First result should be exact match
-                        token_data = data[0]
+                        # Find exact match by ID
+                        token_data = None
+                        for entry in data:
+                            if entry.get('id') == token_address:
+                                token_data = entry
+                                break
 
-                        # Verify it's the right token
-                        if token_data.get('id') == token_address:
+                        if token_data:
                             # Cache the result
                             self._cache[token_address] = token_data
                             self._cache_timestamps[token_address] = datetime.utcnow()
 
                             logger.debug(
-                                f"[JUPITER] ✓ {token_address[:8]}... "
+                                f"[JUPITER] ✓ {token_address} "
                                 f"MC: ${token_data.get('mcap', 0):,.2f} "
                                 f"Price: ${token_data.get('usdPrice', 0):.8f}"
                             )
                             return token_data
                         else:
-                            logger.warning(f"[JUPITER] Token ID mismatch for {token_address[:8]}...")
+                            logger.warning(f"[JUPITER] Token ID mismatch for {token_address}")
                             return None
                     else:
-                        logger.warning(f"[JUPITER] No data returned for {token_address[:8]}...")
+                        logger.warning(f"[JUPITER] No data returned for {token_address}")
                         return None
 
                 elif response.status == 404:
-                    logger.info(f"[JUPITER] Token {token_address[:8]}... not found (404)")
+                    logger.info(f"[JUPITER] Token {token_address} not found (404)")
                     return None
 
                 elif response.status == 429:
-                    logger.error(f"[JUPITER] Rate limited (429) for {token_address[:8]}...")
+                    logger.error(f"[JUPITER] Rate limited (429) for {token_address}")
                     return None
 
                 else:
                     text = await response.text()
                     logger.error(
-                        f"[JUPITER] Unexpected status {response.status} for {token_address[:8]}...: {text[:200]}"
+                        f"[JUPITER] Unexpected status {response.status} for {token_address}: {text[:200]}"
                     )
                     return None
 
         except asyncio.TimeoutError:
-            logger.error(f"[JUPITER] Timeout fetching {token_address[:8]}...")
+            logger.error(f"[JUPITER] Timeout fetching {token_address}")
         except aiohttp.ClientError as e:
-            logger.error(f"[JUPITER] Client error for {token_address[:8]}...: {e}")
+            logger.error(f"[JUPITER] Client error for {token_address}: {e}")
         except Exception as e:
-            logger.error(f"[JUPITER] Unexpected error for {token_address[:8]}...: {e}", exc_info=True)
+            logger.error(f"[JUPITER] Unexpected error for {token_address}: {e}", exc_info=True)
 
         return None
 

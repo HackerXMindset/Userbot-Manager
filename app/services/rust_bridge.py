@@ -1,50 +1,30 @@
 import logging
 from typing import Any, Dict, Optional
 
-import aiohttp
-
-from app.config import settings
+from app.services.dex_analytics_service import get_dex_analytics_service
 
 logger = logging.getLogger(__name__)
 
 
 class RustDexBridge:
-    """HTTP client for retrieving DexScreener payloads from the Rust service."""
+    """Compatibility wrapper that now uses the Python analytics service."""
 
-    def __init__(self, base_url: str):
-        self.base_url = base_url.rstrip('/')
+    def __init__(self, analytics_service=None) -> None:
+        self._service = analytics_service or get_dex_analytics_service()
 
     async def fetch_dex_payload(self, token_address: str) -> Optional[Dict[str, Any]]:
-        """Fetch DexScreener JSON for a token via the Rust HTTP endpoint."""
-        if not self.base_url:
-            logger.error("Rust analysis base URL is not configured.")
+        try:
+            return await self._service.fetch_solana_payload(token_address)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.error("Python analytics error for %s: %s", token_address, exc, exc_info=True)
             return None
 
-        url = f"{self.base_url}/dex/{token_address}"
-        timeout = aiohttp.ClientTimeout(total=12)
-
+    async def fetch_bnb_payload(self, token_address: str) -> Optional[Dict[str, Any]]:
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url) as response:
-                    if response.status != 200:
-                        body = await response.text()
-                        logger.error(
-                            "Rust analysis endpoint error %s for %s: %s",
-                            response.status,
-                            token_address,
-                            body,
-                        )
-                        return None
-
-                    return await response.json(content_type=None)
-
-        except aiohttp.ClientError as err:
-            logger.error("Rust analysis HTTP error for %s: %s", token_address, err)
-        except Exception as err:  # pragma: no cover - defensive logging
-            logger.error("Unexpected Rust analysis error for %s: %s", token_address, err)
-
-        return None
+            return await self._service.fetch_bnb_payload(token_address)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.error("Python analytics BNB error for %s: %s", token_address, exc, exc_info=True)
+            return None
 
 
-rust_dex_bridge = RustDexBridge(settings.rust_analysis_base_url)
-
+rust_dex_bridge = RustDexBridge()

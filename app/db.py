@@ -17,14 +17,57 @@ class Database:
         """Create connection pool"""
         async with self._lock:
             if self.pool is None:
-                self.pool = await asyncpg.create_pool(
-                    settings.supabase_pooler_url,
-                    min_size=settings.db_pool_min,
-                    max_size=settings.db_pool_max,
-                    command_timeout=60
-                )
-                logger.info("Database pool created")
-                await self.run_migrations()
+                base_min = max(1, settings.db_pool_min)
+                base_max = max(base_min, settings.db_pool_max)
+
+                # Try the configured max size first, then progressively smaller pools.
+                fallback_sizes = []
+                for candidate in (base_max, 8, 6, 4, 3, 2, 1):
+                    if candidate >= 1 and candidate not in fallback_sizes:
+                        fallback_sizes.append(candidate)
+
+                last_exc: Optional[Exception] = None
+                for max_size in fallback_sizes:
+                    min_size = min(base_min, max_size)
+                    try:
+                        self.pool = await asyncpg.create_pool(
+                            settings.supabase_pooler_url,
+                            min_size=min_size,
+                            max_size=max_size,
+                            command_timeout=60,
+                        )
+                    except (asyncio.TimeoutError, asyncpg.PostgresError) as exc:
+                        # Supabase session-mode poolers will raise either a timeout or a
+                        # MaxClientsInSessionMode error when too many connections are requested.
+                        message = str(exc)
+                        if isinstance(exc, asyncio.TimeoutError) or "MaxClientsInSessionMode" in message:
+                            logger.warning(
+                                "Database pool creation failed for max_size=%s (min_size=%s): %s",
+                                max_size,
+                                min_size,
+                                message,
+                            )
+                            last_exc = exc
+                            continue
+                        raise
+                    except Exception:
+                        # Any other error should bubble up immediately.
+                        raise
+                    else:
+                        if max_size != base_max:
+                            logger.warning(
+                                "Database pool max_size reduced from %s to %s due to connection limits",
+                                base_max,
+                                max_size,
+                            )
+                        logger.info("Database pool created (min_size=%s, max_size=%s)", min_size, max_size)
+                        await self.run_migrations()
+                        return
+
+                # All attempts failed – surface the last error for visibility.
+                if last_exc:
+                    raise last_exc
+                raise RuntimeError("Failed to create database pool for unknown reasons")
     
     async def disconnect(self):
         """Close connection pool"""

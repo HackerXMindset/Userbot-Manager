@@ -37,7 +37,6 @@ app/
 ├── 🏃 runner.py              # Application orchestrator
 ├── 📊 dex.py                 # DexScreener API integration
 ├── 📅 scheduler.py           # Job scheduling & quota management
-├── 🚨 alerts.py              # Alert system & thresholds
 ├── 🔄 events.py              # Event processing & routing
 ├── 📝 logging_conf.py        # Advanced logging configuration
 ├──
@@ -49,14 +48,12 @@ app/
 │       ├── groups.py
 │       ├── userbots.py
 │       ├── sources.py
-│       ├── alerts.py
 │       ├── pnl.py
 │       ├── notifications.py
 │       ├── auto_click.py
 │       ├── command_forwarding.py
 │       ├── curate_alpha.py
 │       ├── schedules.py
-│       ├── targets.py
 │       └── templates.py
 │
 ├── 🤖 userbot/
@@ -88,7 +85,6 @@ app/
     ├── notification.py
     ├── pnl_forwarding.py
     ├── source_chat.py
-    ├── target_alert_state.py
     ├── target.py
     └── template.py
 ```
@@ -153,7 +149,8 @@ telegram_token_bot/
 │   ├── 041_add_command_forwarding_rules.sql
 │   ├── 042_add_command_tracked_messages.sql
 │   ├── 043_add_phone_to_bots.sql
-│   └── 044_add_timestamp_posting_to_cmd_fwd.sql
+│   ├── 044_add_timestamp_posting_to_cmd_fwd.sql
+│   └── 061_remove_alert_system.sql
 ├── scripts/
 │   ├── add_complete_jupiter_template.py
 │   └── add_example_templates.py
@@ -162,8 +159,6 @@ telegram_token_bot/
 ├── tests/
 │   ├── test_auto_click.py
 │   └── test_batch.py
-├── tools/
-│   └── diagnostic_alerts.py
 ├── .env.example
 ├── .gitignore
 ├── helius_placeholders.md

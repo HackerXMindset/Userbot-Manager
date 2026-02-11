@@ -50,6 +50,7 @@ class CallHistoryService:
                 curated_alpha_rule_id=call_data.get('curated_alpha_rule_id'),
                 market_cap_at_call=call_data.get('market_cap_cents'),
                 call_job_id=call_data.get('call_job_id'),
+                forwarded_message_id=call_data.get('forwarded_message_id'),
             )
         except Exception as exc:
             logger.error(

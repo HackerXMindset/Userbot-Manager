@@ -30,12 +30,14 @@ class UserbotUtils:
         return list(set(matches))  # Remove duplicates
 
     def extract_bnb_addresses(self, text: str) -> List[str]:
-        """Extract BNB/BSC addresses from text"""
+        """Extract BNB/BSC addresses from text (first occurrence only to avoid holder wallet links)"""
         if not text:
             return []
 
-        matches = self.bnb_pattern.findall(text)
-        return list(set(matches))  # Remove duplicates
+        match = self.bnb_pattern.search(text)  # Get first match only
+        if match:
+            return [match.group(0)]
+        return []
 
     def extract_token_addresses(self, text: str) -> List[Tuple[str, str]]:
         """Extract all token addresses with blockchain tags from text
@@ -221,4 +223,3 @@ def truncate_text(text: str, max_length: int = 200, suffix: str = "...") -> str:
         return text or ""
     
     return text[:max_length - len(suffix)] + suffix
-

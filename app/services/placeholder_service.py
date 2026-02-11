@@ -1,15 +1,23 @@
 import logging
-from typing import Dict, Any, Optional
-from decimal import Decimal
+import re
+from typing import Dict, Any, Optional, List
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
+
+from pydantic import ValidationError
 
 from app.db import db
 from app.models.token import TokenModel
 from app.dex import get_dex_service
 from app.services.call_history_service import CallHistoryService
 from app.services.rust_bridge import rust_dex_bridge
+from app.services.models.bnb_payload import BnbTokenPayload
 
 logger = logging.getLogger(__name__)
+
+
+class PlaceholderDataUnavailable(Exception):
+    """Raised when external analytics fail and we should skip posting."""
 
 def format_market_cap(value: float) -> str:
     if value is None:
@@ -115,7 +123,45 @@ def get_map_value(mapping: Optional[Dict[str, Any]], *keys: str) -> Any:
     for key in keys:
         if key in mapping and mapping[key] is not None:
             return mapping[key]
-    return None
+
+
+def _infer_social_platform(value: str) -> str:
+    lowered = value.lower()
+    platform_map = {
+        "Twitter": ("twitter.com", "x.com"),
+        "Telegram": ("t.me", "telegram"),
+        "Discord": ("discord.gg", "discord.com"),
+        "GitHub": ("github.com",),
+        "Facebook": ("facebook.com",),
+        "Instagram": ("instagram.com",),
+        "LinkedIn": ("linkedin.com",),
+        "Reddit": ("reddit.com",),
+        "YouTube": ("youtube.com", "youtu.be"),
+        "Twitch": ("twitch.tv",),
+        "CoinGecko": ("coingecko.com",),
+        "CoinMarketCap": ("coinmarketcap.com",),
+        "Medium": ("medium.com", "medium"),
+        "Whitepaper": ("whitepaper", ".pdf"),
+        "Email": ("mailto:", "@"),
+    }
+
+    for label, needles in platform_map.items():
+        if any(needle in lowered for needle in needles):
+            return label
+
+    if lowered.startswith("http"):
+        return "Website"
+    if lowered.startswith("@"):
+        return "Handle"
+    return "Social"
+
+
+def _format_social_label(platform: Optional[str], value: str) -> str:
+    if platform:
+        trimmed = platform.strip()
+        if trimmed:
+            return trimmed.title()
+    return _infer_social_platform(value)
 
 def detect_social_platform(url: str) -> str:
     """Detects the social media platform from a given URL."""
@@ -171,6 +217,43 @@ class PlaceholderService:
         self.token_model = TokenModel(db)
         self.call_history_service = CallHistoryService()
         self._data_cache: Dict[str, Any] = {}
+        self._raw_values: Dict[str, Decimal] = {}
+        blockchain_value = (job_context.get('blockchain') or 'SOL').upper()
+        self.blockchain = blockchain_value
+        self._data_cache['blockchain'] = blockchain_value
+
+    @staticmethod
+    def _coerce_decimal(value: Any) -> Optional[Decimal]:
+        if value in (None, "", "N/A"):
+            return None
+        if isinstance(value, Decimal):
+            return value
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+
+    def _record_raw_decimal(self, key: str, value: Any) -> None:
+        if key not in {"jup_mcap", "bnb_market_cap", "pf_market_cap_usd"}:
+            return
+        decimal_value = self._coerce_decimal(value)
+        if decimal_value is not None:
+            self._raw_values[key] = decimal_value
+
+    def get_raw_decimal(self, key: str) -> Optional[Decimal]:
+        return self._raw_values.get(key)
+
+    def find_template_market_cap(self, template_text: Optional[str]) -> Optional[Decimal]:
+        if not template_text:
+            return None
+
+        for match in re.finditer(r"{([a-zA-Z0-9_]+)}", template_text):
+            placeholder_key = match.group(1)
+            raw_value = self.get_raw_decimal(placeholder_key)
+            if raw_value is not None:
+                return raw_value
+
+        return None
 
     async def get_all_placeholders(self) -> Dict[str, str]:
         """Fetch all data and return a dictionary of formatted placeholder values."""
@@ -227,7 +310,8 @@ class PlaceholderService:
             'dex_info_header': 'N/A',
             'dex_info_open_graph': 'N/A',
             'dex_info_websites': 'N/A',
-            'dex_info_socials': 'N/A',
+            'dex_info_socials': '',
+            'dex_bnb_social': 'N/A',
             'dex_boosts_active': 'N/A',
             'pf_mint': 'N/A',
             'pf_name': 'N/A',
@@ -367,10 +451,12 @@ class PlaceholderService:
             'vamped_token_image': 'N/A',
         }
 
+        placeholders['blockchain'] = self.blockchain
+
         for i in range(1, 6):
             placeholders[f'dex_info_website_{i}'] = 'N/A'
-            placeholders[f'dex_info_social_{i}_platform'] = 'N/A'
-            placeholders[f'dex_info_social_{i}_handle'] = 'N/A'
+            placeholders[f'dex_info_social_{i}_platform'] = ''
+            placeholders[f'dex_info_social_{i}_handle'] = ''
 
         stat_fields = [
             'price_change',
@@ -414,9 +500,8 @@ class PlaceholderService:
 
         # Fetch data from Rust service first
         db_token = await self.token_model.get_by_address(self.token_address)
-        rust_payload = await rust_dex_bridge.fetch_dex_payload(self.token_address)
 
-        dex_pairs = []
+        dex_pairs: List[Dict[str, Any]] = []
         dex_orders = []
         pump_fun_payload = None
         jupiter_payload = None
@@ -424,23 +509,163 @@ class PlaceholderService:
         holders_payload = None
         supply_ui_amount = None
         dev_token_holding = None
-        if rust_payload:
-            dex_pairs = rust_payload.get('pairs') or []
-            dex_orders = rust_payload.get('orders') or []
-            pump_fun_payload = rust_payload.get('pump_fun')
-            jupiter_payload = rust_payload.get('jupiter')
-            dev_sol_balance = rust_payload.get('dev_sol_balance')
-            holders_payload = rust_payload.get('holders')
-            supply_ui_amount = rust_payload.get('supply_ui_amount')
-            dev_token_holding = rust_payload.get('dev_token_holding')
+        bnb_payload: Optional[BnbTokenPayload] = None
+        rust_payload: Optional[Dict[str, Any]] = None
+
+        if self.blockchain == 'BNB':
+            raw_bnb = await rust_dex_bridge.fetch_bnb_payload(self.token_address)
+            if raw_bnb:
+                try:
+                    bnb_payload = BnbTokenPayload.parse_obj(raw_bnb)
+                    self._data_cache['bnb_payload'] = bnb_payload.dict(by_alias=True)
+                    summary_pairs = [
+                        summary.dict(by_alias=True)
+                        for summary in (bnb_payload.dexscreener_token_summary or [])
+                    ]
+                    self._data_cache['bnb_token_summary'] = summary_pairs
+                    if isinstance(bnb_payload.dexscreener_data, dict):
+                        dex_pairs = bnb_payload.dexscreener_data.get('pairs') or []
+                    if bnb_payload.dexscreener_orders_data:
+                        dex_orders = bnb_payload.dexscreener_orders_data
+                except ValidationError as err:
+                    logger.error(
+                        "BNB payload validation error for %s: %s",
+                        self.token_address,
+                        err,
+                    )
+            else:
+                logger.warning("BNB payload unavailable from Rust for %s", self.token_address)
+        else:
+            rust_payload = await rust_dex_bridge.fetch_dex_payload(self.token_address)
+
+            if rust_payload:
+                dex_pairs = rust_payload.get('pairs') or []
+                dex_orders = rust_payload.get('orders') or []
+                pump_fun_payload = rust_payload.get('pump_fun')
+                jupiter_payload = rust_payload.get('jupiter')
+                dev_sol_balance = rust_payload.get('dev_sol_balance')
+                holders_payload = rust_payload.get('holders')
+                supply_ui_amount = rust_payload.get('supply_ui_amount')
+                dev_token_holding = rust_payload.get('dev_token_holding')
+
+        if bnb_payload is None and self.blockchain == 'BNB':
+            # Ensure placeholder cache contains empty defaults for downstream phases
+            self._data_cache.setdefault('bnb_payload', None)
+            self._data_cache.setdefault('bnb_token_summary', [])
+
+        if bnb_payload:
+            placeholders['bnb_token_name'] = bnb_payload.name or 'N/A'
+            placeholders['bnb_token_symbol'] = bnb_payload.symbol or 'N/A'
+            placeholders['bnb_price'] = format_number(bnb_payload.price)
+            placeholders['bnb_change_24h'] = format_number(bnb_payload.change_24h)
+            placeholders['bnb_change_4h'] = format_number(bnb_payload.change_4h)
+            placeholders['bnb_change_1h'] = format_number(bnb_payload.change_1h)
+            placeholders['bnb_change_5m'] = format_number(bnb_payload.change_5m)
+            placeholders['bnb_market_cap'] = format_market_cap(bnb_payload.market_cap)
+            self._record_raw_decimal('bnb_market_cap', bnb_payload.market_cap)
+            placeholders['bnb_liquidity'] = format_market_cap(bnb_payload.liquidity)
+            placeholders['bnb_volume_24h'] = format_market_cap(bnb_payload.volume_24h)
+            placeholders['bnb_holders'] = format_int(bnb_payload.holders)
+            placeholders['bnb_top10_share'] = (
+                format_number(bnb_payload.top10_hold_percentage, decimals=2)
+                if bnb_payload.top10_hold_percentage is not None
+                else 'N/A'
+            )
+            placeholders['bnb_dev_holding_ratio'] = (
+                format_number(bnb_payload.dev_holding_ratio * 100.0, decimals=2)
+                if bnb_payload.dev_holding_ratio is not None
+                else 'N/A'
+            )
+            placeholders['bnb_risk_level'] = str(bnb_payload.risk_level) if bnb_payload.risk_level is not None else 'N/A'
+            placeholders['bnb_chain_name'] = bnb_payload.chain_name or 'N/A'
+            placeholders['bnb_token_logo_url'] = bnb_payload.token_logo_url or 'N/A'
+            placeholders['bnb_holder_maps_url'] = bnb_payload.holder_maps_url or 'N/A'
+            placeholders['bnb_bubble_maps_url'] = bnb_payload.bubble_maps_url or 'N/A'
+            placeholders['dex_bnb_social'] = bnb_payload.dex_socials or 'N/A'
+
+            summary_pairs = bnb_payload.dexscreener_token_summary or []
+            placeholders['bnb_summary_count'] = len(summary_pairs)
+            for idx in range(1, 6):
+                placeholders[f'bnb_summary_{idx}_dex_id'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_chain_id'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_base_symbol'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_quote_symbol'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_price_usd'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_price_native'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_volume_h24'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_volume_h6'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_volume_h1'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_volume_m5'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_price_change_h24'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_price_change_h6'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_price_change_h1'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_price_change_m5'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_liquidity_usd'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_liquidity_base'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_liquidity_quote'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_fdv'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_market_cap'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_pair_address'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_url'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_pair_created_iso'] = 'N/A'
+                placeholders[f'bnb_summary_{idx}_pair_created_ago'] = 'N/A'
+
+            for idx, summary in enumerate(summary_pairs[:5], start=1):
+                placeholders[f'bnb_summary_{idx}_dex_id'] = summary.dex_id or 'N/A'
+                placeholders[f'bnb_summary_{idx}_chain_id'] = summary.chain_id or 'N/A'
+                base_symbol = (
+                    (summary.base_token or {}).get('symbol')
+                    if summary.base_token
+                    else None
+                )
+                quote_symbol = (
+                    (summary.quote_token or {}).get('symbol')
+                    if summary.quote_token
+                    else None
+                )
+                placeholders[f'bnb_summary_{idx}_base_symbol'] = base_symbol or 'N/A'
+                placeholders[f'bnb_summary_{idx}_quote_symbol'] = quote_symbol or 'N/A'
+                placeholders[f'bnb_summary_{idx}_price_usd'] = summary.price_usd or 'N/A'
+                placeholders[f'bnb_summary_{idx}_price_native'] = summary.price_native or 'N/A'
+
+                volume = summary.volume or {}
+                placeholders[f'bnb_summary_{idx}_volume_h24'] = format_market_cap(volume.get('h24'))
+                placeholders[f'bnb_summary_{idx}_volume_h6'] = format_market_cap(volume.get('h6'))
+                placeholders[f'bnb_summary_{idx}_volume_h1'] = format_market_cap(volume.get('h1'))
+                placeholders[f'bnb_summary_{idx}_volume_m5'] = format_market_cap(volume.get('m5'))
+
+                price_change = summary.price_change or {}
+                placeholders[f'bnb_summary_{idx}_price_change_h24'] = format_number(price_change.get('h24'), decimals=2)
+                placeholders[f'bnb_summary_{idx}_price_change_h6'] = format_number(price_change.get('h6'), decimals=2)
+                placeholders[f'bnb_summary_{idx}_price_change_h1'] = format_number(price_change.get('h1'), decimals=2)
+                placeholders[f'bnb_summary_{idx}_price_change_m5'] = format_number(price_change.get('m5'), decimals=2)
+
+            for idx, summary in enumerate(summary_pairs[:5], start=1):
+                liquidity = summary.liquidity or {}
+                placeholders[f'bnb_summary_{idx}_liquidity_usd'] = format_market_cap(liquidity.get('usd'))
+                placeholders[f'bnb_summary_{idx}_liquidity_base'] = format_number(liquidity.get('base'))
+                placeholders[f'bnb_summary_{idx}_liquidity_quote'] = format_number(liquidity.get('quote'))
+                placeholders[f'bnb_summary_{idx}_fdv'] = format_market_cap(summary.fdv)
+                placeholders[f'bnb_summary_{idx}_market_cap'] = format_market_cap(summary.market_cap)
+                placeholders[f'bnb_summary_{idx}_pair_address'] = summary.pair_address or 'N/A'
+                placeholders[f'bnb_summary_{idx}_url'] = summary.url or 'N/A'
+                ts_meta = format_timestamp_value(summary.pair_created_at)
+                placeholders[f'bnb_summary_{idx}_pair_created_iso'] = ts_meta['iso']
+                placeholders[f'bnb_summary_{idx}_pair_created_ago'] = ts_meta['ago']
 
         if not dex_pairs:
-            logger.warning(
-                "Rust dex payload unavailable for %s, falling back to internal client",
-                self.token_address,
-            )
-            dex_service = get_dex_service()
-            dex_pairs = await dex_service._fetch_token_data(self.token_address) or []
+            if self.blockchain == 'BNB':
+                logger.warning(
+                    "BNB token %s has no Dex pairs from Rust payload",
+                    self.token_address,
+                )
+            else:
+                logger.warning(
+                    "Rust dex payload unavailable for %s, falling back to internal client",
+                    self.token_address,
+                )
+                dex_service = get_dex_service()
+                dex_pairs = await dex_service._fetch_token_data(self.token_address) or []
 
         current_mc = None
 
@@ -543,14 +768,31 @@ class PlaceholderService:
 
             socials = info.get('socials') or []
             if socials:
-                formatted_socials = []
+                formatted_socials: List[str] = []
                 for idx, entry in enumerate(socials[:5], start=1):
-                    platform = entry.get('platform') or 'N/A'
-                    handle = entry.get('handle') or 'N/A'
-                    placeholders[f'dex_info_social_{idx}_platform'] = platform
-                    placeholders[f'dex_info_social_{idx}_handle'] = handle
-                    formatted_socials.append(f"{platform}: {handle}")
-                placeholders['dex_info_socials'] = '\n'.join(formatted_socials)
+                    raw_value = (
+                        entry.get('handle')
+                        or entry.get('url')
+                        or entry.get('value')
+                        or entry.get('username')
+                    )
+                    if not raw_value:
+                        continue
+
+                    label = _format_social_label(entry.get('platform'), raw_value)
+                    link = entry.get('url') or raw_value
+
+                    placeholders[f'dex_info_social_{idx}_platform'] = label
+                    placeholders[f'dex_info_social_{idx}_handle'] = raw_value
+                    placeholders[f'dex_info_social_{idx}_url'] = link
+
+                    formatted_socials.append(f"{label}: {raw_value}")
+
+                if formatted_socials:
+                    joined = '\n'.join(formatted_socials)
+                    placeholders['dex_info_socials'] = joined
+                    if self.blockchain == 'BNB':
+                        placeholders['dex_bnb_social'] = joined
 
             boosts = pair_data.get('boosts') or {}
             if boosts:
@@ -689,6 +931,7 @@ class PlaceholderService:
             placeholders['pf_total_supply'] = format_int(pf.get('total_supply'))
             placeholders['pf_market_cap_sol'] = format_number(pf.get('market_cap'))
             placeholders['pf_market_cap_usd'] = format_market_cap(pf.get('usd_market_cap'))
+            self._record_raw_decimal('pf_market_cap_usd', pf.get('usd_market_cap'))
             placeholders['pf_ath_market_cap'] = format_market_cap(pf.get('ath_market_cap'))
             placeholders['pf_real_sol_reserves'] = format_number(pf.get('real_sol_reserves'))
             placeholders['pf_virtual_sol_reserves'] = format_number(pf.get('virtual_sol_reserves'))
@@ -773,7 +1016,9 @@ class PlaceholderService:
             placeholders['jup_circ_supply'] = format_number(get_map_value(jup, 'circ_supply', 'circSupply'), decimals=2)
             placeholders['jup_total_supply'] = format_number(get_map_value(jup, 'total_supply', 'totalSupply'), decimals=2)
             placeholders['jup_usd_price'] = format_number(get_map_value(jup, 'usd_price', 'usdPrice'), decimals=10)
-            placeholders['jup_mcap'] = format_market_cap(get_map_value(jup, 'mcap'))
+            jup_mcap_value = get_map_value(jup, 'mcap')
+            placeholders['jup_mcap'] = format_market_cap(jup_mcap_value)
+            self._record_raw_decimal('jup_mcap', jup_mcap_value)
             placeholders['jup_fdv'] = format_market_cap(get_map_value(jup, 'fdv'))
             placeholders['jup_liquidity'] = format_market_cap(get_map_value(jup, 'liquidity'))
             placeholders['jup_bonding_curve'] = format_number(get_map_value(jup, 'bonding_curve', 'bondingCurve'))
@@ -1063,6 +1308,16 @@ class PlaceholderService:
         # Add links
         placeholders['defined_link'] = f"https://www.defined.fi/sol/{self.token_address}"
         placeholders['dexscreener_link'] = f"https://dexscreener.com/solana/{self.token_address}"
+
+        # Replace placeholder "N/A" markers with empty strings so templates show nothing when data is unavailable.
+        for key, value in list(placeholders.items()):
+            if isinstance(value, str) and value == 'N/A':
+                placeholders[key] = ''
+
+        if self.blockchain == 'BNB' and bnb_payload is None and not dex_pairs:
+            raise PlaceholderDataUnavailable(
+                f"BNB analytics unavailable for {self.token_address}; skipping template render."
+            )
 
         return placeholders
 

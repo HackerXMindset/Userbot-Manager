@@ -1,0 +1,34 @@
+    async def start_add_source(self, query: types.CallbackQuery):
+        """Start adding a source - select group"""
+        try:
+            groups = await self.get_cached_groups()
+            
+            if not groups:
+                await query.answer("❌ No groups available. Add groups first.")
+                return
+            
+            text = "<b>➕ Add Source Chat</b>\n\n"
+            text += "Select which group this source should forward to:"
+            
+            keyboard_rows = []
+            for group in groups:
+                group_name = group.get('display_name') or group['title'] or f"Chat {group['tg_chat_id']}"
+                keyboard_rows.append([
+                    InlineKeyboardButton(
+                        text=group_name,
+                        callback_data=f"source_group:{group['id']}"
+                    )
+                ])
+            
+            keyboard_rows.append([
+                InlineKeyboardButton(text="🔙 Back", callback_data="menu:sources")
+            ])
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+            
+            await query.message.edit_text(text, reply_markup=keyboard)
+            
+        except Exception as e:
+            logger.error(f"Error starting add source: {e}")
+            await query.answer("❌ Error starting source setup")
+    

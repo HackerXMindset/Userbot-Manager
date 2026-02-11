@@ -61,7 +61,10 @@ class TokenModel(BaseModel):
             query = """
                 UPDATE tokens_tracked 
                 SET last_mc = $1, 
-                    first_seen_mc = COALESCE(first_seen_mc, $1),
+                    first_seen_mc = CASE
+                        WHEN first_seen_mc IS NULL OR first_seen_mc <= 0 THEN $1
+                        ELSE first_seen_mc
+                    END,
                     ticker = COALESCE($3, ticker),
                     last_checked_at = NOW()
                 WHERE id = $2
@@ -74,7 +77,10 @@ class TokenModel(BaseModel):
             query_fallback = """
                 UPDATE tokens_tracked 
                 SET last_mc = $1, 
-                    first_seen_mc = COALESCE(first_seen_mc, $1),
+                    first_seen_mc = CASE
+                        WHEN first_seen_mc IS NULL OR first_seen_mc <= 0 THEN $1
+                        ELSE first_seen_mc
+                    END,
                     last_checked_at = NOW()
                 WHERE id = $2
                 RETURNING *
@@ -126,10 +132,63 @@ class TokenModel(BaseModel):
     async def cleanup_old_tokens(self, days: int = 30) -> int:
         """Remove old inactive tokens"""
         query = """
-            DELETE FROM tokens_tracked 
-            WHERE status = 'stopped' 
+            DELETE FROM tokens_tracked
+            WHERE status = 'stopped'
             AND last_checked_at < NOW() - INTERVAL '%s days'
             RETURNING id
         """
         results = await self.db.fetch(query % days)
         return len(results)
+
+    # Gain alert system methods
+
+    async def update_tier(self, token_id: int, tier: str, next_poll_at) -> None:
+        """Update token's current tier and next poll time"""
+        query = """
+            UPDATE tokens_tracked
+            SET current_tier = $1, next_poll_at = $2
+            WHERE id = $3
+        """
+        await self.db.execute(query, tier, next_poll_at, token_id)
+
+    async def update_last_alert_mc(self, token_id: int, alert_mc: Decimal) -> None:
+        """Update last alert market cap"""
+        query = "UPDATE tokens_tracked SET last_alert_mc = $1 WHERE id = $2"
+        await self.db.execute(query, alert_mc, token_id)
+
+    async def set_stop_reason(self, token_id: int, reason: str | None) -> None:
+        """Set stop reason for a token (None to clear)"""
+        query = "UPDATE tokens_tracked SET stop_reason = $1 WHERE id = $2"
+        await self.db.execute(query, reason, token_id)
+
+    async def update_dex_refresh_time(self, token_id: int) -> None:
+        """Update DexScreener refresh timestamp"""
+        query = "UPDATE tokens_tracked SET dex_screener_refreshed_at = NOW() WHERE id = $1"
+        await self.db.execute(query, token_id)
+
+    async def get_tokens_by_next_poll(self, limit: int = 100) -> List[asyncpg.Record]:
+        """Get active tokens ordered by next poll time for scheduler"""
+        query = """
+            SELECT * FROM tokens_tracked
+            WHERE status = 'active'
+            AND next_poll_at IS NOT NULL
+            AND next_poll_at <= NOW()
+            ORDER BY next_poll_at ASC
+            LIMIT $1
+        """
+        return await self.db.fetch(query, limit)
+
+    async def get_all_active_scheduled_tokens(self) -> List[asyncpg.Record]:
+        """Get all active tokens with polling schedules for scheduler initialization"""
+        query = """
+            SELECT * FROM tokens_tracked
+            WHERE status = 'active'
+            AND next_poll_at IS NOT NULL
+            ORDER BY next_poll_at ASC
+        """
+        return await self.db.fetch(query)
+
+    async def update_original_message_id(self, token_id: int, message_id: int) -> None:
+        """Store the original message ID for reply support"""
+        query = "UPDATE tokens_tracked SET original_message_id = $1 WHERE id = $2"
+        await self.db.execute(query, message_id, token_id)
